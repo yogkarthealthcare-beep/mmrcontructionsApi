@@ -5,36 +5,64 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import multer from "multer";
 import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
+import { v2 as cloudinary } from "cloudinary";
+import { Readable } from "stream";
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
 
-// ─── Uploads folder ───────────────────────────────────────────
-const uploadDir = path.join(__dirname, "uploads");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const sub = file.fieldname === "profile_photo" ? "profiles"
-              : file.fieldname === "payment_proof"  ? "proofs"
-              : "documents";
-    const dir = path.join(uploadDir, sub);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${Math.round(Math.random()*1e6)}${path.extname(file.originalname)}`);
-  },
+// ─── Cloudinary Config ────────────────────────────────────────
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
+
+// ─── Folder mapping per fieldname ─────────────────────────────
+const CLOUDINARY_FOLDER = {
+  profile_photo: "mmr/profiles",
+  payment_proof: "mmr/proofs",
+  pan_card:      "mmr/documents",
+  aadhar_card:   "mmr/documents",
+  document:      "mmr/documents",   // generic upload-doc
+};
+
+/**
+ * Buffer ko Cloudinary par upload karo
+ * @param {Buffer} buffer
+ * @param {string} folder  - Cloudinary folder
+ * @param {string} filename - original file name (extension ke liye)
+ * @returns {Promise<{url: string, public_id: string}>}
+ */
+function uploadToCloudinary(buffer, folder, filename) {
+  return new Promise((resolve, reject) => {
+    const ext         = path.extname(filename).toLowerCase().replace(".", "");
+    const isPdf       = ext === "pdf";
+    const resourceType = isPdf ? "raw" : "image";
+
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        resource_type: resourceType,
+        public_id: `${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+        format: isPdf ? "pdf" : undefined,
+      },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve({ url: result.secure_url, public_id: result.public_id });
+      }
+    );
+
+    Readable.from(buffer).pipe(stream);
+  });
+}
+
+// ─── Multer — memory storage (disk nahi, seedha buffer mein) ──
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
   fileFilter: (req, file, cb) => {
     const allowed = /jpeg|jpg|png|pdf/;
@@ -219,6 +247,7 @@ app.post("/api/auth/register", upload.fields([
       father_name, mother_name, spouse_name,
       mobile_no, alternate_mobile, email,
       pan_number, aadhar_number, otp_code,
+      password,                                   // ← FIX: password field add kiya
       // Address
       perm_address_line1, perm_city, perm_state, perm_pin,
       local_address_line1, local_city, local_pin,
@@ -270,6 +299,9 @@ app.post("/api/auth/register", upload.fields([
       sponsorUserId = sponsor.user_id;
     }
 
+    // ── Hash password if provided ──
+    const passwordHash = password ? await bcrypt.hash(password, 12) : null;
+
     // ── Insert User ──
     const [newUser] = await sql`
       INSERT INTO users (
@@ -277,12 +309,14 @@ app.post("/api/auth/register", upload.fields([
         father_name, mother_name, spouse_name,
         mobile_no, alternate_mobile, email,
         pan_number, aadhar_number, is_otp_verified,
+        password_hash,
         sponsor_user_id, account_status
       ) VALUES (
         ${user_type}, ${full_name}, ${date_of_birth || null}, ${gender || null},
         ${father_name || null}, ${mother_name || null}, ${spouse_name || null},
         ${mobile_no}, ${alternate_mobile || null}, ${email || null},
         ${pan_number.toUpperCase()}, ${aadhar_number}, TRUE,
+        ${passwordHash},
         ${sponsorUserId}, 'Pending'
       ) RETURNING user_id, full_name, mobile_no, user_type`;
 
@@ -319,19 +353,21 @@ app.post("/api/auth/register", upload.fields([
                 ${nominee_pan || null}, ${nominee_aadhar || null}, ${nominee_relationship || null})`;
     }
 
-    // ── Documents ──
-    const docInserts = [];
-    if (req.files?.pan_card?.[0])
-      docInserts.push({ type: "PANCard",      path: req.files.pan_card[0].path });
-    if (req.files?.aadhar_card?.[0])
-      docInserts.push({ type: "AadharCard",   path: req.files.aadhar_card[0].path });
-    if (req.files?.profile_photo?.[0])
-      docInserts.push({ type: "ProfilePhoto", path: req.files.profile_photo[0].path });
+    // ── Documents — Cloudinary upload ──
+    const fileFields = [
+      { field: "pan_card",      type: "PANCard"      },
+      { field: "aadhar_card",   type: "AadharCard"   },
+      { field: "profile_photo", type: "ProfilePhoto" },
+    ];
 
-    for (const doc of docInserts) {
+    for (const { field, type } of fileFields) {
+      const f = req.files?.[field]?.[0];
+      if (!f) continue;
+      const folder = CLOUDINARY_FOLDER[field] || "mmr/documents";
+      const { url, public_id } = await uploadToCloudinary(f.buffer, folder, f.originalname);
       await sql`
-        INSERT INTO user_documents (user_id, document_type, file_path)
-        VALUES (${userId}, ${doc.type}, ${doc.path})`;
+        INSERT INTO user_documents (user_id, document_type, file_path, cloudinary_public_id)
+        VALUES (${userId}, ${type}, ${url}, ${public_id})`;
     }
 
     // ── Mark OTP used ──
@@ -651,18 +687,24 @@ app.post("/api/profile/upload-doc",
       if (!["PANCard","AadharCard","ProfilePhoto","Other"].includes(document_type))
         return err(res, "Invalid document_type", 400);
 
-      // Deactivate old doc of same type
+      // Cloudinary par upload karo
+      const folder = CLOUDINARY_FOLDER.document;
+      const { url, public_id } = await uploadToCloudinary(
+        req.file.buffer, folder, req.file.originalname
+      );
+
+      // Purana doc deactivate karo
       await sql`
         UPDATE user_documents SET is_active = FALSE
         WHERE user_id = ${req.user.user_id} AND document_type = ${document_type}`;
 
       const [doc] = await sql`
-        INSERT INTO user_documents (user_id, document_type, file_path, file_name, file_size_kb)
-        VALUES (${req.user.user_id}, ${document_type}, ${req.file.path},
-                ${req.file.originalname}, ${Math.round(req.file.size / 1024)})
+        INSERT INTO user_documents (user_id, document_type, file_path, cloudinary_public_id, file_name, file_size_kb)
+        VALUES (${req.user.user_id}, ${document_type}, ${url},
+                ${public_id}, ${req.file.originalname}, ${Math.round(req.file.size / 1024)})
         RETURNING document_id`;
 
-      return ok(res, { document_id: doc.document_id }, "Document uploaded", 201);
+      return ok(res, { document_id: doc.document_id, url }, "Document uploaded", 201);
     } catch (e) {
       return err(res, e.message);
     }
@@ -842,15 +884,20 @@ app.post("/api/bookings/:id/upload-proof",
         WHERE booking_id = ${req.params.id} AND user_id = ${req.user.user_id}`;
       if (!booking) return err(res, "Booking not found", 404);
 
+      // Cloudinary upload
+      const { url, public_id } = await uploadToCloudinary(
+        req.file.buffer, CLOUDINARY_FOLDER.payment_proof, req.file.originalname
+      );
+
       await sql`
-        INSERT INTO booking_payment_proofs (booking_id, file_path)
-        VALUES (${booking.booking_id}, ${req.file.path})`;
+        INSERT INTO booking_payment_proofs (booking_id, file_path, cloudinary_public_id)
+        VALUES (${booking.booking_id}, ${url}, ${public_id})`;
 
       await sql`
         UPDATE bookings SET booking_status = 'PaymentPending', updated_at = NOW()
         WHERE booking_id = ${booking.booking_id}`;
 
-      return ok(res, {}, "Payment proof uploaded");
+      return ok(res, { url }, "Payment proof uploaded");
     } catch (e) {
       return err(res, e.message);
     }
@@ -915,15 +962,20 @@ app.post("/api/emi/:emiId/upload-proof",
         WHERE e.emi_id = ${req.params.emiId} AND b.user_id = ${req.user.user_id}`;
       if (!emi) return err(res, "EMI not found", 404);
 
+      // Cloudinary upload
+      const { url, public_id } = await uploadToCloudinary(
+        req.file.buffer, CLOUDINARY_FOLDER.payment_proof, req.file.originalname
+      );
+
       await sql`
-        INSERT INTO emi_payment_proofs (emi_id, file_path, payment_mode, reference_no)
-        VALUES (${emi.emi_id}, ${req.file.path}, ${payment_mode || null}, ${reference_no || null})`;
+        INSERT INTO emi_payment_proofs (emi_id, file_path, cloudinary_public_id, payment_mode, reference_no)
+        VALUES (${emi.emi_id}, ${url}, ${public_id}, ${payment_mode || null}, ${reference_no || null})`;
 
       await sql`
         UPDATE emi_schedules SET emi_status = 'ProofSubmitted', updated_at = NOW()
         WHERE emi_id = ${emi.emi_id}`;
 
-      return ok(res, {}, "EMI proof submitted. Awaiting admin confirmation.");
+      return ok(res, { url }, "EMI proof submitted. Awaiting admin confirmation.");
     } catch (e) {
       return err(res, e.message);
     }
