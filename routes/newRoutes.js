@@ -217,22 +217,26 @@ router.post('/auth/register', async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 router.post('/auth/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password)
-      return res.status(400).json({ success: false, message: 'Email aur password required hain' });
+    const { identifier, email, mobile_no, password } = req.body;
+    const loginId = String(identifier || email || mobile_no || '').trim();
+    const loginEmail = loginId.includes('@') ? loginId.toLowerCase() : null;
+    const loginMobile = loginEmail ? null : String(mobile_no || loginId).replace(/\D/g, '');
 
-    if (rateLimit(`login:${email}`, 5))
+    if ((!loginEmail && !loginMobile) || !password)
+      return res.status(400).json({ success: false, message: 'Email/phone and password required' });
+
+    if (rateLimit(`login:${loginEmail || loginMobile}`, 5))
       return res.status(429).json({ success: false, message: 'Too many login attempts. 15 min baad try karein.' });
 
     const [user] = await sql`
-      SELECT id, full_name, email, password_hash, is_email_verified, account_status, user_type, role
-      FROM users WHERE email = ${email.toLowerCase()}`;
+      SELECT user_id, full_name, email, mobile_no, password_hash,
+             account_status, user_type, member_id, invitation_code
+      FROM users
+      WHERE (${loginEmail} IS NOT NULL AND email = ${loginEmail})
+         OR (${loginMobile} IS NOT NULL AND mobile_no = ${loginMobile})`;
 
     if (!user)
       return res.status(401).json({ success: false, message: 'Email ya password galat hai' });
-
-    if (!user.is_email_verified)
-      return res.status(403).json({ success: false, message: 'Email verify nahi hui hai। Pehle email verify karein।', code: 'EMAIL_NOT_VERIFIED' });
 
     if (user.account_status === 'Pending')
       return res.status(403).json({ success: false, message: 'Account abhi pending approval mein hai।', code: 'PENDING_APPROVAL' });
@@ -244,16 +248,40 @@ router.post('/auth/login', async (req, res) => {
     if (!valid)
       return res.status(401).json({ success: false, message: 'Email ya password galat hai' });
 
-    const token = jwt.sign(
-      { user_id: user.id, email: user.email, role: user.role || user.user_type },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' }
-    );
+    const payload = {
+      user_id: user.user_id,
+      user_type: user.user_type,
+      member_id: user.member_id,
+      mobile_no: user.mobile_no,
+      email: user.email,
+    };
+    const token = jwt.sign(payload, process.env.JWT_SECRET, {
+      expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+    });
+    const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, {
+      expiresIn: '30d',
+    });
 
-    res.json({ success: true, token, user: { id: user.id, full_name: user.full_name, email: user.email, user_type: user.user_type } });
+    res.json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        token,
+        refresh_token: refreshToken,
+        user: {
+          user_id: user.user_id,
+          full_name: user.full_name,
+          email: user.email,
+          mobile_no: user.mobile_no,
+          user_type: user.user_type,
+          member_id: user.member_id,
+          invitation_code: user.invitation_code,
+        },
+      },
+    });
   } catch (e) {
     console.error('[login]', e);
-    res.status(500).json({ success: false, message: 'Login failed' });
+    res.status(500).json({ success: false, message: e.message || 'Login failed' });
   }
 });
 
