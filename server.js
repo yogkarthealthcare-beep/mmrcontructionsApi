@@ -113,6 +113,8 @@ const ok  = (res, data, msg = "Success", status = 200) =>
 const err = (res, msg = "Server error", status = 500) =>
   res.status(status).json({ success: false, message: msg });
 
+const adminJwtSecret = () => process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
+
 // Generate 6-digit OTP
 const genOTP = () => String(Math.floor(100000 + Math.random() * 900000));
 
@@ -162,7 +164,7 @@ const verifyAdminToken = (req, res, next) => {
   if (!auth || !auth.startsWith("Bearer "))
     return err(res, "No admin token", 401);
   try {
-    req.admin = jwt.verify(auth.split(" ")[1], process.env.JWT_ADMIN_SECRET);
+    req.admin = jwt.verify(auth.split(" ")[1], adminJwtSecret());
     next();
   } catch {
     return err(res, "Invalid or expired admin token", 401);
@@ -734,7 +736,7 @@ app.post("/api/admin/auth/login", async (req, res) => {
     const payload = { admin_id: admin.admin_id, email: admin.email,
                       full_name: admin.full_name, role: admin.role };
 
-    const token        = jwt.sign(payload, process.env.JWT_ADMIN_SECRET,   { expiresIn: "8h" });
+    const token        = jwt.sign(payload, adminJwtSecret(),               { expiresIn: "8h" });
     const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, { expiresIn: "1d" });
 
     // Log session
@@ -763,7 +765,7 @@ app.post("/api/admin/auth/refresh", async (req, res) => {
     const token   = jwt.sign(
       { admin_id: decoded.admin_id, email: decoded.email,
         full_name: decoded.full_name, role: decoded.role },
-      process.env.JWT_ADMIN_SECRET, { expiresIn: "8h" }
+      adminJwtSecret(), { expiresIn: "8h" }
     );
     return ok(res, { token }, "Token refreshed");
   } catch {
