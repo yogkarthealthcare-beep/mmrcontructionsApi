@@ -15,13 +15,19 @@ dotenv.config();
 
 const app = express();
 
-const allowedOrigins = [
+const defaultAllowedOrigins = [
   "http://localhost:4200",
   "http://127.0.0.1:4200",
   "https://mmrconstructions.in",
   "https://www.mmrconstructions.in",
-  
+  "https://mmrconstructions-adeb0.web.app",
+  "https://mmrconstructions-adeb0.firebaseapp.com",
 ];
+const envAllowedOrigins = (process.env.FRONTEND_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const allowedOrigins = [...new Set([...defaultAllowedOrigins, ...envAllowedOrigins])];
 
 app.use(cors({
   origin(origin, callback) {
@@ -29,6 +35,7 @@ app.use(cors({
       return callback(null, true);
     }
 
+    console.warn(`[CORS] Blocked origin: ${origin}`);
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
