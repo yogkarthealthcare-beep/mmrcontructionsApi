@@ -228,12 +228,17 @@ router.post('/auth/login', async (req, res) => {
     if (rateLimit(`login:${loginEmail || loginMobile}`, 5))
       return res.status(429).json({ success: false, message: 'Too many login attempts. 15 min baad try karein.' });
 
-    const [user] = await sql`
-      SELECT user_id, full_name, email, mobile_no, password_hash,
-             account_status, user_type, member_id, invitation_code
-      FROM users
-      WHERE (${loginEmail} IS NOT NULL AND email = ${loginEmail})
-         OR (${loginMobile} IS NOT NULL AND mobile_no = ${loginMobile})`;
+    const [user] = loginEmail
+      ? await sql`
+          SELECT user_id, full_name, email, mobile_no, password_hash,
+                 account_status, user_type, member_id, invitation_code
+          FROM users
+          WHERE email = ${loginEmail}`
+      : await sql`
+          SELECT user_id, full_name, email, mobile_no, password_hash,
+                 account_status, user_type, member_id, invitation_code
+          FROM users
+          WHERE mobile_no = ${loginMobile}`;
 
     if (!user)
       return res.status(401).json({ success: false, message: 'Email ya password galat hai' });

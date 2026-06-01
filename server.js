@@ -561,12 +561,17 @@ app.post("/api/auth/login", async (req, res) => {
       return err(res, "Email or phone number required", 400);
     }
 
-    const [user] = await sql`
-      SELECT user_id, full_name, email, mobile_no, user_type, account_status,
-             member_id, invitation_code, password_hash
-      FROM users
-      WHERE (${loginEmail} IS NOT NULL AND email = ${loginEmail})
-         OR (${loginMobile} IS NOT NULL AND mobile_no = ${loginMobile})`;
+    const [user] = loginEmail
+      ? await sql`
+          SELECT user_id, full_name, email, mobile_no, user_type, account_status,
+                 member_id, invitation_code, password_hash
+          FROM users
+          WHERE email = ${loginEmail}`
+      : await sql`
+          SELECT user_id, full_name, email, mobile_no, user_type, account_status,
+                 member_id, invitation_code, password_hash
+          FROM users
+          WHERE mobile_no = ${loginMobile}`;
 
     if (!user) return err(res, "User not found", 404);
 
