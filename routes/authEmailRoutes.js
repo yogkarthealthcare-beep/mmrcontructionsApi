@@ -17,11 +17,49 @@ const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 const isMobile = (v) => /^[6-9]\d{9}$/.test(v);
 const normalizeEmail = (email) => String(email || '').toLowerCase().trim();
 
+const sanitizeBody = (body = {}) => {
+  const sanitized = { ...body };
+  for (const key of Object.keys(sanitized)) {
+    if (/password|token|secret|key/i.test(key)) {
+      sanitized[key] = '[REDACTED]';
+    }
+  }
+  return sanitized;
+};
+
+const describeFiles = (files) => {
+  if (!files) return { files_present: false };
+
+  return Object.entries(files).reduce((acc, [field, value]) => {
+    const list = Array.isArray(value) ? value : [value];
+    acc[field] = list.map((file) => ({
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size,
+    }));
+    return acc;
+  }, {});
+};
+
+const logRegistrationError = (label, error) => {
+  console.error(label, {
+    message: error?.message,
+    code: error?.code,
+    detail: error?.detail,
+    constraint: error?.constraint,
+    table: error?.table,
+    column: error?.column,
+    stack: error?.stack,
+    details: error,
+  });
+};
+
 let pendingTableReady = false;
 
 async function ensurePendingRegistrationTable() {
   if (pendingTableReady) return;
 
+  console.log('[Associate Registration] Checking pending_registrations table...');
   await sql`
     CREATE TABLE IF NOT EXISTS pending_registrations (
       email TEXT PRIMARY KEY,
@@ -39,6 +77,7 @@ async function ensurePendingRegistrationTable() {
     )`;
 
   pendingTableReady = true;
+  console.log('[Associate Registration] pending_registrations table ready');
 }
 
 async function canResend(email) {
@@ -57,34 +96,65 @@ async function validateSignupInput(body) {
   const email = normalizeEmail(body.email);
   const mobileNo = body.mobile_no;
   const fullName = body.full_name?.trim();
+  const validationErrors = [];
 
-  if (!fullName) return { error: 'Full name is required' };
-  if (!email || !isEmail(email)) return { error: 'Valid email address is required' };
+  console.log('[Associate Registration] Validating signup input...', {
+    user_type: userType,
+    email,
+    mobile_no: mobileNo,
+    full_name_present: Boolean(fullName),
+    sponsor_invite_code_present: Boolean(body.sponsor_invite_code),
+  });
+
+  if (!fullName) validationErrors.push('Full name is required');
+  if (!email || !isEmail(email)) validationErrors.push('Valid email address is required');
   if (!mobileNo || !isMobile(mobileNo)) {
-    return { error: 'Valid 10-digit mobile number is required' };
+    validationErrors.push('Valid 10-digit mobile number is required');
   }
   if (!body.password || body.password.length < 6) {
-    return { error: 'Password must be at least 6 characters' };
+    validationErrors.push('Password must be at least 6 characters');
   }
   if (!['Customer', 'Associate'].includes(userType)) {
-    return { error: 'user_type must be Customer or Associate' };
+    validationErrors.push('user_type must be Customer or Associate');
   }
 
-  const [dupEmail] = await sql`SELECT user_id FROM users WHERE email = ${email}`;
-  if (dupEmail) return { error: 'Email already registered', status: 409 };
+  if (validationErrors.length) {
+    console.error('[Associate Registration] Validation Failed:', validationErrors);
+    return { error: validationErrors[0], status: 400, validationErrors };
+  }
 
+  console.log('[Associate Registration] Checking duplicate email...');
+  const [dupEmail] = await sql`SELECT user_id FROM users WHERE email = ${email}`;
+  if (dupEmail) {
+    console.error('[Associate Registration] Duplicate email found:', { email, user_id: dupEmail.user_id });
+    return { error: 'Email already registered', status: 409 };
+  }
+
+  console.log('[Associate Registration] Checking duplicate mobile...');
   const [dupMobile] = await sql`SELECT user_id FROM users WHERE mobile_no = ${mobileNo}`;
-  if (dupMobile) return { error: 'Mobile number already registered', status: 409 };
+  if (dupMobile) {
+    console.error('[Associate Registration] Duplicate mobile found:', { mobile_no: mobileNo, user_id: dupMobile.user_id });
+    return { error: 'Mobile number already registered', status: 409 };
+  }
 
   let sponsorUserId = null;
   if (body.sponsor_invite_code) {
+    console.log('[Associate Registration] Validating sponsor invite code...');
     const [sponsor] = await sql`
       SELECT user_id FROM users
       WHERE invitation_code = ${body.sponsor_invite_code}
         AND account_status = 'Active'`;
-    if (!sponsor) return { error: 'Invalid sponsor invitation code', status: 400 };
+    if (!sponsor) {
+      console.error('[Associate Registration] Invalid sponsor invitation code:', {
+        sponsor_invite_code: body.sponsor_invite_code,
+      });
+      return { error: 'Invalid sponsor invitation code', status: 400 };
+    }
     sponsorUserId = sponsor.user_id;
+    console.log('[Associate Registration] Sponsor found:', { sponsor_user_id: sponsorUserId });
   }
+
+  console.log('[Associate Registration] Validation Passed');
 
   return {
     value: {
@@ -100,11 +170,28 @@ async function validateSignupInput(body) {
 }
 
 router.post('/register-quick', async (req, res) => {
+  const requestId = `reg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
+    console.log(`[Associate Registration:${requestId}] Request received`);
+    console.log(`[Associate Registration:${requestId}] Request Body:`, sanitizeBody(req.body));
+    console.log(`[Associate Registration:${requestId}] Authenticated User:`, req.user || null);
+    console.log(`[Associate Registration:${requestId}] Files Received:`, describeFiles(req.files));
+    console.log(`[Associate Registration:${requestId}] Database connection check...`);
+    await sql`SELECT 1`;
+    console.log(`[Associate Registration:${requestId}] Database connection OK`);
+
     const validation = await validateSignupInput(req.body);
-    if (validation.error) return err(res, validation.error, validation.status || 400);
+    if (validation.error) {
+      console.error(`[Associate Registration:${requestId}] Validation Failed:`, {
+        message: validation.error,
+        validationErrors: validation.validationErrors,
+        status: validation.status || 400,
+      });
+      return err(res, validation.error, validation.status || 400);
+    }
 
     await ensurePendingRegistrationTable();
+    console.log(`[Associate Registration:${requestId}] Pending registration table ensured`);
 
     const {
       userType,
@@ -118,12 +205,23 @@ router.post('/register-quick', async (req, res) => {
 
     const otp = genOTP();
     const expires = new Date(Date.now() + 10 * 60 * 1000);
+    console.log(`[Associate Registration:${requestId}] Hashing password...`);
     const passwordHash = await bcrypt.hash(password, 12);
+    console.log(`[Associate Registration:${requestId}] Password hashed`);
 
+    console.log(`[Associate Registration:${requestId}] Removing old pending registration records...`);
     await sql`
       DELETE FROM pending_registrations
       WHERE email = ${email} OR mobile_no = ${mobileNo}`;
+    console.log(`[Associate Registration:${requestId}] Old pending registration cleanup complete`);
 
+    console.log(`[Associate Registration:${requestId}] Creating Associate Record...`, {
+      user_type: userType,
+      email,
+      mobile_no: mobileNo,
+      sponsor_user_id: sponsorUserId,
+      expires_at: expires,
+    });
     await sql`
       INSERT INTO pending_registrations (
         email, mobile_no, user_type, full_name, password_hash,
@@ -132,17 +230,36 @@ router.post('/register-quick', async (req, res) => {
         ${email}, ${mobileNo}, ${userType}, ${fullName}, ${passwordHash},
         ${sponsorUserId}, ${sponsorInviteCode}, ${otp}, ${expires}
       )`;
+    console.log(`[Associate Registration:${requestId}] Associate pending record created`);
 
+    console.log(`[Associate Registration:${requestId}] Sending OTP email...`, { email });
     await sendEmail(email, 'Verify your MMR account', otpEmailHtml(otp, 'Verification'));
+    console.log(`[Associate Registration:${requestId}] OTP email sent`);
 
+    const responseData = { email, user_type: userType };
+    console.log(`[Associate Registration:${requestId}] Registration Successful`, responseData);
     return ok(
       res,
-      { email, user_type: userType },
+      responseData,
       'OTP sent to your email. Verify OTP to complete registration.',
     );
   } catch (e) {
-    console.error('[register-quick]', e);
-    return err(res, e.message);
+    logRegistrationError(`[Associate Registration:${requestId}] Associate Registration Error`, e);
+
+    if (e?.code === '23505') {
+      return err(res, 'Duplicate registration record found', 409);
+    }
+    if (/cloudinary/i.test(e?.message || '')) {
+      return err(res, 'Cloudinary upload failed', 500);
+    }
+    if (/send|smtp|email|mail/i.test(e?.message || '')) {
+      return err(res, `Email delivery failed: ${e.message}`, 500);
+    }
+    if (e?.code || e?.constraint || e?.table) {
+      return err(res, `Database insert failed: ${e.message}`, 500);
+    }
+
+    return err(res, e.message || 'Associate registration failed');
   }
 });
 
