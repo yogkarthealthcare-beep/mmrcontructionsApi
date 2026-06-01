@@ -1,4 +1,5 @@
 import express from "express";
+import cors from "cors";
 import sql from "./db.js";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
@@ -7,13 +8,37 @@ import multer from "multer";
 import path from "path";
 import { v2 as cloudinary } from "cloudinary";
 import { Readable } from "stream";
-
+import newRoutes from './routes/newRoutes.js';
+import authEmailRoutes from './routes/authEmailRoutes.js';
 dotenv.config();
 
 
 const app = express();
-app.use(express.json());
 
+const allowedOrigins = [
+  "http://localhost:4200",
+  "http://127.0.0.1:4200",
+  "https://mmrconstructions.in",
+  "https://www.mmrconstructions.in",
+  
+];
+
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-API-Key"],
+  optionsSuccessStatus: 204,
+}));
+
+app.use(express.json());
+app.use('/api/auth', authEmailRoutes);
+app.use('/api', newRoutes);
 // ─── Cloudinary Config ────────────────────────────────────────
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -380,6 +405,138 @@ app.post("/api/auth/register", upload.fields([
 
     return ok(res, { user_id: userId, full_name, user_type: newUser.user_type },
       "Registration submitted. Pending admin approval.", 201);
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+
+// Register Quick (Signup form se — sirf basic details, email OTP verify hoga)
+app.post("/api/auth/register-quick", async (req, res) => {
+  try {
+    const { user_type, full_name, email, mobile_no, password, sponsor_invite_code } = req.body;
+
+    if (!user_type || !full_name || !email || !mobile_no || !password)
+      return err(res, "user_type, full_name, email, mobile_no, password required", 400);
+
+    // Duplicate checks
+    const [dupMobile] = await sql`SELECT user_id FROM users WHERE mobile_no = ${mobile_no}`;
+    if (dupMobile) return err(res, "Mobile number already registered", 409);
+
+    const [dupEmail] = await sql`SELECT user_id FROM users WHERE email = ${email}`;
+    if (dupEmail) return err(res, "Email already registered", 409);
+
+    // Find sponsor
+    let sponsorUserId = null;
+    if (sponsor_invite_code) {
+      const [sponsor] = await sql`
+        SELECT user_id FROM users WHERE invitation_code = ${sponsor_invite_code}
+          AND account_status = 'Active'`;
+      if (!sponsor) return err(res, "Invalid sponsor invitation code", 400);
+      sponsorUserId = sponsor.user_id;
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    // Insert user with Pending status
+    const [newUser] = await sql`
+      INSERT INTO users (user_type, full_name, email, mobile_no, password_hash,
+                         sponsor_user_id, account_status, is_otp_verified)
+      VALUES (${user_type}, ${full_name.trim()}, ${email.toLowerCase().trim()},
+              ${mobile_no}, ${passwordHash}, ${sponsorUserId}, 'Pending', FALSE)
+      RETURNING user_id, full_name, email, user_type`;
+
+    // Generate 6-digit email OTP aur email_otp_log mein store karo
+    const otp = genOTP();
+    const exp = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+
+    // otp_log table use kar raha hai (mobile field mein email store karo)
+    await sql`
+      INSERT INTO otp_log (user_type, reference_id, mobile, otp_code, purpose, expires_at)
+      VALUES ('User', ${newUser.user_id}, ${email.toLowerCase().trim()}, ${otp}, 'EmailVerification', ${exp})`;
+
+    // TODO: Real email gateway se OTP bhejo (Nodemailer / SendGrid)
+    console.log(`[EMAIL OTP] ${email} -> ${otp}`);
+
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+      VALUES ('User', ${newUser.user_id}, ${full_name}, 'Auth', 'QuickRegistered', 'users', ${newUser.user_id})`;
+
+    return ok(res, { user_id: newUser.user_id, email: newUser.email },
+      "Registration initiated. OTP sent to your email.", 201);
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+// Verify Email OTP (signup ke baad)
+app.post("/api/auth/verify-email-otp", async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) return err(res, "email and otp required", 400);
+
+    const [otpRow] = await sql`
+      SELECT * FROM otp_log
+      WHERE mobile = ${email.toLowerCase().trim()} AND otp_code = ${otp}
+        AND purpose = 'EmailVerification' AND is_used = FALSE AND expires_at > NOW()
+      ORDER BY otp_id DESC LIMIT 1`;
+
+    if (!otpRow) return err(res, "Invalid or expired OTP", 400);
+
+    const [user] = await sql`
+      SELECT user_id, full_name, mobile_no, user_type, account_status, member_id, invitation_code
+      FROM users WHERE user_id = ${otpRow.reference_id}`;
+
+    if (!user) return err(res, "User not found", 404);
+
+    // Mark email verified
+    await sql`UPDATE users SET is_otp_verified = TRUE, updated_at = NOW() WHERE user_id = ${user.user_id}`;
+    await sql`UPDATE otp_log SET is_used = TRUE WHERE otp_id = ${otpRow.otp_id}`;
+
+    // JWT token generate karo
+    const payload = {
+      user_id:   user.user_id,
+      user_type: user.user_type,
+      member_id: user.member_id,
+      mobile_no: user.mobile_no,
+    };
+    const token        = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
+    const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, { expiresIn: "30d" });
+
+    return ok(res, {
+      token,
+      refresh_token: refreshToken,
+      user: { user_id: user.user_id, full_name: user.full_name,
+              user_type: user.user_type, member_id: user.member_id,
+              invitation_code: user.invitation_code },
+    }, "Email verified successfully. Registration pending admin approval.");
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+// Resend Email OTP
+app.post("/api/auth/resend-email-otp", async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return err(res, "email required", 400);
+
+    const [user] = await sql`SELECT user_id FROM users WHERE email = ${email.toLowerCase().trim()}`;
+    if (!user) return err(res, "Email not registered", 404);
+
+    const otp = genOTP();
+    const exp = new Date(Date.now() + 10 * 60 * 1000);
+
+    await sql`
+      UPDATE otp_log SET is_used = TRUE
+      WHERE mobile = ${email.toLowerCase().trim()} AND purpose = 'EmailVerification' AND is_used = FALSE`;
+
+    await sql`
+      INSERT INTO otp_log (user_type, reference_id, mobile, otp_code, purpose, expires_at)
+      VALUES ('User', ${user.user_id}, ${email.toLowerCase().trim()}, ${otp}, 'EmailVerification', ${exp})`;
+
+    console.log(`[EMAIL OTP RESEND] ${email} -> ${otp}`);
+    return ok(res, {}, "OTP resent to your email.");
   } catch (e) {
     return err(res, e.message);
   }
@@ -1912,6 +2069,17 @@ app.use((error, req, res, next) => {
   res.status(500).json({ success: false, message: error.message || "Internal server error" });
 });
 
-app.listen(process.env.PORT, () => {
-  console.log(`[MMR API] Server running on port ${process.env.PORT}`);
+const PORT = Number(process.env.PORT) || 5000;
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`[MMR API] Server running on port ${PORT}`);
 });
+
+server.on("error", (error) => {
+  console.error("[MMR API] Server startup failed", {
+    code: error.code,
+    message: error.message,
+  });
+  process.exitCode = 1;
+});
+
+globalThis.__mmrApiServer = server;
