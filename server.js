@@ -552,13 +552,21 @@ app.post("/api/auth/resend-email-otp", async (req, res) => {
 // Login
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const { mobile_no, password, otp_code } = req.body;
-    if (!mobile_no) return err(res, "mobile_no required", 400);
+    const { mobile_no, email, identifier, password, otp_code } = req.body;
+    const loginId = String(identifier || email || mobile_no || "").trim();
+    const loginEmail = loginId.includes("@") ? loginId.toLowerCase() : null;
+    const loginMobile = loginEmail ? null : String(mobile_no || loginId).replace(/\D/g, "");
+
+    if (!loginEmail && !loginMobile) {
+      return err(res, "Email or phone number required", 400);
+    }
 
     const [user] = await sql`
-      SELECT user_id, full_name, mobile_no, user_type, account_status,
+      SELECT user_id, full_name, email, mobile_no, user_type, account_status,
              member_id, invitation_code, password_hash
-      FROM users WHERE mobile_no = ${mobile_no}`;
+      FROM users
+      WHERE (${loginEmail} IS NOT NULL AND email = ${loginEmail})
+         OR (${loginMobile} IS NOT NULL AND mobile_no = ${loginMobile})`;
 
     if (!user) return err(res, "User not found", 404);
 
@@ -571,9 +579,10 @@ app.post("/api/auth/login", async (req, res) => {
 
     // OTP login
     if (otp_code) {
+      if (!loginMobile) return err(res, "OTP login requires mobile number", 400);
       const [otpRow] = await sql`
         SELECT * FROM otp_log
-        WHERE mobile = ${mobile_no} AND otp_code = ${otp_code}
+        WHERE mobile = ${loginMobile} AND otp_code = ${otp_code}
           AND purpose = 'Login' AND is_used = FALSE AND expires_at > NOW()
         ORDER BY otp_id DESC LIMIT 1`;
       if (!otpRow) return err(res, "Invalid or expired OTP", 401);
@@ -593,6 +602,7 @@ app.post("/api/auth/login", async (req, res) => {
       user_type:  user.user_type,
       member_id:  user.member_id,
       mobile_no:  user.mobile_no,
+      email:      user.email,
     };
 
     const token        = jwt.sign(payload, process.env.JWT_SECRET,         { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
@@ -602,7 +612,7 @@ app.post("/api/auth/login", async (req, res) => {
       token, refresh_token: refreshToken,
       user: { user_id: user.user_id, full_name: user.full_name,
               user_type: user.user_type, member_id: user.member_id,
-              invitation_code: user.invitation_code },
+              invitation_code: user.invitation_code, email: user.email },
     }, "Login successful");
   } catch (e) {
     return err(res, e.message);
