@@ -2486,7 +2486,7 @@ app.get("/api/admin/sites/:id/plots",
             WHEN COALESCE(pay.proof_submitted_count, 0) > 0 THEN 'Proof submitted'
             WHEN COALESCE(pay.pending_emi_count, 0) > 0 THEN 'Payment pending'
             WHEN b.booking_status = 'Confirmed' THEN 'Confirmed'
-            ELSE b.booking_status
+            ELSE b.booking_status::text
           END AS payment_status
         FROM plots p
         LEFT JOIN LATERAL (
