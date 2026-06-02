@@ -2408,6 +2408,64 @@ app.post("/api/admin/sites/:id/property-image",
   }
 );
 
+app.get("/api/admin/sites/:id/plots",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager","SupportStaff","FinanceManager"),
+  async (req, res) => {
+    try {
+      const plots = await sql`
+        SELECT
+          p.plot_id, p.site_id, p.plot_number, p.plot_area, p.plot_category,
+          p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months,
+          p.file_charge, p.plot_status, p.coordinates_x, p.coordinates_y,
+          b.booking_id, b.booking_serial, b.booking_date, b.booking_status,
+          b.advance_amount AS booking_amount, b.advance_amount AS down_payment_paid,
+          b.payment_type,
+          u.user_id AS customer_id, u.member_id AS customer_member_id,
+          u.full_name AS customer_name, u.mobile_no AS customer_mobile, u.email AS customer_email,
+          COALESCE(pay.total_emi_paid, 0)::numeric AS emi_paid_amount,
+          COALESCE(pay.total_paid, COALESCE(b.advance_amount, 0))::numeric AS total_paid,
+          GREATEST(COALESCE(p.base_price, 0) - COALESCE(pay.total_paid, COALESCE(b.advance_amount, 0)), 0)::numeric AS remaining_payment,
+          COALESCE(pay.pending_emi_count, 0)::int AS pending_emi_count,
+          COALESCE(pay.proof_submitted_count, 0)::int AS proof_submitted_count,
+          CASE
+            WHEN b.booking_id IS NULL THEN 'No booking'
+            WHEN b.booking_status = 'Cancelled' THEN 'Cancelled'
+            WHEN COALESCE(pay.proof_submitted_count, 0) > 0 THEN 'Proof submitted'
+            WHEN COALESCE(pay.pending_emi_count, 0) > 0 THEN 'Payment pending'
+            WHEN b.booking_status = 'Confirmed' THEN 'Confirmed'
+            ELSE b.booking_status
+          END AS payment_status
+        FROM plots p
+        LEFT JOIN LATERAL (
+          SELECT *
+          FROM bookings b
+          WHERE b.plot_id = p.plot_id
+          ORDER BY
+            CASE WHEN b.booking_status = 'Cancelled' THEN 1 ELSE 0 END,
+            b.created_at DESC
+          LIMIT 1
+        ) b ON TRUE
+        LEFT JOIN users u ON u.user_id = b.user_id
+        LEFT JOIN LATERAL (
+          SELECT
+            COALESCE(SUM(e.paid_amount) FILTER (WHERE e.emi_status = 'Paid'), 0) AS total_emi_paid,
+            COALESCE(b.advance_amount, 0) + COALESCE(SUM(e.paid_amount) FILTER (WHERE e.emi_status = 'Paid'), 0) AS total_paid,
+            COUNT(*) FILTER (WHERE e.emi_status = 'Pending') AS pending_emi_count,
+            COUNT(*) FILTER (WHERE e.emi_status = 'ProofSubmitted') AS proof_submitted_count
+          FROM emi_schedules e
+          WHERE e.booking_id = b.booking_id
+        ) pay ON TRUE
+        WHERE p.site_id = ${req.params.id} AND p.is_active = TRUE
+        ORDER BY p.plot_number`;
+
+      return ok(res, plots);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
 app.post("/api/admin/sites/:id/plots",
   verifyAdminToken,
   role("SuperAdmin","SiteManager"),
