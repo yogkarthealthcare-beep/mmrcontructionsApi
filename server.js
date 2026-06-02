@@ -60,6 +60,7 @@ const CLOUDINARY_FOLDER = {
   payment_proof: "mmr/proofs",
   pan_card:      "mmr/documents",
   aadhar_card:   "mmr/documents",
+  site_map:      "mmr/site-maps",
   document:      "mmr/documents",   // generic upload-doc
 };
 
@@ -98,10 +99,11 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
   fileFilter: (req, file, cb) => {
-    const allowed = /jpeg|jpg|png|pdf/;
+    const isSiteMap = file.fieldname === "site_map";
+    const allowed = isSiteMap ? /jpeg|jpg|png/ : /jpeg|jpg|png|pdf/;
     allowed.test(path.extname(file.originalname).toLowerCase())
       ? cb(null, true)
-      : cb(new Error("Only JPG, PNG, PDF allowed"));
+      : cb(new Error(isSiteMap ? "Only JPG, JPEG, and PNG files are allowed." : "Only JPG, PNG, PDF allowed"));
   },
 });
 
@@ -962,6 +964,7 @@ app.get("/api/sites", async (req, res) => {
   try {
     const sites = await sql`
       SELECT s.site_id, s.site_name, s.city, s.state, s.full_address,
+             s.description, s.map_image_url,
              s.site_status, s.has_govt_approval,
              COUNT(p.plot_id)                                              AS total_plots,
              COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Vacant')     AS vacant,
@@ -991,6 +994,30 @@ app.get("/api/sites/:id", async (req, res) => {
       FROM site_photos WHERE site_id = ${id} AND is_active = TRUE ORDER BY sort_order`;
 
     return ok(res, { ...site, landmarks, photos });
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+app.get("/api/sites/:id/map", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [site] = await sql`
+      SELECT site_id, site_name, city, state, full_address, description,
+             map_image_url, site_status, total_plots
+      FROM sites
+      WHERE site_id = ${id}`;
+    if (!site) return err(res, "Site not found", 404);
+
+    const plots = await sql`
+      SELECT plot_id, plot_number, plot_area, plot_category,
+             base_price, down_payment, monthly_emi, emi_tenure_months,
+             file_charge, plot_status, coordinates_x, coordinates_y
+      FROM plots
+      WHERE site_id = ${id} AND is_active = TRUE
+      ORDER BY plot_number`;
+
+    return ok(res, { site, plots });
   } catch (e) {
     return err(res, e.message);
   }
@@ -2122,7 +2149,19 @@ app.get("/api/admin/sites",
   role("SuperAdmin","SiteManager","SupportStaff"),
   async (req, res) => {
     try {
-      const sites = await sql`SELECT * FROM vw_site_plot_summary ORDER BY site_id`;
+      const sites = await sql`
+        SELECT s.site_id, s.site_name, s.city, s.state, s.full_address,
+               s.description, s.map_image_url, s.site_status, s.has_govt_approval,
+               s.total_plots AS planned_total_plots, s.created_at, s.updated_at,
+               COUNT(p.plot_id)::int AS total_plots,
+               COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Vacant')::int AS vacant,
+               COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'InProcess')::int AS in_process,
+               COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Booked')::int AS booked,
+               COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Sold')::int AS sold
+        FROM sites s
+        LEFT JOIN plots p ON p.site_id = s.site_id AND p.is_active = TRUE
+        GROUP BY s.site_id
+        ORDER BY s.site_id`;
       return ok(res, sites);
     } catch (e) {
       return err(res, e.message);
@@ -2133,13 +2172,28 @@ app.get("/api/admin/sites",
 app.post("/api/admin/sites",
   verifyAdminToken,
   role("SuperAdmin","SiteManager"),
+  upload.single("site_map"),
   async (req, res) => {
     try {
-      const { site_name, city, state, full_address } = req.body;
+      const { site_name, city, state, full_address, description, total_plots, site_status } = req.body;
       if (!site_name || !city) return err(res, "site_name, city required", 400);
+      let mapUrl = null;
+      let mapPublicId = null;
+      if (req.file) {
+        const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.site_map, req.file.originalname);
+        mapUrl = uploaded.url;
+        mapPublicId = uploaded.public_id;
+      }
       const [site] = await sql`
-        INSERT INTO sites (site_name, city, state, full_address, created_by_admin_id)
-        VALUES (${site_name}, ${city}, ${state || "Uttar Pradesh"}, ${full_address || null}, ${req.admin.admin_id})
+        INSERT INTO sites (
+          site_name, city, state, full_address, description, total_plots,
+          site_status, map_image_url, map_public_id, created_by_admin_id
+        )
+        VALUES (
+          ${site_name}, ${city}, ${state || "Uttar Pradesh"}, ${full_address || null},
+          ${description || null}, ${Number(total_plots || 0)},
+          ${site_status || "Active"}::site_status_enum, ${mapUrl}, ${mapPublicId}, ${req.admin.admin_id}
+        )
         RETURNING site_id, site_name`;
       return ok(res, site, "Site created", 201);
     } catch (e) {
@@ -2151,19 +2205,86 @@ app.post("/api/admin/sites",
 app.put("/api/admin/sites/:id",
   verifyAdminToken,
   role("SuperAdmin","SiteManager"),
+  upload.single("site_map"),
   async (req, res) => {
     try {
-      const { site_name, city, full_address, site_status, has_govt_approval } = req.body;
+      const { site_name, city, state, full_address, description, total_plots, site_status, has_govt_approval } = req.body;
+      let mapUrl = null;
+      let mapPublicId = null;
+      if (req.file) {
+        const [oldSite] = await sql`SELECT map_public_id FROM sites WHERE site_id = ${req.params.id}`;
+        const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.site_map, req.file.originalname);
+        mapUrl = uploaded.url;
+        mapPublicId = uploaded.public_id;
+        if (oldSite?.map_public_id) {
+          cloudinary.uploader.destroy(oldSite.map_public_id).catch(() => {});
+        }
+      }
       await sql`
         UPDATE sites SET
           site_name        = COALESCE(${site_name        || null}, site_name),
           city             = COALESCE(${city             || null}, city),
+          state            = COALESCE(${state            || null}, state),
           full_address     = COALESCE(${full_address     || null}, full_address),
+          description      = COALESCE(${description      || null}, description),
+          total_plots      = COALESCE(${total_plots ? Number(total_plots) : null}, total_plots),
           site_status      = COALESCE(${site_status      || null}::site_status_enum, site_status),
           has_govt_approval= COALESCE(${has_govt_approval != null ? has_govt_approval : null}, has_govt_approval),
+          map_image_url    = COALESCE(${mapUrl}, map_image_url),
+          map_public_id    = COALESCE(${mapPublicId}, map_public_id),
           updated_at       = NOW()
         WHERE site_id = ${req.params.id}`;
       return ok(res, {}, "Site updated");
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.delete("/api/admin/sites/:id",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  async (req, res) => {
+    try {
+      const siteId = req.params.id;
+      const [usage] = await sql`
+        SELECT
+          COUNT(p.plot_id)::int AS plots,
+          COUNT(b.booking_id)::int AS bookings
+        FROM sites s
+        LEFT JOIN plots p ON p.site_id = s.site_id AND p.is_active = TRUE
+        LEFT JOIN bookings b ON b.plot_id = p.plot_id
+        WHERE s.site_id = ${siteId}`;
+
+      if (usage?.bookings > 0) {
+        return err(res, "Site has linked bookings or sales. Marking inactive is safer than deleting.", 409);
+      }
+      if (usage?.plots > 0) {
+        await sql`UPDATE plots SET is_active = FALSE, updated_at = NOW() WHERE site_id = ${siteId}`;
+      }
+      await sql`UPDATE sites SET site_status = 'Inactive', updated_at = NOW() WHERE site_id = ${siteId}`;
+      return ok(res, {}, "Site deactivated safely");
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.post("/api/admin/sites/:id/map",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  upload.single("site_map"),
+  async (req, res) => {
+    try {
+      if (!req.file) return err(res, "site_map image is required", 400);
+      const [oldSite] = await sql`SELECT map_public_id FROM sites WHERE site_id = ${req.params.id}`;
+      if (!oldSite) return err(res, "Site not found", 404);
+      const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.site_map, req.file.originalname);
+      await sql`
+        UPDATE sites SET map_image_url = ${uploaded.url}, map_public_id = ${uploaded.public_id}, updated_at = NOW()
+        WHERE site_id = ${req.params.id}`;
+      if (oldSite.map_public_id) cloudinary.uploader.destroy(oldSite.map_public_id).catch(() => {});
+      return ok(res, { map_image_url: uploaded.url }, "Map uploaded successfully");
     } catch (e) {
       return err(res, e.message);
     }
@@ -2176,20 +2297,76 @@ app.post("/api/admin/plots",
   async (req, res) => {
     try {
       const { site_id, plot_number, plot_area, plot_category,
-              base_price, down_payment, monthly_emi, emi_tenure_months } = req.body;
+              base_price, down_payment, monthly_emi, emi_tenure_months,
+              file_charge, plot_status, coordinates_x, coordinates_y } = req.body;
       if (!site_id || !plot_number || !plot_area || !base_price)
         return err(res, "site_id, plot_number, plot_area, base_price required", 400);
 
       const [plot] = await sql`
         INSERT INTO plots (site_id, plot_number, plot_area, plot_category,
                            base_price, down_payment, monthly_emi, emi_tenure_months,
+                           file_charge, plot_status, coordinates_x, coordinates_y,
                            created_by_admin_id)
         VALUES (${site_id}, ${plot_number}, ${plot_area},
                 ${plot_category || (plot_area <= 50 ? "50gaj" : "100gaj")},
                 ${base_price}, ${down_payment || 0}, ${monthly_emi || 0},
-                ${emi_tenure_months || 60}, ${req.admin.admin_id})
+                ${emi_tenure_months || 60}, ${file_charge || 0},
+                ${plot_status || "Vacant"}::plot_status_enum,
+                ${coordinates_x || null}, ${coordinates_y || null}, ${req.admin.admin_id})
         RETURNING plot_id, plot_number, plot_status`;
       return ok(res, plot, "Plot created", 201);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.put("/api/admin/plots/:id",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  async (req, res) => {
+    try {
+      const { plot_number, plot_area, plot_category, base_price, down_payment,
+              monthly_emi, emi_tenure_months, file_charge, plot_status,
+              coordinates_x, coordinates_y } = req.body;
+
+      const [plot] = await sql`
+        UPDATE plots SET
+          plot_number = COALESCE(${plot_number || null}, plot_number),
+          plot_area = COALESCE(${plot_area ? Number(plot_area) : null}, plot_area),
+          plot_category = COALESCE(${plot_category || null}::plot_category_enum, plot_category),
+          base_price = COALESCE(${base_price ? Number(base_price) : null}, base_price),
+          down_payment = COALESCE(${down_payment != null ? Number(down_payment) : null}, down_payment),
+          monthly_emi = COALESCE(${monthly_emi != null ? Number(monthly_emi) : null}, monthly_emi),
+          emi_tenure_months = COALESCE(${emi_tenure_months ? Number(emi_tenure_months) : null}, emi_tenure_months),
+          file_charge = COALESCE(${file_charge != null ? Number(file_charge) : null}, file_charge),
+          plot_status = COALESCE(${plot_status || null}::plot_status_enum, plot_status),
+          coordinates_x = ${coordinates_x ?? null},
+          coordinates_y = ${coordinates_y ?? null},
+          updated_at = NOW()
+        WHERE plot_id = ${req.params.id}
+        RETURNING plot_id, plot_number, plot_status`;
+      if (!plot) return err(res, "Plot not found", 404);
+      return ok(res, plot, "Plot updated");
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.delete("/api/admin/plots/:id",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  async (req, res) => {
+    try {
+      const [booking] = await sql`SELECT booking_id FROM bookings WHERE plot_id = ${req.params.id} LIMIT 1`;
+      if (booking) return err(res, "Plot has linked booking/payment records. Delete is blocked.", 409);
+      const [plot] = await sql`
+        UPDATE plots SET is_active = FALSE, updated_at = NOW()
+        WHERE plot_id = ${req.params.id}
+        RETURNING plot_id`;
+      if (!plot) return err(res, "Plot not found", 404);
+      return ok(res, {}, "Plot deleted safely");
     } catch (e) {
       return err(res, e.message);
     }
