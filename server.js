@@ -48,10 +48,11 @@ app.use(express.json());
 app.use('/api/auth', authEmailRoutes);
 app.use('/api', newRoutes);
 // ─── Cloudinary Config ────────────────────────────────────────
+const envValue = (key) => (process.env[key] || "").trim();
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key:    process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
+  cloud_name: envValue("CLOUDINARY_CLOUD_NAME"),
+  api_key:    envValue("CLOUDINARY_API_KEY"),
+  api_secret: envValue("CLOUDINARY_API_SECRET"),
 });
 
 // ─── Folder mapping per fieldname ─────────────────────────────
@@ -78,13 +79,15 @@ function uploadToCloudinary(buffer, folder, filename) {
     const isPdf       = ext === "pdf";
     const resourceType = isPdf ? "raw" : "image";
 
+    const uploadOptions = {
+      folder,
+      resource_type: resourceType,
+      public_id: `${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+      ...(isPdf ? { format: "pdf" } : {}),
+    };
+
     const stream = cloudinary.uploader.upload_stream(
-      {
-        folder,
-        resource_type: resourceType,
-        public_id: `${Date.now()}-${Math.round(Math.random() * 1e6)}`,
-        format: isPdf ? "pdf" : undefined,
-      },
+      uploadOptions,
       (error, result) => {
         if (error) return reject(error);
         resolve({ url: result.secure_url, public_id: result.public_id });
