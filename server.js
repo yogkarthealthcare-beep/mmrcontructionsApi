@@ -239,6 +239,44 @@ const role = (...allowed) => (req, res, next) => {
   next();
 };
 
+const inquiryStatuses = ["New", "Contacted", "Follow Up", "Interested", "Converted", "Closed"];
+let inquirySchemaReady;
+const ensureInquirySchema = () => {
+  if (!inquirySchemaReady) {
+    inquirySchemaReady = (async () => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS inquiries (
+          inquiry_id SERIAL PRIMARY KEY,
+          full_name VARCHAR(150) NOT NULL,
+          mobile_no VARCHAR(20) NOT NULL,
+          email VARCHAR(150),
+          site_name VARCHAR(180),
+          plot_number VARCHAR(80),
+          inquiry_message TEXT,
+          inquiry_type VARCHAR(80) DEFAULT 'General Enquiry',
+          source_page VARCHAR(180) DEFAULT 'Website',
+          status VARCHAR(30) NOT NULL DEFAULT 'New',
+          remarks TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`;
+      await sql`ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS email VARCHAR(150)`;
+      await sql`ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS site_name VARCHAR(180)`;
+      await sql`ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS plot_number VARCHAR(80)`;
+      await sql`ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS inquiry_message TEXT`;
+      await sql`ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS inquiry_type VARCHAR(80) DEFAULT 'General Enquiry'`;
+      await sql`ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS source_page VARCHAR(180) DEFAULT 'Website'`;
+      await sql`ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS status VARCHAR(30) NOT NULL DEFAULT 'New'`;
+      await sql`ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS remarks TEXT`;
+      await sql`ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
+      await sql`ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_inquiries_created_at ON inquiries (created_at DESC)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_inquiries_status ON inquiries (status)`;
+    })();
+  }
+  return inquirySchemaReady;
+};
+
 /* ==========================
    ─────────────────────────
    EXISTING APIS (unchanged)
@@ -1686,6 +1724,209 @@ const getAdminUsersPage = async (query, defaults = {}) => {
 
   return { rows, totalRecords: Number(total?.count || 0), page, pageSize };
 };
+
+const adminInquiriesResponse = (res, rows, totalRecords, page, pageSize, counts = []) => {
+  const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
+  const statusCounts = inquiryStatuses.reduce((acc, status) => {
+    acc[status] = 0;
+    return acc;
+  }, {});
+  counts.forEach((row) => { statusCounts[row.status] = Number(row.count || 0); });
+  return res.json({
+    success: true,
+    data: rows,
+    inquiries: rows,
+    total: totalRecords,
+    totalRecords,
+    currentPage: page,
+    page,
+    pageSize,
+    limit: pageSize,
+    totalPages,
+    counts: statusCounts,
+  });
+};
+
+const getAdminInquiriesPage = async (query) => {
+  await ensureInquirySchema();
+  const page = Math.max(1, Number(query.page || 1));
+  const pageSize = Math.min(100, Math.max(1, Number(query.pageSize || query.limit || 20)));
+  const offset = (page - 1) * pageSize;
+  const sortMap = {
+    created_at: "created_at",
+    full_name: "full_name",
+    mobile_no: "mobile_no",
+    email: "email",
+    status: "status",
+    inquiry_type: "inquiry_type",
+    site_name: "site_name",
+  };
+  const sortBy = sortMap[query.sortBy || query.sort_by || "created_at"] || "created_at";
+  const sortDir = String(query.sortDir || query.sort_dir || "desc").toLowerCase() === "asc" ? "ASC" : "DESC";
+  const where = [];
+  const params = [];
+  const add = (condition, value) => {
+    params.push(value);
+    where.push(condition.replace("?", `$${params.length}`));
+  };
+
+  if (query.status && query.status !== "all") add("status = ?", query.status);
+  if (query.inquiry_type) add("inquiry_type = ?", query.inquiry_type);
+  if (query.date_from) add("created_at::date >= ?::date", query.date_from);
+  if (query.date_to) add("created_at::date <= ?::date", query.date_to);
+  if (query.search) {
+    params.push(`%${String(query.search).trim()}%`);
+    const idx = `$${params.length}`;
+    where.push(`(
+      full_name ILIKE ${idx}
+      OR mobile_no ILIKE ${idx}
+      OR COALESCE(email, '') ILIKE ${idx}
+      OR COALESCE(site_name, '') ILIKE ${idx}
+      OR COALESCE(plot_number, '') ILIKE ${idx}
+      OR COALESCE(inquiry_message, '') ILIKE ${idx}
+      OR COALESCE(inquiry_type, '') ILIKE ${idx}
+      OR CAST(inquiry_id AS TEXT) ILIKE ${idx}
+    )`);
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const rows = await sql.unsafe(`
+    SELECT inquiry_id, full_name, mobile_no, email, site_name, plot_number,
+           inquiry_message, inquiry_type, source_page, status, remarks,
+           created_at, updated_at
+    FROM inquiries
+    ${whereSql}
+    ORDER BY ${sortBy} ${sortDir}, inquiry_id DESC
+    LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+  `, [...params, pageSize, offset]);
+
+  const [total] = await sql.unsafe(`SELECT COUNT(*)::int AS count FROM inquiries ${whereSql}`, params);
+  const counts = await sql`SELECT status, COUNT(*)::int AS count FROM inquiries GROUP BY status`;
+  return { rows, totalRecords: Number(total?.count || 0), page, pageSize, counts };
+};
+
+app.post("/api/inquiries", async (req, res) => {
+  try {
+    await ensureInquirySchema();
+    console.log("[Inquiry Submit Request]", req.body);
+    const fullName = String(req.body.full_name || req.body.name || "").trim();
+    const mobileNo = String(req.body.mobile_no || req.body.mobile || "").replace(/\D/g, "").slice(0, 15);
+    const email = String(req.body.email || "").trim().toLowerCase() || null;
+    const siteName = String(req.body.site_name || req.body.property_name || req.body.interest || "").trim() || null;
+    const plotNumber = String(req.body.plot_number || "").trim() || null;
+    const message = String(req.body.inquiry_message || req.body.message || "").trim() || null;
+    const inquiryType = String(req.body.inquiry_type || req.body.interest || "General Enquiry").trim() || "General Enquiry";
+    const sourcePage = String(req.body.source_page || "Website").trim() || "Website";
+
+    if (!fullName) return err(res, "Full name is required", 400);
+    if (!mobileNo) return err(res, "Mobile number is required", 400);
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err(res, "Valid email is required", 400);
+
+    const [created] = await sql`
+      INSERT INTO inquiries (
+        full_name, mobile_no, email, site_name, plot_number,
+        inquiry_message, inquiry_type, source_page, status
+      )
+      VALUES (
+        ${fullName}, ${mobileNo}, ${email}, ${siteName}, ${plotNumber},
+        ${message}, ${inquiryType}, ${sourcePage}, 'New'
+      )
+      RETURNING inquiry_id, full_name, mobile_no, email, site_name, plot_number,
+                inquiry_message, inquiry_type, source_page, status, remarks,
+                created_at, updated_at`;
+
+    console.log("[Inquiry Insert Result]", created);
+    return ok(res, created, "Inquiry submitted successfully", 201);
+  } catch (e) {
+    console.error("[Inquiry Submit Error]", e);
+    return err(res, e.message);
+  }
+});
+
+app.get("/api/admin/inquiries",
+  verifyAdminToken,
+  role("SuperAdmin","SupportStaff","SiteManager"),
+  async (req, res) => {
+    try {
+      const result = await getAdminInquiriesPage(req.query);
+      console.log("[Admin Inquiry Fetch Response]", { total: result.totalRecords, page: result.page });
+      return adminInquiriesResponse(res, result.rows, result.totalRecords, result.page, result.pageSize, result.counts);
+    } catch (e) {
+      console.error("[Admin Inquiry Fetch Error]", e);
+      return err(res, e.message);
+    }
+  }
+);
+
+app.get("/api/admin/inquiries/:id",
+  verifyAdminToken,
+  role("SuperAdmin","SupportStaff","SiteManager"),
+  async (req, res) => {
+    try {
+      await ensureInquirySchema();
+      const [inquiry] = await sql`
+        SELECT inquiry_id, full_name, mobile_no, email, site_name, plot_number,
+               inquiry_message, inquiry_type, source_page, status, remarks,
+               created_at, updated_at
+        FROM inquiries
+        WHERE inquiry_id = ${req.params.id}`;
+      if (!inquiry) return err(res, "Inquiry not found", 404);
+      return ok(res, inquiry);
+    } catch (e) {
+      console.error("[Admin Inquiry Detail Error]", e);
+      return err(res, e.message);
+    }
+  }
+);
+
+app.put("/api/admin/inquiries/:id",
+  verifyAdminToken,
+  role("SuperAdmin","SupportStaff","SiteManager"),
+  async (req, res) => {
+    try {
+      await ensureInquirySchema();
+      const status = String(req.body.status || "").trim();
+      const remarks = req.body.remarks == null ? null : String(req.body.remarks).trim();
+      if (status && !inquiryStatuses.includes(status)) return err(res, "Invalid inquiry status", 400);
+
+      const [updated] = await sql`
+        UPDATE inquiries SET
+          status = COALESCE(${status || null}, status),
+          remarks = COALESCE(${remarks}, remarks),
+          updated_at = NOW()
+        WHERE inquiry_id = ${req.params.id}
+        RETURNING inquiry_id, full_name, mobile_no, email, site_name, plot_number,
+                  inquiry_message, inquiry_type, source_page, status, remarks,
+                  created_at, updated_at`;
+      if (!updated) return err(res, "Inquiry not found", 404);
+      console.log("[Admin Inquiry Update]", updated);
+      return ok(res, updated, "Inquiry updated successfully");
+    } catch (e) {
+      console.error("[Admin Inquiry Update Error]", e);
+      return err(res, e.message);
+    }
+  }
+);
+
+app.delete("/api/admin/inquiries/:id",
+  verifyAdminToken,
+  role("SuperAdmin"),
+  async (req, res) => {
+    try {
+      await ensureInquirySchema();
+      const [deleted] = await sql`
+        DELETE FROM inquiries
+        WHERE inquiry_id = ${req.params.id}
+        RETURNING inquiry_id`;
+      if (!deleted) return err(res, "Inquiry not found", 404);
+      console.log("[Admin Inquiry Delete]", deleted);
+      return ok(res, deleted, "Inquiry deleted successfully");
+    } catch (e) {
+      console.error("[Admin Inquiry Delete Error]", e);
+      return err(res, e.message);
+    }
+  }
+);
 
 app.get("/api/admin/users/pending",
   verifyAdminToken,
