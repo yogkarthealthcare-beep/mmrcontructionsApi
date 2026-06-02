@@ -1808,15 +1808,16 @@ const getAdminInquiriesPage = async (query) => {
 app.post("/api/inquiries", async (req, res) => {
   try {
     await ensureInquirySchema();
-    console.log("[Inquiry Submit Request]", req.body);
-    const fullName = String(req.body.full_name || req.body.name || "").trim();
-    const mobileNo = String(req.body.mobile_no || req.body.mobile || "").replace(/\D/g, "").slice(0, 15);
-    const email = String(req.body.email || "").trim().toLowerCase() || null;
-    const siteName = String(req.body.site_name || req.body.property_name || req.body.interest || "").trim() || null;
-    const plotNumber = String(req.body.plot_number || "").trim() || null;
-    const message = String(req.body.inquiry_message || req.body.message || "").trim() || null;
-    const inquiryType = String(req.body.inquiry_type || req.body.interest || "General Enquiry").trim() || "General Enquiry";
-    const sourcePage = String(req.body.source_page || "Website").trim() || "Website";
+    const body = req.body || {};
+    console.log("[Inquiry Submit Request]", body);
+    const fullName = String(body.full_name || body.name || "").trim();
+    const mobileNo = String(body.mobile_no || body.mobile || "").replace(/\D/g, "").slice(0, 15);
+    const email = String(body.email || "").trim().toLowerCase() || null;
+    const siteName = String(body.site_name || body.property_name || body.interest || "").trim() || null;
+    const plotNumber = String(body.plot_number || "").trim() || null;
+    const message = String(body.inquiry_message || body.message || "").trim() || null;
+    const inquiryType = String(body.inquiry_type || body.interest || "General Enquiry").trim() || "General Enquiry";
+    const sourcePage = String(body.source_page || "Website").trim() || "Website";
 
     if (!fullName) return err(res, "Full name is required", 400);
     if (!mobileNo) return err(res, "Mobile number is required", 400);
