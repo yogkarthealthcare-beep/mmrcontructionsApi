@@ -78,18 +78,67 @@ function uploadToCloudinary(buffer, folder, filename) {
     const ext         = path.extname(filename).toLowerCase().replace(".", "");
     const isPdf       = ext === "pdf";
     const resourceType = isPdf ? "raw" : "image";
+    const cloudinaryConfig = {
+      cloudName: envValue("CLOUDINARY_CLOUD_NAME"),
+      apiKey: envValue("CLOUDINARY_API_KEY"),
+      apiSecret: envValue("CLOUDINARY_API_SECRET"),
+    };
 
+    if (!cloudinaryConfig.cloudName || !cloudinaryConfig.apiKey || !cloudinaryConfig.apiSecret) {
+      return reject(new Error("Cloudinary configuration missing. Check CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET."));
+    }
+
+    const publicId = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+    const timestamp = Math.floor(Date.now() / 1000);
+    const paramsToSign = {
+      folder,
+      public_id: publicId,
+      timestamp,
+      ...(isPdf ? { format: "pdf" } : {}),
+    };
+    const signature = cloudinary.utils.api_sign_request(paramsToSign, cloudinaryConfig.apiSecret);
     const uploadOptions = {
       folder,
       resource_type: resourceType,
-      public_id: `${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+      public_id: publicId,
+      timestamp,
       ...(isPdf ? { format: "pdf" } : {}),
     };
+
+    console.log("Params To Sign:", paramsToSign);
+    console.log("Generated Signature:", signature);
+    console.log("Upload Payload:", {
+      ...uploadOptions,
+      api_key: `${cloudinaryConfig.apiKey.slice(0, 4)}...${cloudinaryConfig.apiKey.slice(-4)}`,
+      file_name: filename,
+      file_size: buffer.length,
+    });
 
     const stream = cloudinary.uploader.upload_stream(
       uploadOptions,
       (error, result) => {
-        if (error) return reject(error);
+        if (error) {
+          console.error("[Cloudinary Upload Error]", {
+            message: error.message,
+            http_code: error.http_code,
+            paramsToSign,
+            generatedSignature: signature,
+            uploadPayload: {
+              ...uploadOptions,
+              api_key: `${cloudinaryConfig.apiKey.slice(0, 4)}...${cloudinaryConfig.apiKey.slice(-4)}`,
+              file_name: filename,
+              file_size: buffer.length,
+            },
+          });
+
+          if (/invalid signature/i.test(error.message || "")) {
+            return reject(new Error("Cloudinary upload failed: invalid signature. Verify CLOUDINARY_API_SECRET in the deployed environment and ensure folder, public_id, and timestamp match the signed payload."));
+          }
+          if (/timestamp/i.test(error.message || "")) {
+            return reject(new Error("Cloudinary upload failed: missing or invalid timestamp."));
+          }
+          return reject(new Error(error.message || "Cloudinary upload failed."));
+        }
         resolve({ url: result.secure_url, public_id: result.public_id });
       }
     );
