@@ -130,14 +130,14 @@ export function otpEmailHtml(otp, purpose = 'Verification') {
   </div>`;
 }
 
-export function passwordChangedEmailHtml(adminName) {
+export function passwordChangedEmailHtml(accountName) {
   return `
   <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;background:#f9fafb;padding:32px 16px;">
     <div style="background:#fff;border-radius:16px;padding:40px 32px;box-shadow:0 2px 12px rgba(0,0,0,.08);">
       <h2 style="color:#1a5c3a;text-align:center;">Password Changed Successfully</h2>
-      <p style="color:#374151;font-size:14px;">Hi <strong>${adminName}</strong>,</p>
+      <p style="color:#374151;font-size:14px;">Hi <strong>${accountName}</strong>,</p>
       <p style="color:#374151;font-size:14px;line-height:1.7;">
-        Your admin account password has been changed successfully.
+        Your account password has been changed successfully.
         If you did not make this change, please contact support immediately.
       </p>
       <hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0;"/>

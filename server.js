@@ -10,6 +10,7 @@ import { v2 as cloudinary } from "cloudinary";
 import { Readable } from "stream";
 import newRoutes from './routes/newRoutes.js';
 import authEmailRoutes from './routes/authEmailRoutes.js';
+import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
 dotenv.config();
 
 
@@ -646,43 +647,59 @@ app.post("/api/auth/refresh", async (req, res) => {
 // Forgot Password — send OTP
 app.post("/api/auth/forgot-password", async (req, res) => {
   try {
-    const { mobile_no } = req.body;
-    if (!mobile_no) return err(res, "mobile_no required", 400);
-    const [user] = await sql`SELECT user_id FROM users WHERE mobile_no = ${mobile_no}`;
-    if (!user) return err(res, "Mobile not registered", 404);
+    const email = String(req.body.email || "").toLowerCase().trim();
+    const mobileNo = String(req.body.mobile_no || "").replace(/\D/g, "");
+    if (!email && !mobileNo) return err(res, "email required", 400);
 
+    const [user] = email
+      ? await sql`
+          SELECT user_id, full_name, email, mobile_no
+          FROM users
+          WHERE LOWER(email) = ${email}`
+      : await sql`
+          SELECT user_id, full_name, email, mobile_no
+          FROM users
+          WHERE mobile_no = ${mobileNo}`;
+
+    if (!user) return err(res, "Email not registered", 404);
+    if (!user.email) return err(res, "Registered email not available for this account", 400);
+
+    const resetEmail = String(user.email).toLowerCase().trim();
     const otp = genOTP();
+
     await sql`
       UPDATE otp_log SET is_used = TRUE
-      WHERE mobile = ${mobile_no} AND purpose = 'ResetPassword' AND is_used = FALSE`;
+      WHERE mobile = ${resetEmail} AND purpose = 'ResetPassword' AND is_used = FALSE`;
     await sql`
       INSERT INTO otp_log (user_type, reference_id, mobile, otp_code, purpose, expires_at)
-      VALUES ('User', ${user.user_id}, ${mobile_no}, ${otp}, 'ResetPassword',
+      VALUES ('User', ${user.user_id}, ${resetEmail}, ${otp}, 'ResetPassword',
               ${new Date(Date.now() + 10*60*1000)})`;
 
-    console.log(`[RESET OTP] ${mobile_no} → ${otp}`);
-    return ok(res, {}, "OTP sent for password reset");
+    await sendEmail(resetEmail, "MMR password reset OTP", otpEmailHtml(otp, "Password Reset"));
+    return ok(res, { email: resetEmail }, "OTP sent to your registered email");
   } catch (e) {
     return err(res, e.message);
   }
 });
 
-// Reset Password
 app.post("/api/auth/reset-password", async (req, res) => {
   try {
-    const { mobile_no, otp_code, new_password } = req.body;
-    if (!mobile_no || !otp_code || !new_password)
-      return err(res, "mobile_no, otp_code, new_password required", 400);
+    const email = String(req.body.email || "").toLowerCase().trim();
+    const { otp_code, new_password } = req.body;
+    if (!email || !otp_code || !new_password)
+      return err(res, "email, otp_code, new_password required", 400);
+    if (String(new_password).length < 8)
+      return err(res, "New password minimum 8 characters required", 400);
 
     const [otpRow] = await sql`
       SELECT * FROM otp_log
-      WHERE mobile = ${mobile_no} AND otp_code = ${otp_code}
+      WHERE mobile = ${email} AND otp_code = ${otp_code}
         AND purpose = 'ResetPassword' AND is_used = FALSE AND expires_at > NOW()
       ORDER BY otp_id DESC LIMIT 1`;
     if (!otpRow) return err(res, "Invalid or expired OTP", 400);
 
     const hash = await bcrypt.hash(new_password, 12);
-    await sql`UPDATE users SET password_hash = ${hash} WHERE mobile_no = ${mobile_no}`;
+    await sql`UPDATE users SET password_hash = ${hash}, updated_at = NOW() WHERE user_id = ${otpRow.reference_id}`;
     await sql`UPDATE otp_log SET is_used = TRUE WHERE otp_id = ${otpRow.otp_id}`;
 
     return ok(res, {}, "Password reset successfully");
@@ -691,6 +708,45 @@ app.post("/api/auth/reset-password", async (req, res) => {
   }
 });
 
+app.post("/api/auth/change-password", verifyUserToken, async (req, res) => {
+  try {
+    const { current_password, new_password, confirm_password } = req.body;
+    if (!current_password || !new_password || !confirm_password)
+      return err(res, "current_password, new_password, confirm_password required", 400);
+    if (new_password.length < 8)
+      return err(res, "New password minimum 8 characters required", 400);
+    if (new_password !== confirm_password)
+      return err(res, "New password and confirm password do not match", 400);
+
+    const [user] = await sql`
+      SELECT user_id, full_name, email, password_hash
+      FROM users
+      WHERE user_id = ${req.user.user_id}`;
+
+    if (!user) return err(res, "User not found", 404);
+    if (!user.password_hash) return err(res, "No password set for this account", 400);
+
+    const valid = await bcrypt.compare(current_password, user.password_hash);
+    if (!valid) return err(res, "Current password is incorrect", 400);
+    if (await bcrypt.compare(new_password, user.password_hash))
+      return err(res, "New password must be different from current password", 400);
+
+    const newHash = await bcrypt.hash(new_password, 12);
+    await sql`UPDATE users SET password_hash = ${newHash}, updated_at = NOW() WHERE user_id = ${user.user_id}`;
+
+    if (user.email) {
+      try {
+        await sendEmail(user.email, "MMR password changed", passwordChangedEmailHtml(user.full_name || "User"));
+      } catch (mailError) {
+        console.warn("[user-change-password] Confirmation email failed:", mailError.message);
+      }
+    }
+
+    return ok(res, {}, "Password changed successfully");
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
 /* ==========================
    ─────────────────────────
    AUTH — ADMIN
@@ -1422,22 +1478,114 @@ app.get("/api/buyback/status", verifyUserToken, async (req, res) => {
    ─────────────────────────
 ========================== */
 
+const adminUserSortMap = {
+  name: "u.full_name",
+  full_name: "u.full_name",
+  email: "u.email",
+  mobile_no: "u.mobile_no",
+  status: "u.account_status",
+  account_status: "u.account_status",
+  date: "u.registered_at",
+  registered_at: "u.registered_at",
+  created_at: "u.registered_at",
+  updated_at: "u.updated_at",
+  user_type: "u.user_type",
+  member_id: "u.member_id",
+};
+
+const adminUsersResponse = (res, rows, totalRecords, page, pageSize) => {
+  const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
+  return res.json({
+    success: true,
+    data: rows,
+    users: rows,
+    total: totalRecords,
+    totalRecords,
+    currentPage: page,
+    page,
+    pageSize,
+    limit: pageSize,
+    totalPages,
+  });
+};
+
+const getAdminUsersPage = async (query, defaults = {}) => {
+  const page = Math.max(1, Number(query.page || defaults.page || 1));
+  const pageSize = Math.min(100, Math.max(1, Number(query.pageSize || query.limit || defaults.pageSize || 20)));
+  const offset = (page - 1) * pageSize;
+  const sortBy = adminUserSortMap[query.sortBy || query.sort_by || defaults.sortBy || "registered_at"] || "u.registered_at";
+  const sortDir = String(query.sortDir || query.sort_dir || defaults.sortDir || "desc").toLowerCase() === "asc" ? "ASC" : "DESC";
+  const where = [];
+  const params = [];
+
+  const add = (condition, value) => {
+    params.push(value);
+    where.push(condition.replace("?", `$${params.length}`));
+  };
+
+  if (defaults.statuses?.length) {
+    params.push(defaults.statuses);
+    where.push(`u.account_status = ANY($${params.length})`);
+  }
+
+  if (query.status) add("u.account_status = ?", query.status);
+  if (query.user_type) add("u.user_type = ?", query.user_type);
+  if (query.verification_status) add("COALESCE(u.email_verified, u.is_otp_verified, FALSE) = ?", query.verification_status === "verified");
+  if (query.date_from) add("u.registered_at::date >= ?::date", query.date_from);
+  if (query.date_to) add("u.registered_at::date <= ?::date", query.date_to);
+
+  if (query.search) {
+    params.push(`%${String(query.search).trim()}%`);
+    const idx = `$${params.length}`;
+    where.push(`(
+      u.full_name ILIKE ${idx}
+      OR u.email ILIKE ${idx}
+      OR u.mobile_no ILIKE ${idx}
+      OR u.member_id ILIKE ${idx}
+      OR u.invitation_code ILIKE ${idx}
+      OR CAST(u.user_id AS TEXT) ILIKE ${idx}
+    )`);
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const rows = await sql.unsafe(`
+    SELECT u.user_id, u.member_id, u.user_type, u.full_name, u.mobile_no,
+           u.email, u.account_status, u.registered_at, u.updated_at,
+           u.invitation_code, sp.full_name AS sponsor_name,
+           COALESCE(doc.doc_count, 0)::int AS doc_count
+    FROM users u
+    LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
+    LEFT JOIN (
+      SELECT user_id, COUNT(*) AS doc_count
+      FROM user_documents
+      WHERE is_active = TRUE
+      GROUP BY user_id
+    ) doc ON doc.user_id = u.user_id
+    ${whereSql}
+    ORDER BY ${sortBy} ${sortDir}, u.user_id DESC
+    LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+  `, [...params, pageSize, offset]);
+
+  const [total] = await sql.unsafe(`
+    SELECT COUNT(*)::int AS count
+    FROM users u
+    ${whereSql}
+  `, params);
+
+  return { rows, totalRecords: Number(total?.count || 0), page, pageSize };
+};
+
 app.get("/api/admin/users/pending",
   verifyAdminToken,
   role("SuperAdmin","SupportStaff"),
   async (req, res) => {
     try {
-      const pending = await sql`
-        SELECT u.user_id, u.full_name, u.mobile_no, u.email, u.user_type,
-               u.account_status, u.registered_at,
-               sp.full_name AS sponsor_name,
-               (SELECT COUNT(*) FROM user_documents d
-                WHERE d.user_id = u.user_id AND d.is_active = TRUE) AS doc_count
-        FROM users u
-        LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
-        WHERE u.account_status IN ('Pending','InfoRequested','InfoSubmitted')
-        ORDER BY u.registered_at ASC`;
-      return ok(res, pending);
+      const result = await getAdminUsersPage(req.query, {
+        statuses: ["Pending", "InfoRequested", "InfoSubmitted"],
+        sortBy: "registered_at",
+        sortDir: "asc",
+      });
+      return adminUsersResponse(res, result.rows, result.totalRecords, result.page, result.pageSize);
     } catch (e) {
       return err(res, e.message);
     }
@@ -1449,27 +1597,8 @@ app.get("/api/admin/users",
   role("SuperAdmin","SupportStaff"),
   async (req, res) => {
     try {
-      const { status, user_type, search, page = 1, limit = 20 } = req.query;
-      const offset = (page - 1) * limit;
-      const srch   = search ? `%${search}%` : null;
-
-      const users = await sql`
-        SELECT user_id, member_id, user_type, full_name, mobile_no,
-               email, account_status, registered_at, invitation_code
-        FROM users
-        WHERE (${status    || null} IS NULL OR account_status = ${status})
-          AND (${user_type || null} IS NULL OR user_type      = ${user_type})
-          AND (${srch}     IS NULL OR full_name ILIKE ${srch} OR mobile_no LIKE ${srch})
-        ORDER BY registered_at DESC
-        LIMIT ${limit} OFFSET ${offset}`;
-
-      const [total] = await sql`
-        SELECT COUNT(*) AS count FROM users
-        WHERE (${status    || null} IS NULL OR account_status = ${status})
-          AND (${user_type || null} IS NULL OR user_type      = ${user_type})
-          AND (${srch}     IS NULL OR full_name ILIKE ${srch} OR mobile_no LIKE ${srch})`;
-
-      return ok(res, { users, total: total.count, page: +page, limit: +limit });
+      const result = await getAdminUsersPage(req.query);
+      return adminUsersResponse(res, result.rows, result.totalRecords, result.page, result.pageSize);
     } catch (e) {
       return err(res, e.message);
     }
@@ -2107,3 +2236,4 @@ server.on("error", (error) => {
 });
 
 globalThis.__mmrApiServer = server;
+
