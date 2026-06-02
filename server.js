@@ -60,6 +60,7 @@ const CLOUDINARY_FOLDER = {
   payment_proof: "mmr/proofs",
   pan_card:      "mmr/documents",
   aadhar_card:   "mmr/documents",
+  property_image:"mmr/site-images",
   site_map:      "mmr/site-maps",
   document:      "mmr/documents",   // generic upload-doc
 };
@@ -99,11 +100,11 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
   fileFilter: (req, file, cb) => {
-    const isSiteMap = file.fieldname === "site_map";
-    const allowed = isSiteMap ? /jpeg|jpg|png/ : /jpeg|jpg|png|pdf/;
+    const isSiteImage = file.fieldname === "site_map" || file.fieldname === "property_image";
+    const allowed = isSiteImage ? /jpeg|jpg|png/ : /jpeg|jpg|png|pdf/;
     allowed.test(path.extname(file.originalname).toLowerCase())
       ? cb(null, true)
-      : cb(new Error(isSiteMap ? "Only JPG, JPEG, and PNG files are allowed." : "Only JPG, PNG, PDF allowed"));
+      : cb(new Error(isSiteImage ? "Only JPG, JPEG, and PNG files are allowed." : "Only JPG, PNG, PDF allowed"));
   },
 });
 
@@ -117,6 +118,11 @@ const err = (res, msg = "Server error", status = 500) =>
   res.status(status).json({ success: false, message: msg });
 
 const adminJwtSecret = () => process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
+const parseBool = (value, fallback = false) => {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  return ["true", "1", "yes", "on"].includes(String(value).toLowerCase());
+};
 
 // Generate 6-digit OTP
 const genOTP = () => String(Math.floor(100000 + Math.random() * 900000));
@@ -964,7 +970,8 @@ app.get("/api/sites", async (req, res) => {
   try {
     const sites = await sql`
       SELECT s.site_id, s.site_name, s.city, s.state, s.full_address,
-             s.description, s.map_image_url,
+             s.description, s.starting_price, s.total_area, s.highlights,
+             s.property_image_url, s.map_image_url, s.display_on_home_page,
              s.site_status, s.has_govt_approval,
              COUNT(p.plot_id)                                              AS total_plots,
              COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Vacant')     AS vacant,
@@ -974,6 +981,28 @@ app.get("/api/sites", async (req, res) => {
       FROM sites s
       LEFT JOIN plots p ON s.site_id = p.site_id AND p.is_active = TRUE
       WHERE s.site_status = 'Active'
+      GROUP BY s.site_id ORDER BY s.site_id`;
+    return ok(res, sites);
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+app.get("/api/sites/home", async (req, res) => {
+  try {
+    const sites = await sql`
+      SELECT s.site_id, s.site_name, s.city, s.state, s.full_address,
+             s.description, s.starting_price, s.total_area, s.highlights,
+             s.property_image_url, s.map_image_url, s.display_on_home_page,
+             s.site_status, s.has_govt_approval,
+             COUNT(p.plot_id)                                             AS total_plots,
+             COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Vacant')    AS vacant,
+             COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'InProcess') AS in_process,
+             COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Booked')    AS booked,
+             COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Sold')      AS sold
+      FROM sites s
+      LEFT JOIN plots p ON s.site_id = p.site_id AND p.is_active = TRUE
+      WHERE s.site_status = 'Active' AND COALESCE(s.display_on_home_page, TRUE) = TRUE
       GROUP BY s.site_id ORDER BY s.site_id`;
     return ok(res, sites);
   } catch (e) {
@@ -1004,7 +1033,8 @@ app.get("/api/sites/:id/map", async (req, res) => {
     const { id } = req.params;
     const [site] = await sql`
       SELECT site_id, site_name, city, state, full_address, description,
-             map_image_url, site_status, total_plots
+             starting_price, total_area, highlights, property_image_url,
+             map_image_url, site_status, total_plots, display_on_home_page
       FROM sites
       WHERE site_id = ${id}`;
     if (!site) return err(res, "Site not found", 404);
@@ -2151,7 +2181,9 @@ app.get("/api/admin/sites",
     try {
       const sites = await sql`
         SELECT s.site_id, s.site_name, s.city, s.state, s.full_address,
-               s.description, s.map_image_url, s.site_status, s.has_govt_approval,
+               s.description, s.starting_price, s.total_area, s.highlights,
+               s.property_image_url, s.map_image_url, s.display_on_home_page,
+               s.site_status, s.has_govt_approval,
                s.total_plots AS planned_total_plots, s.created_at, s.updated_at,
                COUNT(p.plot_id)::int AS total_plots,
                COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Vacant')::int AS vacant,
@@ -2172,26 +2204,44 @@ app.get("/api/admin/sites",
 app.post("/api/admin/sites",
   verifyAdminToken,
   role("SuperAdmin","SiteManager"),
-  upload.single("site_map"),
+  upload.fields([
+    { name: "property_image", maxCount: 1 },
+    { name: "site_map", maxCount: 1 },
+  ]),
   async (req, res) => {
     try {
-      const { site_name, city, state, full_address, description, total_plots, site_status } = req.body;
+      const {
+        site_name, city, state, full_address, description, total_plots, site_status,
+        starting_price, total_area, highlights, display_on_home_page,
+      } = req.body;
       if (!site_name || !city) return err(res, "site_name, city required", 400);
+      let propertyImageUrl = null;
+      let propertyImagePublicId = null;
       let mapUrl = null;
       let mapPublicId = null;
-      if (req.file) {
-        const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.site_map, req.file.originalname);
+      const propertyFile = req.files?.property_image?.[0];
+      const mapFile = req.files?.site_map?.[0];
+      if (propertyFile) {
+        const uploaded = await uploadToCloudinary(propertyFile.buffer, CLOUDINARY_FOLDER.property_image, propertyFile.originalname);
+        propertyImageUrl = uploaded.url;
+        propertyImagePublicId = uploaded.public_id;
+      }
+      if (mapFile) {
+        const uploaded = await uploadToCloudinary(mapFile.buffer, CLOUDINARY_FOLDER.site_map, mapFile.originalname);
         mapUrl = uploaded.url;
         mapPublicId = uploaded.public_id;
       }
       const [site] = await sql`
         INSERT INTO sites (
           site_name, city, state, full_address, description, total_plots,
-          site_status, map_image_url, map_public_id, created_by_admin_id
+          starting_price, total_area, highlights, property_image_url, property_image_public_id,
+          display_on_home_page, site_status, map_image_url, map_public_id, created_by_admin_id
         )
         VALUES (
           ${site_name}, ${city}, ${state || "Uttar Pradesh"}, ${full_address || null},
           ${description || null}, ${Number(total_plots || 0)},
+          ${starting_price ? Number(starting_price) : null}, ${total_area || null}, ${highlights || null},
+          ${propertyImageUrl}, ${propertyImagePublicId}, ${parseBool(display_on_home_page, true)},
           ${site_status || "Active"}::site_status_enum, ${mapUrl}, ${mapPublicId}, ${req.admin.admin_id}
         )
         RETURNING site_id, site_name`;
@@ -2205,15 +2255,34 @@ app.post("/api/admin/sites",
 app.put("/api/admin/sites/:id",
   verifyAdminToken,
   role("SuperAdmin","SiteManager"),
-  upload.single("site_map"),
+  upload.fields([
+    { name: "property_image", maxCount: 1 },
+    { name: "site_map", maxCount: 1 },
+  ]),
   async (req, res) => {
     try {
-      const { site_name, city, state, full_address, description, total_plots, site_status, has_govt_approval } = req.body;
+      const {
+        site_name, city, state, full_address, description, total_plots, site_status, has_govt_approval,
+        starting_price, total_area, highlights, display_on_home_page,
+      } = req.body;
+      let propertyImageUrl = null;
+      let propertyImagePublicId = null;
       let mapUrl = null;
       let mapPublicId = null;
-      if (req.file) {
-        const [oldSite] = await sql`SELECT map_public_id FROM sites WHERE site_id = ${req.params.id}`;
-        const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.site_map, req.file.originalname);
+      const [oldSite] = await sql`
+        SELECT map_public_id, property_image_public_id FROM sites WHERE site_id = ${req.params.id}`;
+      const propertyFile = req.files?.property_image?.[0];
+      const mapFile = req.files?.site_map?.[0];
+      if (propertyFile) {
+        const uploaded = await uploadToCloudinary(propertyFile.buffer, CLOUDINARY_FOLDER.property_image, propertyFile.originalname);
+        propertyImageUrl = uploaded.url;
+        propertyImagePublicId = uploaded.public_id;
+        if (oldSite?.property_image_public_id) {
+          cloudinary.uploader.destroy(oldSite.property_image_public_id).catch(() => {});
+        }
+      }
+      if (mapFile) {
+        const uploaded = await uploadToCloudinary(mapFile.buffer, CLOUDINARY_FOLDER.site_map, mapFile.originalname);
         mapUrl = uploaded.url;
         mapPublicId = uploaded.public_id;
         if (oldSite?.map_public_id) {
@@ -2228,8 +2297,14 @@ app.put("/api/admin/sites/:id",
           full_address     = COALESCE(${full_address     || null}, full_address),
           description      = COALESCE(${description      || null}, description),
           total_plots      = COALESCE(${total_plots ? Number(total_plots) : null}, total_plots),
+          starting_price   = COALESCE(${starting_price ? Number(starting_price) : null}, starting_price),
+          total_area       = COALESCE(${total_area       || null}, total_area),
+          highlights       = COALESCE(${highlights       || null}, highlights),
+          display_on_home_page = COALESCE(${display_on_home_page != null ? parseBool(display_on_home_page, true) : null}, display_on_home_page),
           site_status      = COALESCE(${site_status      || null}::site_status_enum, site_status),
           has_govt_approval= COALESCE(${has_govt_approval != null ? has_govt_approval : null}, has_govt_approval),
+          property_image_url = COALESCE(${propertyImageUrl}, property_image_url),
+          property_image_public_id = COALESCE(${propertyImagePublicId}, property_image_public_id),
           map_image_url    = COALESCE(${mapUrl}, map_image_url),
           map_public_id    = COALESCE(${mapPublicId}, map_public_id),
           updated_at       = NOW()
@@ -2285,6 +2360,78 @@ app.post("/api/admin/sites/:id/map",
         WHERE site_id = ${req.params.id}`;
       if (oldSite.map_public_id) cloudinary.uploader.destroy(oldSite.map_public_id).catch(() => {});
       return ok(res, { map_image_url: uploaded.url }, "Map uploaded successfully");
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.post("/api/admin/sites/:id/map-image",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  upload.single("site_map"),
+  async (req, res) => {
+    try {
+      if (!req.file) return err(res, "site_map image is required", 400);
+      const [oldSite] = await sql`SELECT map_public_id FROM sites WHERE site_id = ${req.params.id}`;
+      if (!oldSite) return err(res, "Site not found", 404);
+      const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.site_map, req.file.originalname);
+      await sql`
+        UPDATE sites SET map_image_url = ${uploaded.url}, map_public_id = ${uploaded.public_id}, updated_at = NOW()
+        WHERE site_id = ${req.params.id}`;
+      if (oldSite.map_public_id) cloudinary.uploader.destroy(oldSite.map_public_id).catch(() => {});
+      return ok(res, { map_image_url: uploaded.url }, "Map uploaded successfully");
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.post("/api/admin/sites/:id/property-image",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  upload.single("property_image"),
+  async (req, res) => {
+    try {
+      if (!req.file) return err(res, "property_image is required", 400);
+      const [oldSite] = await sql`SELECT property_image_public_id FROM sites WHERE site_id = ${req.params.id}`;
+      if (!oldSite) return err(res, "Site not found", 404);
+      const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.property_image, req.file.originalname);
+      await sql`
+        UPDATE sites SET property_image_url = ${uploaded.url}, property_image_public_id = ${uploaded.public_id}, updated_at = NOW()
+        WHERE site_id = ${req.params.id}`;
+      if (oldSite.property_image_public_id) cloudinary.uploader.destroy(oldSite.property_image_public_id).catch(() => {});
+      return ok(res, { property_image_url: uploaded.url }, "Property image uploaded successfully");
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.post("/api/admin/sites/:id/plots",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  async (req, res) => {
+    try {
+      const { plot_number, plot_area, plot_category,
+              base_price, down_payment, monthly_emi, emi_tenure_months,
+              file_charge, plot_status, coordinates_x, coordinates_y } = req.body;
+      if (!plot_number || !plot_area || !base_price)
+        return err(res, "plot_number, plot_area, base_price required", 400);
+
+      const [plot] = await sql`
+        INSERT INTO plots (site_id, plot_number, plot_area, plot_category,
+                           base_price, down_payment, monthly_emi, emi_tenure_months,
+                           file_charge, plot_status, coordinates_x, coordinates_y,
+                           created_by_admin_id)
+        VALUES (${req.params.id}, ${plot_number}, ${plot_area},
+                ${plot_category || (plot_area <= 50 ? "50gaj" : "100gaj")},
+                ${base_price}, ${down_payment || 0}, ${monthly_emi || 0},
+                ${emi_tenure_months || 60}, ${file_charge || 0},
+                ${plot_status || "Vacant"}::plot_status_enum,
+                ${coordinates_x || null}, ${coordinates_y || null}, ${req.admin.admin_id})
+        RETURNING plot_id, plot_number, plot_status`;
+      return ok(res, plot, "Plot created", 201);
     } catch (e) {
       return err(res, e.message);
     }
