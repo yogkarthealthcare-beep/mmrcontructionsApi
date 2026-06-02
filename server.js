@@ -1525,14 +1525,15 @@ const getAdminUsersPage = async (query, defaults = {}) => {
 
   if (defaults.statuses?.length) {
     params.push(defaults.statuses);
-    where.push(`u.account_status = ANY($${params.length})`);
+    where.push(`u.account_status::text = ANY($${params.length})`);
   }
 
-  if (query.status) add("u.account_status = ?", query.status);
-  if (query.user_type) add("u.user_type = ?", query.user_type);
+  if (query.status) add("u.account_status::text = ?", query.status);
+  if (query.user_type) add("LOWER(u.user_type::text) = LOWER(?)", query.user_type);
   if (query.verification_status) add("COALESCE(u.email_verified, u.is_otp_verified, FALSE) = ?", query.verification_status === "verified");
   if (query.date_from) add("u.registered_at::date >= ?::date", query.date_from);
   if (query.date_to) add("u.registered_at::date <= ?::date", query.date_to);
+  if (defaults.activeOnly) where.push("COALESCE(u.is_active, TRUE) = TRUE");
 
   if (query.search) {
     params.push(`%${String(query.search).trim()}%`);
@@ -1551,10 +1552,12 @@ const getAdminUsersPage = async (query, defaults = {}) => {
   const rows = await sql.unsafe(`
     SELECT u.user_id, u.member_id, u.user_type, u.full_name, u.mobile_no,
            u.email, u.account_status, u.registered_at, u.updated_at,
+           pa.address_line1 AS address, pa.city, pa.state, pa.pin_code,
            u.invitation_code, sp.full_name AS sponsor_name,
            COALESCE(doc.doc_count, 0)::int AS doc_count
     FROM users u
     LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
+    LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
     LEFT JOIN (
       SELECT user_id, COUNT(*) AS doc_count
       FROM user_documents
@@ -1599,6 +1602,178 @@ app.get("/api/admin/users",
     try {
       const result = await getAdminUsersPage(req.query);
       return adminUsersResponse(res, result.rows, result.totalRecords, result.page, result.pageSize);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.get("/api/admin/customers",
+  verifyAdminToken,
+  role("SuperAdmin","SupportStaff"),
+  async (req, res) => {
+    try {
+      const result = await getAdminUsersPage(
+        { ...req.query, user_type: "Customer" },
+        { sortBy: "registered_at", sortDir: "desc", activeOnly: true },
+      );
+      return adminUsersResponse(res, result.rows, result.totalRecords, result.page, result.pageSize);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.post("/api/admin/customers",
+  verifyAdminToken,
+  role("SuperAdmin","SupportStaff"),
+  async (req, res) => {
+    try {
+      const fullName = String(req.body.full_name || "").trim();
+      const email = String(req.body.email || "").toLowerCase().trim();
+      const mobileNo = String(req.body.mobile_no || req.body.phone || "").replace(/\D/g, "");
+      const password = String(req.body.password || "");
+      const confirmPassword = String(req.body.confirm_password || "");
+      const accountStatus = String(req.body.account_status || req.body.status || "Active").trim();
+      const address = String(req.body.address || "").trim();
+      const city = String(req.body.city || "").trim();
+      const state = String(req.body.state || "").trim();
+      const pinCode = String(req.body.pin_code || req.body.pincode || "").trim();
+
+      if (!fullName) return err(res, "Name is required", 400);
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err(res, "Valid email is required", 400);
+      if (!mobileNo) return err(res, "Phone number is required", 400);
+      if (!password) return err(res, "Password is required", 400);
+      if (password.length < 6) return err(res, "Password must be at least 6 characters", 400);
+      if (password !== confirmPassword) return err(res, "Confirm password must match password", 400);
+      if (!["Active", "Pending", "Suspended", "Blacklisted"].includes(accountStatus)) {
+        return err(res, "Invalid status", 400);
+      }
+
+      const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${email}`;
+      if (dupEmail) return err(res, "Email already exists", 409);
+      const [dupMobile] = await sql`SELECT user_id FROM users WHERE mobile_no = ${mobileNo}`;
+      if (dupMobile) return err(res, "Phone number already exists", 409);
+
+      const passwordHash = await bcrypt.hash(password, 12);
+      const memberId = await genMemberID("Customer");
+
+      const [customer] = await sql`
+        INSERT INTO users (
+          user_type, full_name, email, mobile_no, password_hash,
+          member_id, account_status, is_otp_verified, email_verified,
+          email_verified_at, is_active, is_verified, approved_by_admin_id, approved_at
+        )
+        VALUES (
+          'Customer', ${fullName}, ${email}, ${mobileNo}, ${passwordHash},
+          ${memberId}, ${accountStatus}, TRUE, TRUE,
+          NOW(), TRUE, TRUE, ${req.admin.admin_id}, NOW()
+        )
+        RETURNING user_id, member_id, user_type, full_name, email, mobile_no,
+                  account_status, registered_at, updated_at`;
+
+      if (address || city || state || pinCode) {
+        await sql`
+          INSERT INTO user_addresses (user_id, address_type, address_line1, city, state, pin_code)
+          VALUES (${customer.user_id}, 'Permanent', ${address || null}, ${city || null}, ${state || null}, ${pinCode || null})`;
+      }
+
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+        VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
+                'CustomerManagement', 'Created', 'users', ${customer.user_id},
+                ${JSON.stringify({ email, mobile_no: mobileNo, member_id: memberId, status: accountStatus })})`;
+
+      return ok(res, customer, "Customer created successfully", 201);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.put("/api/admin/customers/:id",
+  verifyAdminToken,
+  role("SuperAdmin","SupportStaff"),
+  async (req, res) => {
+    try {
+      const uid = req.params.id;
+      const fullName = String(req.body.full_name || "").trim();
+      const email = String(req.body.email || "").toLowerCase().trim();
+      const mobileNo = String(req.body.mobile_no || req.body.phone || "").replace(/\D/g, "");
+      const accountStatus = String(req.body.account_status || req.body.status || "").trim();
+      const address = String(req.body.address || "").trim();
+      const city = String(req.body.city || "").trim();
+      const state = String(req.body.state || "").trim();
+      const pinCode = String(req.body.pin_code || req.body.pincode || "").trim();
+
+      if (!fullName) return err(res, "Name is required", 400);
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err(res, "Valid email is required", 400);
+      if (!mobileNo) return err(res, "Phone number is required", 400);
+      if (!["Active", "Pending", "Suspended", "Blacklisted"].includes(accountStatus)) {
+        return err(res, "Invalid status", 400);
+      }
+
+      const [existing] = await sql`
+        SELECT user_id FROM users
+        WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'`;
+      if (!existing) return err(res, "Customer not found", 404);
+
+      const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${email} AND user_id <> ${uid}`;
+      if (dupEmail) return err(res, "Email already exists", 409);
+      const [dupMobile] = await sql`SELECT user_id FROM users WHERE mobile_no = ${mobileNo} AND user_id <> ${uid}`;
+      if (dupMobile) return err(res, "Phone number already exists", 409);
+
+      const [customer] = await sql`
+        UPDATE users SET
+          full_name = ${fullName},
+          email = ${email},
+          mobile_no = ${mobileNo},
+          account_status = ${accountStatus},
+          updated_at = NOW()
+        WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'
+        RETURNING user_id, member_id, user_type, full_name, email, mobile_no,
+                  account_status, registered_at, updated_at`;
+
+      await sql`
+        DELETE FROM user_addresses
+        WHERE user_id = ${uid} AND address_type = 'Permanent'`;
+      if (address || city || state || pinCode) {
+        await sql`
+          INSERT INTO user_addresses (user_id, address_type, address_line1, city, state, pin_code)
+          VALUES (${uid}, 'Permanent', ${address || null}, ${city || null}, ${state || null}, ${pinCode || null})`;
+      }
+
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+        VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
+                'CustomerManagement', 'Updated', 'users', ${uid},
+                ${JSON.stringify({ email, mobile_no: mobileNo, status: accountStatus })})`;
+
+      return ok(res, customer, "Customer updated successfully");
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.delete("/api/admin/customers/:id",
+  verifyAdminToken,
+  role("SuperAdmin"),
+  async (req, res) => {
+    try {
+      const uid = req.params.id;
+      const [customer] = await sql`
+        UPDATE users SET account_status = 'Blacklisted', is_active = FALSE, updated_at = NOW()
+        WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'
+        RETURNING user_id`;
+      if (!customer) return err(res, "Customer not found", 404);
+
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+        VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
+                'CustomerManagement', 'Deleted', 'users', ${uid})`;
+
+      return ok(res, {}, "Customer deleted successfully");
     } catch (e) {
       return err(res, e.message);
     }
