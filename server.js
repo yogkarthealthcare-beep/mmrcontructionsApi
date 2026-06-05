@@ -425,7 +425,6 @@ const addPlotBookingHistory = async ({
   triggeredByUser = null,
   plotStatusAtTime = null,
 }) => {
-  await requirePlotManagementSchema();
   await sql`
     INSERT INTO plot_booking_history
       (plot_id, booking_id, user_id, event_type, event_note,
@@ -1643,7 +1642,6 @@ app.get("/api/sites/:id/plot-status", async (req, res) => {
 
 app.get("/api/sites/:id/map", async (req, res) => {
   try {
-    await requirePlotManagementSchema();
     const { id } = req.params;
     const [site] = await sql`
       SELECT site_id, site_id AS id, site_name, city, state, full_address, description,
@@ -1689,7 +1687,6 @@ app.get("/api/sites/:id/map", async (req, res) => {
 
 app.get("/api/sites/:id/plots", async (req, res) => {
   try {
-    await requirePlotManagementSchema();
     const { id } = req.params;
     const { status, category } = req.query;
     const statusFilter = status ? String(status) : null;
@@ -1716,7 +1713,6 @@ app.get("/api/sites/:id/plots", async (req, res) => {
 
 app.get("/api/plots/:id", async (req, res) => {
   try {
-    await requirePlotManagementSchema();
     const [plot] = await sql`
       SELECT p.*, s.site_name, s.city, s.full_address
       FROM plots p JOIN sites s ON p.site_id = s.site_id
@@ -1751,48 +1747,6 @@ app.get("/api/plots/:id", async (req, res) => {
       images,
       polygon: polygon || { coordinates: [], label_x: null, label_y: null },
     });
-  } catch (e) {
-    return err(res, e.message);
-  }
-});
-
-app.get("/api/sites/:siteId/map", async (req, res) => {
-  try {
-    await requirePlotManagementSchema();
-    const [site] = await sql`
-      SELECT site_id AS id, site_name, map_image_url AS layout_map_url
-      FROM sites
-      WHERE site_id = ${req.params.siteId} AND site_status = 'Active'`;
-    if (!site) return err(res, "Site not found", 404);
-
-    const plots = await sql`
-      SELECT p.plot_id AS id, p.plot_number, p.plot_area, p.plot_status, p.base_price,
-             d.size_label, COALESCE(pc.coordinates, '[]'::jsonb) AS polygon_coordinates,
-             pc.label_x, pc.label_y,
-             CASE p.plot_status
-               WHEN 'Vacant' THEN '#22c55e'
-               WHEN 'InProcess' THEN '#eab308'
-               WHEN 'Booked' THEN '#ef4444'
-               WHEN 'Sold' THEN '#6b7280'
-               ELSE '#6b7280'
-             END AS status_color
-      FROM plots p
-      LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id
-      LEFT JOIN plot_details_extended d ON d.plot_id = p.plot_id
-      WHERE p.site_id = ${req.params.siteId} AND p.is_active = TRUE
-      ORDER BY p.plot_number`;
-
-    const stats = plots.reduce((acc, plot) => {
-      acc.total += 1;
-      const key = String(plot.plot_status || "").toLowerCase();
-      if (key === "inprocess") acc.inprocess += 1;
-      else if (key === "booked") acc.booked += 1;
-      else if (key === "sold") acc.sold += 1;
-      else if (key === "vacant") acc.vacant += 1;
-      return acc;
-    }, { total: 0, vacant: 0, inprocess: 0, booked: 0, sold: 0 });
-
-    return ok(res, { site, plots, stats });
   } catch (e) {
     return err(res, e.message);
   }
@@ -3069,7 +3023,6 @@ app.get("/api/admin/bookings/:id",
   role("SuperAdmin","SiteManager","FinanceManager"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const [booking] = await sql`
         SELECT b.*,
                json_build_object(
@@ -3405,7 +3358,6 @@ app.put("/api/admin/plots/:plotId/polygon",
   role("SuperAdmin","SiteManager"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const { coordinates, label_x, label_y, change_reason } = req.body;
       if (!validatePolygonCoordinates(coordinates)) {
         return err(res, "coordinates must be a non-empty array of { x, y } points.", 400);
@@ -3450,7 +3402,6 @@ app.post("/api/admin/plots/:id/polygon",
   role("SuperAdmin","SiteManager"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const { coordinates, label_x, label_y, change_reason } = req.body;
       if (!validatePolygonCoordinates(coordinates)) {
         return err(res, "coordinates must be a non-empty array of points.", 400);
@@ -3493,7 +3444,6 @@ app.get("/api/admin/plots/:plotId/polygon",
   role("SuperAdmin","SiteManager","SupportStaff"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const [polygon] = await sql`
         SELECT plot_id, coordinates, label_x, label_y
         FROM plot_polygon_coordinates
@@ -3515,7 +3465,6 @@ app.get("/api/admin/plots/:plotId/polygon-history",
   role("SuperAdmin","SiteManager"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const history = await sql`
         SELECT id, plot_id, old_coordinates, new_coordinates,
                changed_by_admin_id, change_reason, changed_at
@@ -3534,7 +3483,6 @@ app.put("/api/admin/plots/:plotId/polygon/restore/:historyId",
   role("SuperAdmin"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const { plotId, historyId } = req.params;
       const [history] = await sql`
         SELECT * FROM plot_polygon_history
@@ -3574,7 +3522,6 @@ app.get("/api/admin/plots/:plotId/details",
   role("SuperAdmin","SiteManager","SupportStaff"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const [plot] = await sql`
         SELECT plot_id AS id, plot_number, plot_area, plot_category, base_price,
                down_payment, monthly_emi, emi_tenure_months, file_charge, plot_status
@@ -3598,7 +3545,6 @@ app.put("/api/admin/plots/:plotId/details",
   role("SuperAdmin","SiteManager"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const plotId = req.params.plotId;
       const [plot] = await sql`SELECT plot_id FROM plots WHERE plot_id = ${plotId}`;
       if (!plot) return err(res, "Plot not found", 404);
@@ -3644,7 +3590,6 @@ app.post("/api/admin/plots/:plotId/images",
   plotImageUpload.single("image"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       if (!req.file || !validatePlotImageFile(req.file)) {
         return err(res, "Only JPG, JPEG, and PNG files are allowed.", 400);
       }
@@ -3679,7 +3624,6 @@ app.get("/api/admin/plots/:plotId/images",
   role("SuperAdmin","SiteManager","SupportStaff"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const images = await sql`
         SELECT id, plot_id, image_url, caption, image_order, uploaded_at
         FROM plot_images
@@ -3697,7 +3641,6 @@ app.put("/api/admin/plots/:plotId/images/:imageId",
   role("SuperAdmin","SiteManager"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const [existing] = await sql`
         SELECT id FROM plot_images
         WHERE id = ${req.params.imageId} AND plot_id = ${req.params.plotId}`;
@@ -3722,7 +3665,6 @@ app.delete("/api/admin/plots/:plotId/images/:imageId",
   role("SuperAdmin","SiteManager"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const [image] = await sql`
         SELECT id, image_path FROM plot_images
         WHERE id = ${req.params.imageId} AND plot_id = ${req.params.plotId}`;
@@ -3743,7 +3685,6 @@ app.post("/api/admin/sites/:siteId/plots/bulk-import",
   importUpload.single("file"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       if (!req.file) return err(res, "file is required", 400);
       let rows;
       try {
@@ -3850,7 +3791,6 @@ app.get("/api/admin/sites/:siteId/plots/import-history",
   role("SuperAdmin","SiteManager"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const history = await sql`
         SELECT l.id, l.site_id, l.original_filename, l.total_rows, l.success_count,
                l.failed_count, l.error_details, l.status, l.started_at, l.completed_at,
@@ -3871,7 +3811,6 @@ app.get("/api/admin/plots/:plotId/booking-history",
   role("SuperAdmin","SiteManager","FinanceManager"),
   async (req, res) => {
     try {
-      await requirePlotManagementSchema();
       const history = await sql`
         SELECT h.id, h.event_type, h.event_note, h.plot_status_at_time,
                json_build_object(
@@ -4714,7 +4653,18 @@ const shouldStartServer =
   !process.env.K_SERVICE;
 
 if (shouldStartServer) {
-  const server = app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", async () => {
+    try {
+      await requirePlotManagementSchema();
+    } catch (error) {
+      console.error("[MMR API] Plot management schema initialization failed", {
+        message: error.message,
+      });
+      process.exitCode = 1;
+      server.close(() => process.exit(1));
+      return;
+    }
+
     console.log(`[MMR API] Server running on port ${PORT}`);
   });
 
