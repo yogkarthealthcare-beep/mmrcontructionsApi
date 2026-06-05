@@ -6,6 +6,8 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import multer from "multer";
 import path from "path";
+import fs from "fs/promises";
+import xlsx from "xlsx";
 import { v2 as cloudinary } from "cloudinary";
 import { Readable } from "stream";
 import newRoutes from './routes/newRoutes.js';
@@ -45,6 +47,7 @@ app.use(cors({
 }));
 
 app.use(express.json());
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.use('/api/auth', authEmailRoutes);
 app.use('/api', newRoutes);
 // ─── Cloudinary Config ────────────────────────────────────────
@@ -152,11 +155,38 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
   fileFilter: (req, file, cb) => {
+    if (file.fieldname === "html_map") {
+      const allowedHtml = path.extname(file.originalname || "").toLowerCase() === ".html";
+      return allowedHtml ? cb(null, true) : cb(new Error("Only HTML files are allowed for plot map upload."));
+    }
     const isSiteImage = file.fieldname === "site_map" || file.fieldname === "property_image";
     const allowed = isSiteImage ? /jpeg|jpg|png/ : /jpeg|jpg|png|pdf/;
     allowed.test(path.extname(file.originalname).toLowerCase())
       ? cb(null, true)
       : cb(new Error(isSiteImage ? "Only JPG, JPEG, and PNG files are allowed." : "Only JPG, PNG, PDF allowed"));
+  },
+});
+
+const plotImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
+
+const importUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
+
+const companyAssetUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowedExt = [".jpg", ".jpeg", ".png", ".ico"];
+    const allowedMime = ["image/jpeg", "image/png", "image/x-icon", "image/vnd.microsoft.icon"];
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    allowedExt.includes(ext) && allowedMime.includes(file.mimetype)
+      ? cb(null, true)
+      : cb(new Error("Only JPG, JPEG, PNG, and ICO files are allowed."));
   },
 });
 
@@ -175,6 +205,323 @@ const parseBool = (value, fallback = false) => {
   if (typeof value === "boolean") return value;
   return ["true", "1", "yes", "on"].includes(String(value).toLowerCase());
 };
+
+const asNumberOrNull = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
+};
+
+const defaultCompanySettings = {
+  company_name: "M.M.R. Constructions",
+  company_logo_url: null,
+  company_address: "Neel Kanth Market, Ramadevi, Kanpur, Uttar Pradesh",
+  company_email: null,
+  company_phone: "+91 70719 51011",
+  company_whatsapp: "+91 70719 51011",
+  company_website: "https://mmrconstructions.in",
+  company_description: "Premium affordable plots in Kanpur, Unnao & Lucknow with buyback guarantee and 12-year commission program.",
+  support_email: "support@mmrconstructions.com",
+  support_phone: "+91 70719 51011",
+  facebook_url: null,
+  instagram_url: null,
+  twitter_url: null,
+  youtube_url: null,
+  linkedin_url: null,
+  favicon_url: null,
+  gst_number: null,
+  pan_number: null,
+  copyright_text: "© 2024 M.M.R. Constructions & Developers Pvt. Ltd. All Rights Reserved.",
+  is_active: true,
+};
+
+const companySettingsFields = Object.keys(defaultCompanySettings).filter((key) => key !== "is_active");
+
+let companySettingsReady;
+const ensureCompanySettingsSchema = () => {
+  if (!companySettingsReady) {
+    companySettingsReady = (async () => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS company_settings (
+          id SERIAL PRIMARY KEY,
+          company_name TEXT,
+          company_logo_url TEXT,
+          company_address TEXT,
+          company_email TEXT,
+          company_phone TEXT,
+          company_whatsapp TEXT,
+          company_website TEXT,
+          company_description TEXT,
+          support_email TEXT,
+          support_phone TEXT,
+          facebook_url TEXT,
+          instagram_url TEXT,
+          twitter_url TEXT,
+          youtube_url TEXT,
+          linkedin_url TEXT,
+          favicon_url TEXT,
+          gst_number TEXT,
+          pan_number TEXT,
+          copyright_text TEXT,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`;
+      const [existing] = await sql`SELECT id FROM company_settings WHERE is_active = TRUE ORDER BY id LIMIT 1`;
+      if (!existing) {
+        await sql`
+          INSERT INTO company_settings (
+            company_name, company_logo_url, company_address, company_email, company_phone,
+            company_whatsapp, company_website, company_description, support_email, support_phone,
+            facebook_url, instagram_url, twitter_url, youtube_url, linkedin_url, favicon_url,
+            gst_number, pan_number, copyright_text, is_active
+          ) VALUES (
+            ${defaultCompanySettings.company_name}, ${defaultCompanySettings.company_logo_url},
+            ${defaultCompanySettings.company_address}, ${defaultCompanySettings.company_email},
+            ${defaultCompanySettings.company_phone}, ${defaultCompanySettings.company_whatsapp},
+            ${defaultCompanySettings.company_website}, ${defaultCompanySettings.company_description},
+            ${defaultCompanySettings.support_email}, ${defaultCompanySettings.support_phone},
+            ${defaultCompanySettings.facebook_url}, ${defaultCompanySettings.instagram_url},
+            ${defaultCompanySettings.twitter_url}, ${defaultCompanySettings.youtube_url},
+            ${defaultCompanySettings.linkedin_url}, ${defaultCompanySettings.favicon_url},
+            ${defaultCompanySettings.gst_number}, ${defaultCompanySettings.pan_number},
+            ${defaultCompanySettings.copyright_text}, TRUE
+          )`;
+      }
+    })();
+  }
+  return companySettingsReady;
+};
+
+const getCompanySettingsRow = async () => {
+  await ensureCompanySettingsSchema();
+  const [row] = await sql`SELECT * FROM company_settings WHERE is_active = TRUE ORDER BY id LIMIT 1`;
+  return { ...defaultCompanySettings, ...(row || {}) };
+};
+
+const normalizeCompanyPayload = (body = {}) => {
+  const normalized = {};
+  for (const field of companySettingsFields) {
+    if (Object.prototype.hasOwnProperty.call(body, field)) {
+      normalized[field] = body[field] === "" ? null : body[field];
+    }
+  }
+  return normalized;
+};
+
+const requirePlotManagementSchema = (() => {
+  let ready;
+  return () => {
+    if (!ready) {
+      ready = (async () => {
+        await sql`
+          CREATE TABLE IF NOT EXISTS plot_polygon_coordinates (
+            plot_id INTEGER PRIMARY KEY REFERENCES plots(plot_id) ON DELETE CASCADE,
+            coordinates JSONB NOT NULL DEFAULT '[]'::jsonb,
+            label_x NUMERIC,
+            label_y NUMERIC,
+            updated_by_admin_id INTEGER,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )`;
+        await sql`
+          CREATE TABLE IF NOT EXISTS plot_polygon_history (
+            id SERIAL PRIMARY KEY,
+            plot_id INTEGER NOT NULL REFERENCES plots(plot_id) ON DELETE CASCADE,
+            old_coordinates JSONB NOT NULL DEFAULT '[]'::jsonb,
+            new_coordinates JSONB NOT NULL DEFAULT '[]'::jsonb,
+            changed_by_admin_id INTEGER,
+            change_reason TEXT,
+            changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )`;
+        await sql`
+          CREATE TABLE IF NOT EXISTS plot_details_extended (
+            plot_id INTEGER PRIMARY KEY REFERENCES plots(plot_id) ON DELETE CASCADE,
+            size_label VARCHAR(120),
+            width_ft NUMERIC,
+            length_ft NUMERIC,
+            facing_direction VARCHAR(80),
+            is_corner_plot BOOLEAN DEFAULT FALSE,
+            road_width_ft NUMERIC,
+            features JSONB NOT NULL DEFAULT '[]'::jsonb,
+            description TEXT,
+            block_name VARCHAR(120),
+            sector_name VARCHAR(120),
+            updated_by_admin_id INTEGER,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )`;
+        await sql`
+          CREATE TABLE IF NOT EXISTS plot_images (
+            id SERIAL PRIMARY KEY,
+            plot_id INTEGER NOT NULL REFERENCES plots(plot_id) ON DELETE CASCADE,
+            image_url TEXT NOT NULL,
+            image_path TEXT NOT NULL,
+            caption TEXT,
+            image_order INTEGER NOT NULL DEFAULT 0,
+            uploaded_by_id INTEGER,
+            uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )`;
+        await sql`
+          CREATE TABLE IF NOT EXISTS plot_bulk_import_log (
+            id SERIAL PRIMARY KEY,
+            site_id INTEGER NOT NULL REFERENCES sites(site_id) ON DELETE CASCADE,
+            imported_by_id INTEGER,
+            original_filename TEXT,
+            total_rows INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            error_details JSONB NOT NULL DEFAULT '[]'::jsonb,
+            status VARCHAR(30) NOT NULL DEFAULT 'Processing',
+            started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            completed_at TIMESTAMPTZ
+          )`;
+        await sql`
+          CREATE TABLE IF NOT EXISTS plot_booking_history (
+            id SERIAL PRIMARY KEY,
+            plot_id INTEGER NOT NULL REFERENCES plots(plot_id) ON DELETE CASCADE,
+            booking_id INTEGER,
+            user_id INTEGER,
+            event_type VARCHAR(80) NOT NULL,
+            event_note TEXT,
+            triggered_by_admin INTEGER,
+            triggered_by_user INTEGER,
+            plot_status_at_time VARCHAR(40),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_plot_polygon_history_plot ON plot_polygon_history(plot_id, changed_at DESC)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_plot_images_plot ON plot_images(plot_id, image_order ASC)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_plot_bulk_import_site ON plot_bulk_import_log(site_id, started_at DESC)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_plot_booking_history_plot ON plot_booking_history(plot_id, created_at DESC)`;
+      })();
+    }
+    return ready;
+  };
+})();
+
+const logPlotAudit = async (req, action, targetRecordId, newValue = null) => {
+  await sql`
+    INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+    VALUES ('Admin', ${req.admin?.admin_id || null}, ${req.admin?.full_name || null},
+            'PlotManagement', ${action}, 'plots', ${targetRecordId}, ${newValue})`;
+};
+
+const addPlotBookingHistory = async ({
+  plotId,
+  bookingId = null,
+  userId = null,
+  eventType,
+  eventNote = null,
+  triggeredByAdmin = null,
+  triggeredByUser = null,
+  plotStatusAtTime = null,
+}) => {
+  await requirePlotManagementSchema();
+  await sql`
+    INSERT INTO plot_booking_history
+      (plot_id, booking_id, user_id, event_type, event_note,
+       triggered_by_admin, triggered_by_user, plot_status_at_time)
+    VALUES (${plotId}, ${bookingId}, ${userId}, ${eventType}, ${eventNote},
+            ${triggeredByAdmin}, ${triggeredByUser}, ${plotStatusAtTime})`;
+};
+
+const addUserNotification = async ({ userId, adminId = null, title = null, message, channel = "InApp" }) => {
+  if (!userId || !message) return;
+  await sql`
+    INSERT INTO notification_log (user_id, sent_by_admin_id, channel, title, message)
+    VALUES (${userId}, ${adminId}, ${channel}, ${title}, ${message})`;
+};
+
+const logAdminAudit = async (req, module, action, targetTable, targetRecordId, newValue = null) => {
+  await sql`
+    INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value, ip_address)
+    VALUES ('Admin', ${req.admin?.admin_id || null}, ${req.admin?.full_name || null},
+            ${module}, ${action}, ${targetTable}, ${targetRecordId}, ${newValue}, ${req.ip || null})`;
+};
+
+const validatePolygonCoordinates = (coordinates) =>
+  Array.isArray(coordinates) &&
+  coordinates.length > 0 &&
+  coordinates.every((point) =>
+    point &&
+    (Array.isArray(point)
+      ? Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1]))
+      : Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y)))
+  );
+
+const normalizeCoordinates = (coordinates) =>
+  coordinates.map((point) => Array.isArray(point)
+    ? { x: Number(point[0]), y: Number(point[1]) }
+    : { x: Number(point.x), y: Number(point.y) });
+
+const validatePlotImageFile = (file) => {
+  const ext = path.extname(file?.originalname || "").toLowerCase();
+  const allowedExt = [".jpg", ".jpeg", ".png"];
+  const allowedMime = ["image/jpeg", "image/png"];
+  return allowedExt.includes(ext) && allowedMime.includes(file?.mimetype);
+};
+
+const publicBaseUrl = (req) => process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
+
+const cleanFileName = (filename) =>
+  path.basename(filename || "plot-image").replace(/[^a-zA-Z0-9._-]/g, "_");
+
+let siteHtmlMapSchemaReady;
+const ensureSiteHtmlMapSchema = () => {
+  if (!siteHtmlMapSchemaReady) {
+    siteHtmlMapSchemaReady = (async () => {
+      await sql`ALTER TABLE sites ADD COLUMN IF NOT EXISTS html_map_code TEXT`;
+      await sql`ALTER TABLE sites ADD COLUMN IF NOT EXISTS html_map_file_url TEXT`;
+      await sql`ALTER TABLE sites ADD COLUMN IF NOT EXISTS html_map_updated_at TIMESTAMPTZ`;
+    })();
+  }
+  return siteHtmlMapSchemaReady;
+};
+
+const sanitizeHtmlMapCode = (html = "") => {
+  let code = String(html || "").trim();
+  if (!code) return null;
+
+  code = code
+    .replace(/<script\b[^>]*\bsrc\s*=\s*["'][^"']*["'][^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<link\b[^>]*>/gi, "")
+    .replace(/<iframe\b[\s\S]*?<\/iframe>/gi, "")
+    .replace(/<object\b[\s\S]*?<\/object>/gi, "")
+    .replace(/<embed\b[^>]*>/gi, "")
+    .replace(/<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, "")
+    .replace(/\s(?:src|href)\s*=\s*["']https?:\/\/[^"']*["']/gi, "")
+    .replace(/\bwindow\.location\b/gi, "window.__blocked_location")
+    .replace(/\bdocument\.location\b/gi, "document.__blocked_location")
+    .replace(/\blocation\.(href|replace|assign)\b/gi, "location.__blocked");
+
+  if (!/<html[\s>]/i.test(code)) {
+    code = `<!doctype html><html><head><meta charset="utf-8"></head><body>${code}</body></html>`;
+  }
+  return code;
+};
+
+const htmlMapFromRequest = (req) => {
+  const file = req.files?.html_map?.[0] || req.file || null;
+  if (file) {
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    if (ext !== ".html") throw new Error("Only HTML files are allowed for plot map upload.");
+    return sanitizeHtmlMapCode(file.buffer.toString("utf8"));
+  }
+  return sanitizeHtmlMapCode(req.body?.html_map_code || "");
+};
+
+const parseImportRows = (file) => {
+  const ext = path.extname(file.originalname || "").toLowerCase();
+  if (![".xlsx", ".csv"].includes(ext)) {
+    throw new Error("Only .xlsx and .csv files are allowed.");
+  }
+  const workbook = xlsx.read(file.buffer, { type: "buffer" });
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) return [];
+  return xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: "" });
+};
+
+const normalizeImportValue = (value) =>
+  typeof value === "string" ? value.trim() : value;
 
 // Generate 6-digit OTP
 const genOTP = () => String(Math.floor(100000 + Math.random() * 900000));
@@ -238,6 +585,118 @@ const role = (...allowed) => (req, res, next) => {
     return err(res, "Forbidden — insufficient role", 403);
   next();
 };
+
+/* ==========================
+   COMPANY SETTINGS
+   GET public, updates admin-only
+========================== */
+const getCompanySettings = async (req, res) => {
+  try {
+    const settings = await getCompanySettingsRow();
+    return ok(res, settings, "Company settings fetched.");
+  } catch (e) {
+    console.error("[Company Settings Fetch Error]", e);
+    return err(res, "Failed to load company settings");
+  }
+};
+
+app.get(["/api/company-settings", "/company-settings"], getCompanySettings);
+
+app.get("/api/admin/company-settings",
+  verifyAdminToken,
+  role("SuperAdmin", "SiteManager", "SupportStaff"),
+  async (req, res) => {
+    try {
+      const settings = await getCompanySettingsRow();
+      return ok(res, settings, "Company settings fetched.");
+    } catch (e) {
+      console.error("[Admin Company Settings Fetch Error]", e);
+      return err(res, "Failed to load company settings");
+    }
+  }
+);
+
+app.put("/api/admin/company-settings",
+  verifyAdminToken,
+  role("SuperAdmin", "SiteManager"),
+  async (req, res) => {
+    try {
+      await ensureCompanySettingsSchema();
+      const payload = normalizeCompanyPayload(req.body);
+      const current = await getCompanySettingsRow();
+      const next = { ...current, ...payload };
+      const [updated] = await sql`
+        UPDATE company_settings SET
+          company_name = ${next.company_name},
+          company_logo_url = ${next.company_logo_url},
+          company_address = ${next.company_address},
+          company_email = ${next.company_email},
+          company_phone = ${next.company_phone},
+          company_whatsapp = ${next.company_whatsapp},
+          company_website = ${next.company_website},
+          company_description = ${next.company_description},
+          support_email = ${next.support_email},
+          support_phone = ${next.support_phone},
+          facebook_url = ${next.facebook_url},
+          instagram_url = ${next.instagram_url},
+          twitter_url = ${next.twitter_url},
+          youtube_url = ${next.youtube_url},
+          linkedin_url = ${next.linkedin_url},
+          favicon_url = ${next.favicon_url},
+          gst_number = ${next.gst_number},
+          pan_number = ${next.pan_number},
+          copyright_text = ${next.copyright_text},
+          updated_at = NOW()
+        WHERE id = ${current.id}
+        RETURNING *`;
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+        VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
+                'CompanySettings', 'UpdateCompanySettings', 'company_settings', ${current.id}, ${JSON.stringify(payload)})`;
+      return ok(res, updated, "Company settings updated.");
+    } catch (e) {
+      console.error("[Company Settings Update Error]", e);
+      return err(res, "Failed to update company settings");
+    }
+  }
+);
+
+const uploadCompanyAsset = (field) => [
+  verifyAdminToken,
+  role("SuperAdmin", "SiteManager"),
+  companyAssetUpload.single("file"),
+  async (req, res) => {
+    try {
+      if (!req.file) return err(res, "File is required.", 400);
+      await ensureCompanySettingsSchema();
+      const current = await getCompanySettingsRow();
+      const uploaded = await uploadToCloudinary(req.file.buffer, "mmr/company", req.file.originalname);
+      const [updated] = field === "favicon_url"
+        ? await sql`
+            UPDATE company_settings
+            SET favicon_url = ${uploaded.url}, updated_at = NOW()
+            WHERE id = ${current.id}
+            RETURNING *`
+        : await sql`
+            UPDATE company_settings
+            SET company_logo_url = ${uploaded.url}, updated_at = NOW()
+            WHERE id = ${current.id}
+            RETURNING *`;
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+        VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
+                'CompanySettings', ${field === "favicon_url" ? "UploadFavicon" : "UploadLogo"},
+                'company_settings', ${current.id}, ${JSON.stringify({ [field]: uploaded.url })})`;
+      return ok(res, updated, field === "favicon_url" ? "Favicon uploaded." : "Logo uploaded.");
+    } catch (e) {
+      console.error("[Company Asset Upload Error]", e);
+      return err(res, e.message || "Failed to upload company asset");
+    }
+  }
+];
+
+app.post("/api/admin/company-settings/logo", ...uploadCompanyAsset("company_logo_url"));
+app.post("/api/admin/company-settings/favicon", ...uploadCompanyAsset("favicon_url"));
 
 const inquiryStatuses = ["New", "Contacted", "Follow Up", "Interested", "Converted", "Closed"];
 let inquirySchemaReady;
@@ -1059,7 +1518,9 @@ app.post("/api/profile/upload-doc",
 app.get("/api/sites", async (req, res) => {
   try {
     const sites = await sql`
-      SELECT s.site_id, s.site_name, s.city, s.state, s.full_address,
+      SELECT s.site_id, s.site_id AS id, s.site_name, s.city, s.state,
+             s.full_address, s.full_address AS address,
+             s.map_image_url AS layout_map_url, NULL::text AS contact_phone,
              s.description, s.starting_price, s.total_area, s.highlights,
              s.property_image_url, s.map_image_url, s.display_on_home_page,
              s.site_status, s.has_govt_approval,
@@ -1102,6 +1563,7 @@ app.get("/api/sites/home", async (req, res) => {
 
 app.get("/api/sites/:id", async (req, res) => {
   try {
+    await ensureSiteHtmlMapSchema();
     const { id } = req.params;
     const [site] = await sql`SELECT * FROM sites WHERE site_id = ${id}`;
     if (!site) return err(res, "Site not found", 404);
@@ -1111,8 +1573,59 @@ app.get("/api/sites/:id", async (req, res) => {
     const photos = await sql`
       SELECT photo_id, file_path, caption, sort_order, is_cover_photo
       FROM site_photos WHERE site_id = ${id} AND is_active = TRUE ORDER BY sort_order`;
+    const category_counts = await sql`
+      SELECT plot_category, COUNT(*)::int AS count
+      FROM plots
+      WHERE site_id = ${id} AND is_active = TRUE
+      GROUP BY plot_category
+      ORDER BY plot_category`;
 
-    return ok(res, { ...site, landmarks, photos });
+    return ok(res, {
+      ...site,
+      id: site.site_id,
+      address: site.full_address,
+      layout_map_url: site.map_image_url,
+      contact_phone: site.contact_phone || null,
+      landmarks,
+      photos,
+      category_counts,
+    });
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+app.get("/api/sites/:id/html-map", async (req, res) => {
+  try {
+    await ensureSiteHtmlMapSchema();
+    const { id } = req.params;
+    const [site] = await sql`
+      SELECT site_id, site_name, html_map_code, html_map_file_url, html_map_updated_at
+      FROM sites
+      WHERE site_id = ${id}`;
+    if (!site) return err(res, "Site not found", 404);
+    return ok(res, {
+      site_id: site.site_id,
+      site_name: site.site_name,
+      html_map_code: site.html_map_code || null,
+      html_map_file_url: site.html_map_file_url || null,
+      html_map_updated_at: site.html_map_updated_at || null,
+      available: Boolean(site.html_map_code || site.html_map_file_url),
+    });
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+app.get("/api/sites/:id/plot-status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const rows = await sql`
+      SELECT plot_id, plot_number, plot_status
+      FROM plots
+      WHERE site_id = ${id} AND is_active = TRUE
+      ORDER BY plot_number`;
+    return ok(res, rows);
   } catch (e) {
     return err(res, e.message);
   }
@@ -1120,24 +1633,45 @@ app.get("/api/sites/:id", async (req, res) => {
 
 app.get("/api/sites/:id/map", async (req, res) => {
   try {
+    await requirePlotManagementSchema();
     const { id } = req.params;
     const [site] = await sql`
-      SELECT site_id, site_name, city, state, full_address, description,
+      SELECT site_id, site_id AS id, site_name, city, state, full_address, description,
              starting_price, total_area, highlights, property_image_url,
-             map_image_url, site_status, total_plots, display_on_home_page
+             map_image_url, map_image_url AS layout_map_url, site_status, total_plots, display_on_home_page
       FROM sites
       WHERE site_id = ${id}`;
     if (!site) return err(res, "Site not found", 404);
 
     const plots = await sql`
-      SELECT plot_id, plot_number, plot_area, plot_category,
-             base_price, down_payment, monthly_emi, emi_tenure_months,
-             file_charge, plot_status, coordinates_x, coordinates_y
-      FROM plots
-      WHERE site_id = ${id} AND is_active = TRUE
-      ORDER BY plot_number`;
+      SELECT p.plot_id, p.plot_id AS id, p.plot_number, p.plot_area, p.plot_category,
+             p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months,
+             p.file_charge, p.plot_status, p.coordinates_x, p.coordinates_y,
+             d.size_label, COALESCE(pc.coordinates, '[]'::jsonb) AS polygon_coordinates,
+             pc.label_x, pc.label_y,
+             CASE p.plot_status
+               WHEN 'Vacant' THEN '#22c55e'
+               WHEN 'InProcess' THEN '#eab308'
+               WHEN 'Booked' THEN '#ef4444'
+               WHEN 'Sold' THEN '#6b7280'
+               ELSE '#6b7280'
+             END AS status_color
+      FROM plots p
+      LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id
+      LEFT JOIN plot_details_extended d ON d.plot_id = p.plot_id
+      WHERE p.site_id = ${id} AND p.is_active = TRUE
+      ORDER BY p.plot_number`;
+    const stats = plots.reduce((acc, plot) => {
+      acc.total += 1;
+      const key = String(plot.plot_status || "").toLowerCase();
+      if (key === "inprocess") acc.inprocess += 1;
+      else if (key === "booked") acc.booked += 1;
+      else if (key === "sold") acc.sold += 1;
+      else if (key === "vacant") acc.vacant += 1;
+      return acc;
+    }, { total: 0, vacant: 0, inprocess: 0, booked: 0, sold: 0 });
 
-    return ok(res, { site, plots });
+    return ok(res, { site, plots, stats });
   } catch (e) {
     return err(res, e.message);
   }
@@ -1145,18 +1679,24 @@ app.get("/api/sites/:id/map", async (req, res) => {
 
 app.get("/api/sites/:id/plots", async (req, res) => {
   try {
+    await requirePlotManagementSchema();
     const { id } = req.params;
     const { status, category } = req.query;
+    const statusFilter = status ? String(status) : null;
+    const categoryFilter = category ? String(category) : null;
 
     let plots = await sql`
-      SELECT plot_id, plot_number, plot_area, plot_category,
-             base_price, down_payment, monthly_emi, emi_tenure_months,
-             file_charge, plot_status, coordinates_x, coordinates_y
-      FROM plots
-      WHERE site_id = ${id} AND is_active = TRUE
-        AND (${status   || null} IS NULL OR plot_status   = ${status})
-        AND (${category || null} IS NULL OR plot_category = ${category})
-      ORDER BY plot_number`;
+      SELECT p.plot_id, p.plot_number, p.plot_area, p.plot_category,
+             p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months,
+             p.file_charge, p.plot_status, p.coordinates_x, p.coordinates_y,
+             COALESCE(pc.coordinates, '[]'::jsonb) AS polygon_coordinates,
+             pc.label_x, pc.label_y
+      FROM plots p
+      LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id
+      WHERE p.site_id = ${id} AND p.is_active = TRUE
+        AND (${statusFilter}::plot_status_enum IS NULL OR p.plot_status = ${statusFilter}::plot_status_enum)
+        AND (${categoryFilter}::plot_category_enum IS NULL OR p.plot_category = ${categoryFilter}::plot_category_enum)
+      ORDER BY p.plot_number`;
 
     return ok(res, plots);
   } catch (e) {
@@ -1166,12 +1706,83 @@ app.get("/api/sites/:id/plots", async (req, res) => {
 
 app.get("/api/plots/:id", async (req, res) => {
   try {
+    await requirePlotManagementSchema();
     const [plot] = await sql`
       SELECT p.*, s.site_name, s.city, s.full_address
       FROM plots p JOIN sites s ON p.site_id = s.site_id
       WHERE p.plot_id = ${req.params.id}`;
     if (!plot) return err(res, "Plot not found", 404);
-    return ok(res, plot);
+
+    const [extended] = await sql`
+      SELECT size_label, width_ft, length_ft, facing_direction, is_corner_plot,
+             road_width_ft, features, description, block_name, sector_name
+      FROM plot_details_extended
+      WHERE plot_id = ${req.params.id}`;
+    const images = await sql`
+      SELECT image_url, caption, image_order
+      FROM plot_images
+      WHERE plot_id = ${req.params.id}
+      ORDER BY image_order ASC, id ASC`;
+    const [polygon] = await sql`
+      SELECT coordinates, label_x, label_y
+      FROM plot_polygon_coordinates
+      WHERE plot_id = ${req.params.id}`;
+
+    return ok(res, {
+      ...plot,
+      site: {
+        id: plot.site_id,
+        site_name: plot.site_name,
+        city: plot.city,
+        address: plot.full_address,
+        full_address: plot.full_address,
+      },
+      extended: extended || null,
+      images,
+      polygon: polygon || { coordinates: [], label_x: null, label_y: null },
+    });
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+app.get("/api/sites/:siteId/map", async (req, res) => {
+  try {
+    await requirePlotManagementSchema();
+    const [site] = await sql`
+      SELECT site_id AS id, site_name, map_image_url AS layout_map_url
+      FROM sites
+      WHERE site_id = ${req.params.siteId} AND site_status = 'Active'`;
+    if (!site) return err(res, "Site not found", 404);
+
+    const plots = await sql`
+      SELECT p.plot_id AS id, p.plot_number, p.plot_area, p.plot_status, p.base_price,
+             d.size_label, COALESCE(pc.coordinates, '[]'::jsonb) AS polygon_coordinates,
+             pc.label_x, pc.label_y,
+             CASE p.plot_status
+               WHEN 'Vacant' THEN '#22c55e'
+               WHEN 'InProcess' THEN '#eab308'
+               WHEN 'Booked' THEN '#ef4444'
+               WHEN 'Sold' THEN '#6b7280'
+               ELSE '#6b7280'
+             END AS status_color
+      FROM plots p
+      LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id
+      LEFT JOIN plot_details_extended d ON d.plot_id = p.plot_id
+      WHERE p.site_id = ${req.params.siteId} AND p.is_active = TRUE
+      ORDER BY p.plot_number`;
+
+    const stats = plots.reduce((acc, plot) => {
+      acc.total += 1;
+      const key = String(plot.plot_status || "").toLowerCase();
+      if (key === "inprocess") acc.inprocess += 1;
+      else if (key === "booked") acc.booked += 1;
+      else if (key === "sold") acc.sold += 1;
+      else if (key === "vacant") acc.vacant += 1;
+      return acc;
+    }, { total: 0, vacant: 0, inprocess: 0, booked: 0, sold: 0 });
+
+    return ok(res, { site, plots, stats });
   } catch (e) {
     return err(res, e.message);
   }
@@ -1191,12 +1802,23 @@ app.get("/api/bookings", verifyUserToken, async (req, res) => {
   try {
     const bookings = await sql`
       SELECT b.booking_id, b.booking_serial, b.booking_date, b.booking_status,
-             b.advance_amount, b.payment_type,
+             b.advance_amount, b.payment_type, b.created_at,
+             CASE
+               WHEN b.booking_status = 'Confirmed' THEN 'Paid'
+               WHEN b.advance_amount > 0 THEN 'Partial'
+               ELSE 'Unpaid'
+             END AS payment_status,
+             COALESCE(pay.total_paid, b.advance_amount, 0)::numeric AS total_paid,
              p.plot_number, p.plot_area, p.plot_category,
              s.site_name, s.city
       FROM bookings b
       JOIN plots p ON b.plot_id = p.plot_id
       JOIN sites  s ON p.site_id  = s.site_id
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(SUM(e.paid_amount) FILTER (WHERE e.emi_status = 'Paid'), 0) + COALESCE(b.advance_amount, 0) AS total_paid
+        FROM emi_schedules e
+        WHERE e.booking_id = b.booking_id
+      ) pay ON TRUE
       WHERE b.user_id = ${req.user.user_id}
       ORDER BY b.created_at DESC`;
     return ok(res, bookings);
@@ -1210,6 +1832,17 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
     const { plot_id, payment_type, advance_amount } = req.body;
     if (!plot_id || !payment_type || !advance_amount)
       return err(res, "plot_id, payment_type, advance_amount required", 400);
+    if (!["EMI", "FullPayment", "DownPayment"].includes(payment_type))
+      return err(res, "Invalid payment_type", 400);
+    if (!Number.isFinite(Number(advance_amount)) || Number(advance_amount) <= 0)
+      return err(res, "advance_amount must be greater than 0", 400);
+
+    const [user] = await sql`
+      SELECT account_status
+      FROM users
+      WHERE user_id = ${req.user.user_id}`;
+    if (!user || !["Active", "Approved"].includes(String(user.account_status)))
+      return err(res, "User must be approved and active before booking.", 403);
 
     // Check plot is vacant
     const [plot] = await sql`SELECT * FROM plots WHERE plot_id = ${plot_id}`;
@@ -1219,20 +1852,47 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
 
     // Generate serial
     const [seq] = await sql`
-      SELECT COALESCE(MAX(CAST(SUBSTRING(booking_serial FROM 9) AS INT)),0)+1 AS n
-      FROM bookings WHERE booking_serial LIKE 'BK-' || to_char(NOW(),'YYYY') || '-%'`;
-    const serial = `BK-${new Date().getFullYear()}-${String(seq.n).padStart(5,"0")}`;
+      SELECT COALESCE(MAX(CAST(SUBSTRING(booking_serial FROM 10) AS INT)),0)+1 AS n
+      FROM bookings WHERE booking_serial LIKE 'MMR-' || to_char(NOW(),'YYYY') || '-%'`;
+    const serial = `MMR-${new Date().getFullYear()}-${String(seq.n).padStart(5,"0")}`;
 
     const [booking] = await sql`
       INSERT INTO bookings (booking_serial, user_id, plot_id, payment_type, advance_amount)
       VALUES (${serial}, ${req.user.user_id}, ${plot_id}, ${payment_type}, ${advance_amount})
       RETURNING booking_id, booking_serial, booking_status`;
 
+    if (payment_type === "EMI") {
+      const start = new Date();
+      start.setMonth(start.getMonth() + 1);
+      for (let i = 1; i <= Number(plot.emi_tenure_months || 60); i++) {
+        const due = new Date(start);
+        due.setMonth(due.getMonth() + (i - 1));
+        await sql`
+          INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
+          VALUES (${booking.booking_id}, ${req.user.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi || 0})
+          ON CONFLICT (booking_id, installment_no) DO NOTHING`;
+      }
+    }
+
     // Mark plot InProcess
     await sql`UPDATE plots SET plot_status = 'InProcess', updated_at = NOW() WHERE plot_id = ${plot_id}`;
     await sql`
       INSERT INTO plot_status_history (plot_id, old_status, new_status, reason)
       VALUES (${plot_id}, 'Vacant', 'InProcess', 'Booking submitted by user')`;
+    await addPlotBookingHistory({
+      plotId: plot_id,
+      bookingId: booking.booking_id,
+      userId: req.user.user_id,
+      eventType: "BookingSubmitted",
+      eventNote: "Booking submitted by user",
+      triggeredByUser: req.user.user_id,
+      plotStatusAtTime: "InProcess",
+    });
+    await addUserNotification({
+      userId: req.user.user_id,
+      title: "Booking submitted",
+      message: `Aapki booking ${serial} submit ho gayi, admin review karega`,
+    });
 
     return ok(res, booking, "Booking submitted. Awaiting admin confirmation.", 201);
   } catch (e) {
@@ -1244,14 +1904,40 @@ app.get("/api/bookings/:id", verifyUserToken, async (req, res) => {
   try {
     const [booking] = await sql`
       SELECT b.*, p.plot_number, p.plot_area, p.plot_category,
-             p.base_price, p.monthly_emi, p.emi_tenure_months,
+             p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months, p.file_charge,
              s.site_name, s.city, s.full_address
       FROM bookings b
       JOIN plots p ON b.plot_id = p.plot_id
       JOIN sites  s ON p.site_id = s.site_id
       WHERE b.booking_id = ${req.params.id} AND b.user_id = ${req.user.user_id}`;
     if (!booking) return err(res, "Booking not found", 404);
-    return ok(res, booking);
+    const emi_schedule = await sql`
+      SELECT emi_id, installment_no, due_date, emi_amount, late_fee_amount,
+             total_due, paid_amount, paid_date, emi_status
+      FROM emi_schedules
+      WHERE booking_id = ${req.params.id}
+      ORDER BY installment_no`;
+    return ok(res, {
+      ...booking,
+      plot: {
+        id: booking.plot_id,
+        plot_number: booking.plot_number,
+        plot_area: booking.plot_area,
+        plot_category: booking.plot_category,
+        base_price: booking.base_price,
+        down_payment: booking.down_payment,
+        monthly_emi: booking.monthly_emi,
+        emi_tenure_months: booking.emi_tenure_months,
+        file_charge: booking.file_charge,
+      },
+      site: {
+        id: booking.site_id,
+        site_name: booking.site_name,
+        city: booking.city,
+        address: booking.full_address,
+      },
+      emi_schedule,
+    });
   } catch (e) {
     return err(res, e.message);
   }
@@ -1264,7 +1950,7 @@ app.post("/api/bookings/:id/upload-proof",
     try {
       if (!req.file) return err(res, "No file uploaded", 400);
       const [booking] = await sql`
-        SELECT booking_id FROM bookings
+        SELECT booking_id, plot_id, user_id, booking_serial FROM bookings
         WHERE booking_id = ${req.params.id} AND user_id = ${req.user.user_id}`;
       if (!booking) return err(res, "Booking not found", 404);
 
@@ -1280,6 +1966,20 @@ app.post("/api/bookings/:id/upload-proof",
       await sql`
         UPDATE bookings SET booking_status = 'PaymentPending', updated_at = NOW()
         WHERE booking_id = ${booking.booking_id}`;
+      await addPlotBookingHistory({
+        plotId: booking.plot_id,
+        bookingId: booking.booking_id,
+        userId: booking.user_id,
+        eventType: "PaymentProofUploaded",
+        eventNote: "User uploaded payment proof",
+        triggeredByUser: booking.user_id,
+        plotStatusAtTime: "InProcess",
+      });
+      await addUserNotification({
+        userId: booking.user_id,
+        title: "Payment proof submitted",
+        message: `Payment proof ${booking.booking_serial} ke liye submit ho gaya. Admin verify karega.`,
+      });
 
       return ok(res, { url }, "Payment proof uploaded");
     } catch (e) {
@@ -1455,6 +2155,7 @@ app.get("/api/associate/commissions", verifyUserToken, async (req, res) => {
 
     const { status, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
+    const statusFilter = status ? String(status) : null;
 
     const commissions = await sql`
       SELECT c.commission_id, c.commission_type, c.gaj_sold,
@@ -1467,14 +2168,14 @@ app.get("/api/associate/commissions", verifyUserToken, async (req, res) => {
       LEFT JOIN plots    p ON b.plot_id = p.plot_id
       LEFT JOIN sites    s ON p.site_id = s.site_id
       WHERE c.associate_user_id = ${req.user.user_id}
-        AND (${status || null} IS NULL OR c.commission_status = ${status})
+        AND (${statusFilter} IS NULL OR c.commission_status = ${statusFilter})
       ORDER BY c.created_at DESC
       LIMIT ${limit} OFFSET ${offset}`;
 
     const [total] = await sql`
       SELECT COUNT(*) AS count FROM commission_transactions
       WHERE associate_user_id = ${req.user.user_id}
-        AND (${status || null} IS NULL OR commission_status = ${status})`;
+        AND (${statusFilter} IS NULL OR commission_status = ${statusFilter})`;
 
     return ok(res, { commissions, total: total.count, page: +page, limit: +limit });
   } catch (e) {
@@ -1584,6 +2285,15 @@ app.post("/api/buyback/apply", verifyUserToken, async (req, res) => {
     await sql`
       UPDATE bookings SET booking_status = 'BuybackApplied', updated_at = NOW()
       WHERE booking_id = ${booking_id}`;
+    await addPlotBookingHistory({
+      plotId: booking.plot_id,
+      bookingId: booking.booking_id,
+      userId: req.user.user_id,
+      eventType: "BuybackApplied",
+      eventNote: "Buyback applied by user",
+      triggeredByUser: req.user.user_id,
+      plotStatusAtTime: "Booked",
+    });
 
     return ok(res, {
       buyback_id:        app_.buyback_id,
@@ -2283,25 +2993,59 @@ app.post("/api/admin/users/:id/blacklist",
 
 app.get("/api/admin/bookings",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin","SiteManager","FinanceManager"),
   async (req, res) => {
     try {
-      const { status, site_id, page = 1, limit = 20 } = req.query;
-      const offset = (page - 1) * limit;
+      const { status, site_id, payment_status, from_date, to_date, search, page = 1, limit = 20 } = req.query;
+      const safeLimit = Math.min(Number(limit) || 20, 100);
+      const offset = ((Number(page) || 1) - 1) * safeLimit;
+      const statusFilter = status ? String(status) : null;
+      const siteIdFilter = site_id ? Number(site_id) : null;
+      const paymentStatusFilter = payment_status ? String(payment_status) : null;
+      const fromDateFilter = from_date ? String(from_date) : null;
+      const toDateFilter = to_date ? String(to_date) : null;
+      const searchFilter = search ? String(search) : null;
+      const searchLike = `%${searchFilter || ""}%`;
 
       const bookings = await sql`
         SELECT b.booking_id, b.booking_serial, b.booking_date, b.booking_status,
                b.advance_amount, b.payment_type,
+               CASE
+                 WHEN b.booking_status = 'Confirmed' THEN 'Paid'
+                 WHEN b.advance_amount > 0 THEN 'Partial'
+                 ELSE 'Unpaid'
+               END AS payment_status,
                u.full_name AS customer_name, u.member_id, u.mobile_no,
-               p.plot_number, p.plot_area, s.site_name, s.city
+               p.plot_number, p.plot_area, s.site_name, s.city,
+               proof.file_path AS proof_url
         FROM bookings b
         JOIN users u  ON b.user_id  = u.user_id
         JOIN plots p  ON b.plot_id  = p.plot_id
         JOIN sites s  ON p.site_id  = s.site_id
-        WHERE (${status  || null} IS NULL OR b.booking_status = ${status})
-          AND (${site_id || null} IS NULL OR s.site_id = ${site_id})
+        LEFT JOIN LATERAL (
+          SELECT file_path
+          FROM booking_payment_proofs
+          WHERE booking_id = b.booking_id
+          LIMIT 1
+        ) proof ON TRUE
+        WHERE (${statusFilter} IS NULL OR b.booking_status = ${statusFilter})
+          AND (${siteIdFilter} IS NULL OR s.site_id = ${siteIdFilter})
+          AND (${fromDateFilter} IS NULL OR b.booking_date::date >= ${fromDateFilter})
+          AND (${toDateFilter} IS NULL OR b.booking_date::date <= ${toDateFilter})
+          AND (${paymentStatusFilter} IS NULL OR (
+            CASE
+              WHEN b.booking_status = 'Confirmed' THEN 'Paid'
+              WHEN b.advance_amount > 0 THEN 'Partial'
+              ELSE 'Unpaid'
+            END
+          ) = ${paymentStatusFilter})
+          AND (${searchFilter} IS NULL OR (
+            b.booking_serial ILIKE ${searchLike} OR
+            u.full_name ILIKE ${searchLike} OR
+            u.mobile_no ILIKE ${searchLike}
+          ))
         ORDER BY b.created_at DESC
-        LIMIT ${limit} OFFSET ${offset}`;
+        LIMIT ${safeLimit} OFFSET ${offset}`;
 
       return ok(res, bookings);
     } catch (e) {
@@ -2310,28 +3054,94 @@ app.get("/api/admin/bookings",
   }
 );
 
+app.get("/api/admin/bookings/:id",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager","FinanceManager"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const [booking] = await sql`
+        SELECT b.*,
+               json_build_object(
+                 'id', u.user_id,
+                 'full_name', u.full_name,
+                 'member_id', u.member_id,
+                 'mobile_no', u.mobile_no,
+                 'email', u.email,
+                 'user_type', u.user_type
+               ) AS customer,
+               json_build_object(
+                 'id', p.plot_id,
+                 'plot_number', p.plot_number,
+                 'plot_area', p.plot_area,
+                 'plot_category', p.plot_category,
+                 'base_price', p.base_price,
+                 'down_payment', p.down_payment,
+                 'monthly_emi', p.monthly_emi,
+                 'emi_tenure_months', p.emi_tenure_months,
+                 'file_charge', p.file_charge,
+                 'plot_status', p.plot_status,
+                 'site_name', s.site_name
+               ) AS plot,
+               json_build_object(
+                 'id', s.site_id,
+                 'site_name', s.site_name,
+                 'city', s.city,
+                 'address', s.full_address
+               ) AS site
+        FROM bookings b
+        JOIN users u ON u.user_id = b.user_id
+        JOIN plots p ON p.plot_id = b.plot_id
+        JOIN sites s ON s.site_id = p.site_id
+        WHERE b.booking_id = ${req.params.id}`;
+      if (!booking) return err(res, "Booking not found", 404);
+
+      const payment_proofs = await sql`
+        SELECT *
+        FROM booking_payment_proofs
+        WHERE booking_id = ${req.params.id}`;
+      const emi_schedule = await sql`
+        SELECT emi_id, installment_no, due_date, emi_amount, late_fee_amount,
+               total_due, paid_amount, paid_date, emi_status
+        FROM emi_schedules
+        WHERE booking_id = ${req.params.id}
+        ORDER BY installment_no`;
+      const history = await sql`
+        SELECT event_type, event_note, plot_status_at_time, created_at
+        FROM plot_booking_history
+        WHERE booking_id = ${req.params.id}
+        ORDER BY created_at DESC`;
+
+      return ok(res, { ...booking, payment_proofs, emi_schedule, history });
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
 app.post("/api/admin/bookings/:id/confirm",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin","SiteManager","FinanceManager"),
   async (req, res) => {
     try {
       const bid = req.params.id;
+      const { notes } = req.body || {};
       const [booking] = await sql`SELECT * FROM bookings WHERE booking_id = ${bid}`;
       if (!booking) return err(res, "Booking not found", 404);
       if (booking.booking_status === "Confirmed")
         return err(res, "Already confirmed", 400);
 
-      // Generate 60 EMI rows
       const [plot] = await sql`SELECT monthly_emi, emi_tenure_months FROM plots WHERE plot_id = ${booking.plot_id}`;
-      const start  = new Date(); start.setDate(1); start.setMonth(start.getMonth() + 1);
-
-      for (let i = 1; i <= plot.emi_tenure_months; i++) {
-        const due = new Date(start);
-        due.setMonth(due.getMonth() + (i - 1));
-        await sql`
-          INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
-          VALUES (${bid}, ${booking.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi})
-          ON CONFLICT (booking_id, installment_no) DO NOTHING`;
+      if (booking.payment_type === "EMI") {
+        const start  = new Date(); start.setMonth(start.getMonth() + 1);
+        for (let i = 1; i <= Number(plot.emi_tenure_months || 60); i++) {
+          const due = new Date(start);
+          due.setMonth(due.getMonth() + (i - 1));
+          await sql`
+            INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
+            VALUES (${bid}, ${booking.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi || 0})
+            ON CONFLICT (booking_id, installment_no) DO NOTHING`;
+        }
       }
 
       await sql`
@@ -2349,8 +3159,25 @@ app.post("/api/admin/bookings/:id/confirm",
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
         VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
                 'BookingManagement', 'BookingConfirmed', 'bookings', ${bid})`;
+      await addPlotBookingHistory({
+        plotId: booking.plot_id,
+        bookingId: bid,
+        userId: booking.user_id,
+        eventType: "BookingConfirmed",
+        eventNote: notes || "Payment verified by admin",
+        triggeredByAdmin: req.admin.admin_id,
+        plotStatusAtTime: "Booked",
+      });
+      await addUserNotification({
+        userId: booking.user_id,
+        adminId: req.admin.admin_id,
+        title: "Booking confirmed",
+        message: "Badhaai! Aapki booking confirm ho gayi.",
+      });
 
-      return ok(res, {}, `Booking confirmed. ${plot.emi_tenure_months} EMIs generated.`);
+      return ok(res, {}, booking.payment_type === "EMI"
+        ? `Booking confirmed. ${plot.emi_tenure_months} EMIs generated.`
+        : "Booking confirmed.");
     } catch (e) {
       return err(res, e.message);
     }
@@ -2359,13 +3186,13 @@ app.post("/api/admin/bookings/:id/confirm",
 
 app.post("/api/admin/bookings/:id/cancel",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin","SiteManager","FinanceManager"),
   async (req, res) => {
     try {
-      const { reason } = req.body;
+      const reason = req.body?.reason || req.body?.cancellation_reason;
       if (!reason) return err(res, "reason required", 400);
 
-      const [booking] = await sql`SELECT plot_id FROM bookings WHERE booking_id = ${req.params.id}`;
+      const [booking] = await sql`SELECT plot_id, user_id FROM bookings WHERE booking_id = ${req.params.id}`;
       if (!booking) return err(res, "Booking not found", 404);
 
       await sql`
@@ -2375,7 +3202,110 @@ app.post("/api/admin/bookings/:id/cancel",
         WHERE booking_id = ${req.params.id}`;
 
       await sql`UPDATE plots SET plot_status = 'Vacant', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`;
+      await addPlotBookingHistory({
+        plotId: booking.plot_id,
+        bookingId: req.params.id,
+        userId: booking.user_id,
+        eventType: "BookingCancelled",
+        eventNote: reason,
+        triggeredByAdmin: req.admin.admin_id,
+        plotStatusAtTime: "Vacant",
+      });
+      await logAdminAudit(req, "BookingManagement", "BookingCancelled", "bookings", req.params.id, sql.json({ reason }));
+      await addUserNotification({
+        userId: booking.user_id,
+        adminId: req.admin.admin_id,
+        title: "Booking cancelled",
+        message: `Aapki booking cancel ho gayi. Reason: ${reason}`,
+      });
 
+      return ok(res, {}, "Booking cancelled. Plot set to Vacant.");
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.patch("/api/admin/bookings/:id/confirm",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager","FinanceManager"),
+  async (req, res) => {
+    try {
+      const bid = req.params.id;
+      const { notes } = req.body || {};
+      const [booking] = await sql`SELECT * FROM bookings WHERE booking_id = ${bid}`;
+      if (!booking) return err(res, "Booking not found", 404);
+      if (booking.booking_status === "Confirmed") return err(res, "Already confirmed", 400);
+      const [plot] = await sql`SELECT monthly_emi, emi_tenure_months FROM plots WHERE plot_id = ${booking.plot_id}`;
+      if (booking.payment_type === "EMI") {
+        const start = new Date(); start.setMonth(start.getMonth() + 1);
+        for (let i = 1; i <= Number(plot.emi_tenure_months || 60); i++) {
+          const due = new Date(start); due.setMonth(due.getMonth() + (i - 1));
+          await sql`
+            INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
+            VALUES (${bid}, ${booking.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi || 0})
+            ON CONFLICT (booking_id, installment_no) DO NOTHING`;
+        }
+      }
+      await sql`
+        UPDATE bookings SET booking_status = 'Confirmed',
+          confirmed_by_admin_id = ${req.admin.admin_id}, confirmed_at = NOW(), updated_at = NOW()
+        WHERE booking_id = ${bid}`;
+      await sql`UPDATE plots SET plot_status = 'Booked', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`;
+      await addPlotBookingHistory({
+        plotId: booking.plot_id,
+        bookingId: bid,
+        userId: booking.user_id,
+        eventType: "BookingConfirmed",
+        eventNote: notes || "Payment verified by admin",
+        triggeredByAdmin: req.admin.admin_id,
+        plotStatusAtTime: "Booked",
+      });
+      await logAdminAudit(req, "BookingManagement", "BookingConfirmed", "bookings", bid, sql.json({ notes: notes || null }));
+      await addUserNotification({
+        userId: booking.user_id,
+        adminId: req.admin.admin_id,
+        title: "Booking confirmed",
+        message: "Badhaai! Aapki booking confirm ho gayi.",
+      });
+      return ok(res, {}, "Booking confirmed.");
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.patch("/api/admin/bookings/:id/cancel",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager","FinanceManager"),
+  async (req, res) => {
+    try {
+      const reason = req.body?.reason || req.body?.cancellation_reason;
+      if (!reason) return err(res, "reason required", 400);
+      const [booking] = await sql`SELECT plot_id, user_id FROM bookings WHERE booking_id = ${req.params.id}`;
+      if (!booking) return err(res, "Booking not found", 404);
+      await sql`
+        UPDATE bookings SET booking_status = 'Cancelled',
+          cancellation_reason = ${reason}, cancelled_by_admin_id = ${req.admin.admin_id},
+          cancelled_at = NOW(), updated_at = NOW()
+        WHERE booking_id = ${req.params.id}`;
+      await sql`UPDATE plots SET plot_status = 'Vacant', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`;
+      await addPlotBookingHistory({
+        plotId: booking.plot_id,
+        bookingId: req.params.id,
+        userId: booking.user_id,
+        eventType: "BookingCancelled",
+        eventNote: reason,
+        triggeredByAdmin: req.admin.admin_id,
+        plotStatusAtTime: "Vacant",
+      });
+      await logAdminAudit(req, "BookingManagement", "BookingCancelled", "bookings", req.params.id, sql.json({ reason }));
+      await addUserNotification({
+        userId: booking.user_id,
+        adminId: req.admin.admin_id,
+        title: "Booking cancelled",
+        message: `Aapki booking cancel ho gayi. Reason: ${reason}`,
+      });
       return ok(res, {}, "Booking cancelled. Plot set to Vacant.");
     } catch (e) {
       return err(res, e.message);
@@ -2457,6 +3387,516 @@ app.post("/api/admin/emi/:id/confirm",
 );
 
 /* ==========================
+   ADMIN - PLOT MANAGEMENT EXTENSIONS
+========================== */
+
+app.put("/api/admin/plots/:plotId/polygon",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const { coordinates, label_x, label_y, change_reason } = req.body;
+      if (!validatePolygonCoordinates(coordinates)) {
+        return err(res, "coordinates must be a non-empty array of { x, y } points.", 400);
+      }
+      const plotId = req.params.plotId;
+      const normalized = normalizeCoordinates(coordinates);
+      const [plot] = await sql`SELECT plot_id FROM plots WHERE plot_id = ${plotId}`;
+      if (!plot) return err(res, "Plot not found", 404);
+
+      const [current] = await sql`
+        SELECT coordinates FROM plot_polygon_coordinates WHERE plot_id = ${plotId}`;
+      if (current) {
+        await sql`
+          INSERT INTO plot_polygon_history
+            (plot_id, old_coordinates, new_coordinates, changed_by_admin_id, change_reason)
+          VALUES (${plotId}, ${sql.json(current.coordinates || [])}, ${sql.json(normalized)},
+                  ${req.admin.admin_id}, ${change_reason || null})`;
+      }
+
+      const [updated] = await sql`
+        INSERT INTO plot_polygon_coordinates
+          (plot_id, coordinates, label_x, label_y, updated_by_admin_id, updated_at)
+        VALUES (${plotId}, ${sql.json(normalized)}, ${asNumberOrNull(label_x)}, ${asNumberOrNull(label_y)},
+                ${req.admin.admin_id}, NOW())
+        ON CONFLICT (plot_id) DO UPDATE SET
+          coordinates = EXCLUDED.coordinates,
+          label_x = EXCLUDED.label_x,
+          label_y = EXCLUDED.label_y,
+          updated_by_admin_id = EXCLUDED.updated_by_admin_id,
+          updated_at = NOW()
+        RETURNING plot_id, coordinates, label_x, label_y`;
+      await logPlotAudit(req, "UpdatePolygon", plotId);
+      return ok(res, updated);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.post("/api/admin/plots/:id/polygon",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const { coordinates, label_x, label_y, change_reason } = req.body;
+      if (!validatePolygonCoordinates(coordinates)) {
+        return err(res, "coordinates must be a non-empty array of points.", 400);
+      }
+      const plotId = req.params.id;
+      const normalized = normalizeCoordinates(coordinates);
+      const [plot] = await sql`SELECT plot_id FROM plots WHERE plot_id = ${plotId}`;
+      if (!plot) return err(res, "Plot not found", 404);
+      const [current] = await sql`
+        SELECT coordinates FROM plot_polygon_coordinates WHERE plot_id = ${plotId}`;
+      if (current) {
+        await sql`
+          INSERT INTO plot_polygon_history
+            (plot_id, old_coordinates, new_coordinates, changed_by_admin_id, change_reason)
+          VALUES (${plotId}, ${sql.json(current.coordinates || [])}, ${sql.json(normalized)},
+                  ${req.admin.admin_id}, ${change_reason || null})`;
+      }
+      const [updated] = await sql`
+        INSERT INTO plot_polygon_coordinates
+          (plot_id, coordinates, label_x, label_y, updated_by_admin_id, updated_at)
+        VALUES (${plotId}, ${sql.json(normalized)}, ${asNumberOrNull(label_x)}, ${asNumberOrNull(label_y)},
+                ${req.admin.admin_id}, NOW())
+        ON CONFLICT (plot_id) DO UPDATE SET
+          coordinates = EXCLUDED.coordinates,
+          label_x = EXCLUDED.label_x,
+          label_y = EXCLUDED.label_y,
+          updated_by_admin_id = EXCLUDED.updated_by_admin_id,
+          updated_at = NOW()
+        RETURNING plot_id, coordinates, label_x, label_y`;
+      await logPlotAudit(req, "UpdatePolygon", plotId);
+      return ok(res, updated);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.get("/api/admin/plots/:plotId/polygon",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager","SupportStaff"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const [polygon] = await sql`
+        SELECT plot_id, coordinates, label_x, label_y
+        FROM plot_polygon_coordinates
+        WHERE plot_id = ${req.params.plotId}`;
+      return ok(res, polygon || {
+        plot_id: Number(req.params.plotId),
+        coordinates: [],
+        label_x: null,
+        label_y: null,
+      });
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.get("/api/admin/plots/:plotId/polygon-history",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const history = await sql`
+        SELECT id, plot_id, old_coordinates, new_coordinates,
+               changed_by_admin_id, change_reason, changed_at
+        FROM plot_polygon_history
+        WHERE plot_id = ${req.params.plotId}
+        ORDER BY changed_at DESC`;
+      return ok(res, history);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.put("/api/admin/plots/:plotId/polygon/restore/:historyId",
+  verifyAdminToken,
+  role("SuperAdmin"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const { plotId, historyId } = req.params;
+      const [history] = await sql`
+        SELECT * FROM plot_polygon_history
+        WHERE id = ${historyId} AND plot_id = ${plotId}`;
+      if (!history) return err(res, "History record not found", 404);
+
+      const [current] = await sql`
+        SELECT coordinates, label_x, label_y
+        FROM plot_polygon_coordinates
+        WHERE plot_id = ${plotId}`;
+      await sql`
+        INSERT INTO plot_polygon_history
+          (plot_id, old_coordinates, new_coordinates, changed_by_admin_id, change_reason)
+        VALUES (${plotId}, ${sql.json(current?.coordinates || [])}, ${sql.json(history.old_coordinates || [])},
+                ${req.admin.admin_id}, ${`Restored from history #${historyId}`})`;
+
+      const [updated] = await sql`
+        INSERT INTO plot_polygon_coordinates
+          (plot_id, coordinates, label_x, label_y, updated_by_admin_id, updated_at)
+        VALUES (${plotId}, ${sql.json(history.old_coordinates || [])}, ${current?.label_x || null},
+                ${current?.label_y || null}, ${req.admin.admin_id}, NOW())
+        ON CONFLICT (plot_id) DO UPDATE SET
+          coordinates = EXCLUDED.coordinates,
+          updated_by_admin_id = EXCLUDED.updated_by_admin_id,
+          updated_at = NOW()
+        RETURNING plot_id, coordinates, label_x, label_y`;
+      await logPlotAudit(req, "RestorePolygon", plotId);
+      return ok(res, updated, "Polygon restored successfully.");
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.get("/api/admin/plots/:plotId/details",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager","SupportStaff"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const [plot] = await sql`
+        SELECT plot_id AS id, plot_number, plot_area, plot_category, base_price,
+               down_payment, monthly_emi, emi_tenure_months, file_charge, plot_status
+        FROM plots
+        WHERE plot_id = ${req.params.plotId}`;
+      if (!plot) return err(res, "Plot not found", 404);
+      const [extended] = await sql`
+        SELECT size_label, width_ft, length_ft, facing_direction, is_corner_plot,
+               road_width_ft, features, description, block_name, sector_name
+        FROM plot_details_extended
+        WHERE plot_id = ${req.params.plotId}`;
+      return ok(res, { plot, extended: extended || null });
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.put("/api/admin/plots/:plotId/details",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const plotId = req.params.plotId;
+      const [plot] = await sql`SELECT plot_id FROM plots WHERE plot_id = ${plotId}`;
+      if (!plot) return err(res, "Plot not found", 404);
+      const {
+        size_label, width_ft, length_ft, facing_direction, is_corner_plot,
+        road_width_ft, features, description, block_name, sector_name,
+      } = req.body;
+      const normalizedFeatures = Array.isArray(features) ? features : [];
+      const [details] = await sql`
+        INSERT INTO plot_details_extended
+          (plot_id, size_label, width_ft, length_ft, facing_direction, is_corner_plot,
+           road_width_ft, features, description, block_name, sector_name, updated_by_admin_id, updated_at)
+        VALUES (${plotId}, ${size_label || null}, ${asNumberOrNull(width_ft)}, ${asNumberOrNull(length_ft)},
+                ${facing_direction || null}, ${Boolean(is_corner_plot)}, ${asNumberOrNull(road_width_ft)},
+                ${sql.json(normalizedFeatures)}, ${description || null}, ${block_name || null},
+                ${sector_name || null}, ${req.admin.admin_id}, NOW())
+        ON CONFLICT (plot_id) DO UPDATE SET
+          size_label = EXCLUDED.size_label,
+          width_ft = EXCLUDED.width_ft,
+          length_ft = EXCLUDED.length_ft,
+          facing_direction = EXCLUDED.facing_direction,
+          is_corner_plot = EXCLUDED.is_corner_plot,
+          road_width_ft = EXCLUDED.road_width_ft,
+          features = EXCLUDED.features,
+          description = EXCLUDED.description,
+          block_name = EXCLUDED.block_name,
+          sector_name = EXCLUDED.sector_name,
+          updated_by_admin_id = EXCLUDED.updated_by_admin_id,
+          updated_at = NOW()
+        RETURNING plot_id, size_label, width_ft, length_ft, facing_direction, is_corner_plot,
+                  road_width_ft, features, description, block_name, sector_name`;
+      await logPlotAudit(req, "UpdatePlotDetails", plotId);
+      return ok(res, details);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.post("/api/admin/plots/:plotId/images",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  plotImageUpload.single("image"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      if (!req.file || !validatePlotImageFile(req.file)) {
+        return err(res, "Only JPG, JPEG, and PNG files are allowed.", 400);
+      }
+      const plotId = req.params.plotId;
+      const [plot] = await sql`SELECT plot_id FROM plots WHERE plot_id = ${plotId}`;
+      if (!plot) return err(res, "Plot not found", 404);
+
+      const folder = path.join(process.cwd(), "uploads", "plots", String(plotId));
+      await fs.mkdir(folder, { recursive: true });
+      const filename = `${Date.now()}_${cleanFileName(req.file.originalname)}`;
+      const imagePath = path.join(folder, filename);
+      await fs.writeFile(imagePath, req.file.buffer);
+      const relativePath = path.posix.join("uploads", "plots", String(plotId), filename);
+      const imageUrl = `${publicBaseUrl(req)}/${relativePath}`;
+
+      const [image] = await sql`
+        INSERT INTO plot_images
+          (plot_id, image_url, image_path, caption, image_order, uploaded_by_id)
+        VALUES (${plotId}, ${imageUrl}, ${imagePath}, ${req.body.caption || null},
+                ${Number(req.body.image_order || 0)}, ${req.admin.admin_id})
+        RETURNING id, plot_id, image_url, caption, image_order`;
+      await logPlotAudit(req, "UploadPlotImage", plotId);
+      return ok(res, image, "Success", 201);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.get("/api/admin/plots/:plotId/images",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager","SupportStaff"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const images = await sql`
+        SELECT id, plot_id, image_url, caption, image_order, uploaded_at
+        FROM plot_images
+        WHERE plot_id = ${req.params.plotId}
+        ORDER BY image_order ASC, id ASC`;
+      return ok(res, images);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.put("/api/admin/plots/:plotId/images/:imageId",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const [existing] = await sql`
+        SELECT id FROM plot_images
+        WHERE id = ${req.params.imageId} AND plot_id = ${req.params.plotId}`;
+      if (!existing) return err(res, "Image not found", 404);
+      const [image] = await sql`
+        UPDATE plot_images SET
+          caption = COALESCE(${req.body.caption ?? null}, caption),
+          image_order = COALESCE(${req.body.image_order != null ? Number(req.body.image_order) : null}, image_order),
+          updated_at = NOW()
+        WHERE id = ${req.params.imageId} AND plot_id = ${req.params.plotId}
+        RETURNING id, plot_id, image_url, caption, image_order`;
+      await logPlotAudit(req, "UpdatePlotImage", req.params.plotId);
+      return ok(res, image);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.delete("/api/admin/plots/:plotId/images/:imageId",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const [image] = await sql`
+        SELECT id, image_path FROM plot_images
+        WHERE id = ${req.params.imageId} AND plot_id = ${req.params.plotId}`;
+      if (!image) return err(res, "Image not found", 404);
+      if (image.image_path) await fs.unlink(image.image_path).catch(() => {});
+      await sql`DELETE FROM plot_images WHERE id = ${req.params.imageId} AND plot_id = ${req.params.plotId}`;
+      await logPlotAudit(req, "DeletePlotImage", req.params.plotId);
+      return ok(res, null, "Image deleted.");
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.post("/api/admin/sites/:siteId/plots/bulk-import",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  importUpload.single("file"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      if (!req.file) return err(res, "file is required", 400);
+      let rows;
+      try {
+        rows = parseImportRows(req.file);
+      } catch (parseError) {
+        return err(res, parseError.message, 400);
+      }
+
+      const [site] = await sql`SELECT site_id FROM sites WHERE site_id = ${req.params.siteId}`;
+      if (!site) return err(res, "Site not found", 404);
+      const [log] = await sql`
+        INSERT INTO plot_bulk_import_log
+          (site_id, imported_by_id, original_filename, status)
+        VALUES (${req.params.siteId}, ${req.admin.admin_id}, ${req.file.originalname}, 'Processing')
+        RETURNING id`;
+
+      let successCount = 0;
+      const errors = [];
+      for (const [index, rawRow] of rows.entries()) {
+        const rowNumber = index + 2;
+        const row = Object.fromEntries(
+          Object.entries(rawRow).map(([key, value]) => [String(key).trim(), normalizeImportValue(value)])
+        );
+        const plotNumber = row.plot_number ? String(row.plot_number).trim() : "";
+        const plotArea = Number(row.plot_area);
+        const basePrice = Number(row.base_price);
+        if (!plotNumber) {
+          errors.push({ row: rowNumber, plot_number: plotNumber, error: "plot_number is required." });
+          continue;
+        }
+        if (!Number.isFinite(plotArea)) {
+          errors.push({ row: rowNumber, plot_number: plotNumber, error: "plot_area is required and must be a number." });
+          continue;
+        }
+        if (!Number.isFinite(basePrice)) {
+          errors.push({ row: rowNumber, plot_number: plotNumber, error: "base_price is required and must be a number." });
+          continue;
+        }
+        const [duplicate] = await sql`
+          SELECT plot_id FROM plots
+          WHERE site_id = ${req.params.siteId} AND plot_number = ${plotNumber}
+          LIMIT 1`;
+        if (duplicate) {
+          errors.push({ row: rowNumber, plot_number: plotNumber, error: "Plot number already exists in this site." });
+          continue;
+        }
+
+        const plotCategory = row.plot_category || (plotArea <= 50 ? "50gaj" : "100gaj");
+        try {
+          const [plot] = await sql`
+            INSERT INTO plots
+              (site_id, plot_number, plot_area, plot_category, base_price, down_payment,
+               monthly_emi, emi_tenure_months, file_charge, plot_status, created_by_admin_id)
+            VALUES (${req.params.siteId}, ${plotNumber}, ${plotArea}, ${plotCategory}::plot_category_enum,
+                    ${basePrice}, ${Number(row.down_payment || 0)}, ${Number(row.monthly_emi || 0)},
+                    ${Number(row.emi_tenure_months || 60)}, ${Number(row.file_charge || 499)},
+                    'Vacant'::plot_status_enum, ${req.admin.admin_id})
+            RETURNING plot_id`;
+          const hasExtended = ["size_label", "block_name", "sector_name", "facing_direction"]
+            .some((field) => row[field]);
+          if (hasExtended) {
+            await sql`
+              INSERT INTO plot_details_extended
+                (plot_id, size_label, block_name, sector_name, facing_direction, updated_by_admin_id)
+              VALUES (${plot.plot_id}, ${row.size_label || null}, ${row.block_name || null},
+                      ${row.sector_name || null}, ${row.facing_direction || null}, ${req.admin.admin_id})`;
+          }
+          successCount += 1;
+        } catch (insertError) {
+          errors.push({ row: rowNumber, plot_number: plotNumber, error: insertError.message });
+        }
+      }
+
+      const totalRows = rows.length;
+      const failedCount = errors.length;
+      const status = totalRows === 0 || successCount === 0
+        ? "Failed"
+        : failedCount > 0 ? "PartialSuccess" : "Completed";
+      await sql`
+        UPDATE plot_bulk_import_log SET
+          total_rows = ${totalRows},
+          success_count = ${successCount},
+          failed_count = ${failedCount},
+          error_details = ${sql.json(errors)},
+          status = ${status},
+          completed_at = NOW()
+        WHERE id = ${log.id}`;
+      await logPlotAudit(req, "BulkImportPlots", req.params.siteId);
+      return ok(res, {
+        import_log_id: log.id,
+        total_rows: totalRows,
+        success_count: successCount,
+        failed_count: failedCount,
+        errors,
+      }, `${successCount} of ${totalRows} plots imported successfully.`);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.get("/api/admin/sites/:siteId/plots/import-history",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const history = await sql`
+        SELECT l.id, l.site_id, l.original_filename, l.total_rows, l.success_count,
+               l.failed_count, l.error_details, l.status, l.started_at, l.completed_at,
+               json_build_object('id', a.admin_id, 'full_name', a.full_name) AS imported_by
+        FROM plot_bulk_import_log l
+        LEFT JOIN admin_users a ON a.admin_id = l.imported_by_id
+        WHERE l.site_id = ${req.params.siteId}
+        ORDER BY l.started_at DESC`;
+      return ok(res, history);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.get("/api/admin/plots/:plotId/booking-history",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager","FinanceManager"),
+  async (req, res) => {
+    try {
+      await requirePlotManagementSchema();
+      const history = await sql`
+        SELECT h.id, h.event_type, h.event_note, h.plot_status_at_time,
+               json_build_object(
+                 'id', b.booking_id,
+                 'booking_serial', b.booking_serial,
+                 'user', CASE WHEN bu.user_id IS NULL THEN NULL ELSE json_build_object(
+                   'id', bu.user_id,
+                   'full_name', bu.full_name,
+                   'member_id', bu.member_id
+                 ) END
+               ) AS booking,
+               CASE WHEN au.admin_id IS NULL THEN NULL ELSE json_build_object(
+                 'id', au.admin_id,
+                 'full_name', au.full_name
+               ) END AS triggered_by_admin,
+               CASE WHEN tu.user_id IS NULL THEN NULL ELSE json_build_object(
+                 'id', tu.user_id,
+                 'full_name', tu.full_name
+               ) END AS triggered_by_user,
+               h.created_at
+        FROM plot_booking_history h
+        LEFT JOIN bookings b ON b.booking_id = h.booking_id
+        LEFT JOIN users bu ON bu.user_id = b.user_id
+        LEFT JOIN admin_users au ON au.admin_id = h.triggered_by_admin
+        LEFT JOIN users tu ON tu.user_id = h.triggered_by_user
+        WHERE h.plot_id = ${req.params.plotId}
+        ORDER BY h.created_at DESC`;
+      return ok(res, history);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+/* ==========================
    ─────────────────────────
    ADMIN — SITES & PLOTS
    GET  /api/admin/sites
@@ -2473,10 +3913,12 @@ app.get("/api/admin/sites",
   role("SuperAdmin","SiteManager","SupportStaff"),
   async (req, res) => {
     try {
+      await ensureSiteHtmlMapSchema();
       const sites = await sql`
         SELECT s.site_id, s.site_name, s.city, s.state, s.full_address,
                s.description, s.starting_price, s.total_area, s.highlights,
                s.property_image_url, s.map_image_url, s.display_on_home_page,
+               s.html_map_code, s.html_map_file_url, s.html_map_updated_at,
                s.site_status, s.has_govt_approval,
                s.total_plots AS planned_total_plots, s.created_at, s.updated_at,
                COUNT(p.plot_id)::int AS total_plots,
@@ -2501,13 +3943,16 @@ app.post("/api/admin/sites",
   upload.fields([
     { name: "property_image", maxCount: 1 },
     { name: "site_map", maxCount: 1 },
+    { name: "html_map", maxCount: 1 },
   ]),
   async (req, res) => {
     try {
+      await ensureSiteHtmlMapSchema();
       const {
-        site_name, city, state, full_address, description, total_plots, site_status,
+        site_name, city, state, description, total_plots, site_status,
         starting_price, total_area, highlights, display_on_home_page,
       } = req.body;
+      const full_address = req.body.full_address || req.body.address || null;
       if (!site_name || !city) return err(res, "site_name, city required", 400);
       let propertyImageUrl = null;
       let propertyImagePublicId = null;
@@ -2525,20 +3970,32 @@ app.post("/api/admin/sites",
         mapUrl = uploaded.url;
         mapPublicId = uploaded.public_id;
       }
+      mapUrl = mapUrl || req.body.layout_map_url || null;
+      const htmlMapCode = htmlMapFromRequest(req);
+      const htmlMapUpdatedAt = htmlMapCode ? new Date() : null;
       const [site] = await sql`
         INSERT INTO sites (
           site_name, city, state, full_address, description, total_plots,
           starting_price, total_area, highlights, property_image_url, property_image_public_id,
-          display_on_home_page, site_status, map_image_url, map_public_id, created_by_admin_id
+          display_on_home_page, site_status, map_image_url, map_public_id,
+          html_map_code, html_map_file_url, html_map_updated_at, created_by_admin_id
         )
         VALUES (
           ${site_name}, ${city}, ${state || "Uttar Pradesh"}, ${full_address || null},
           ${description || null}, ${Number(total_plots || 0)},
           ${starting_price ? Number(starting_price) : null}, ${total_area || null}, ${highlights || null},
           ${propertyImageUrl}, ${propertyImagePublicId}, ${parseBool(display_on_home_page, true)},
-          ${site_status || "Active"}::site_status_enum, ${mapUrl}, ${mapPublicId}, ${req.admin.admin_id}
+          ${site_status || "Active"}::site_status_enum, ${mapUrl}, ${mapPublicId},
+          ${htmlMapCode}, ${null}, ${htmlMapUpdatedAt}, ${req.admin.admin_id}
         )
         RETURNING site_id, site_name`;
+      if (htmlMapCode) {
+        await sql`
+          UPDATE sites
+          SET html_map_file_url = ${`/api/sites/${site.site_id}/html-map`}
+          WHERE site_id = ${site.site_id}`;
+      }
+      await logAdminAudit(req, "SiteManagement", "CreateSite", "sites", site.site_id, sql.json({ site_name, city }));
       return ok(res, site, "Site created", 201);
     } catch (e) {
       return err(res, e.message);
@@ -2552,13 +4009,16 @@ app.put("/api/admin/sites/:id",
   upload.fields([
     { name: "property_image", maxCount: 1 },
     { name: "site_map", maxCount: 1 },
+    { name: "html_map", maxCount: 1 },
   ]),
   async (req, res) => {
     try {
+      await ensureSiteHtmlMapSchema();
       const {
-        site_name, city, state, full_address, description, total_plots, site_status, has_govt_approval,
+        site_name, city, state, description, total_plots, site_status, has_govt_approval,
         starting_price, total_area, highlights, display_on_home_page,
       } = req.body;
+      const full_address = req.body.full_address || req.body.address || null;
       let propertyImageUrl = null;
       let propertyImagePublicId = null;
       let mapUrl = null;
@@ -2583,6 +4043,9 @@ app.put("/api/admin/sites/:id",
           cloudinary.uploader.destroy(oldSite.map_public_id).catch(() => {});
         }
       }
+      mapUrl = mapUrl || req.body.layout_map_url || null;
+      const htmlMapCode = htmlMapFromRequest(req);
+      const htmlMapUpdatedAt = htmlMapCode ? new Date() : null;
       await sql`
         UPDATE sites SET
           site_name        = COALESCE(${site_name        || null}, site_name),
@@ -2601,8 +4064,12 @@ app.put("/api/admin/sites/:id",
           property_image_public_id = COALESCE(${propertyImagePublicId}, property_image_public_id),
           map_image_url    = COALESCE(${mapUrl}, map_image_url),
           map_public_id    = COALESCE(${mapPublicId}, map_public_id),
+          html_map_code    = COALESCE(${htmlMapCode}, html_map_code),
+          html_map_file_url = COALESCE(${htmlMapCode ? `/api/sites/${req.params.id}/html-map` : null}, html_map_file_url),
+          html_map_updated_at = COALESCE(${htmlMapUpdatedAt}, html_map_updated_at),
           updated_at       = NOW()
         WHERE site_id = ${req.params.id}`;
+      await logAdminAudit(req, "SiteManagement", "UpdateSite", "sites", req.params.id, sql.json(req.body || {}));
       return ok(res, {}, "Site updated");
     } catch (e) {
       return err(res, e.message);
@@ -2635,6 +4102,37 @@ app.delete("/api/admin/sites/:id",
       return ok(res, {}, "Site deactivated safely");
     } catch (e) {
       return err(res, e.message);
+    }
+  }
+);
+
+app.post("/api/admin/sites/:siteId/html-map",
+  verifyAdminToken,
+  role("SuperAdmin","SiteManager"),
+  upload.single("html_map"),
+  async (req, res) => {
+    try {
+      await ensureSiteHtmlMapSchema();
+      const siteId = req.params.siteId;
+      const [site] = await sql`SELECT site_id FROM sites WHERE site_id = ${siteId}`;
+      if (!site) return err(res, "Site not found", 404);
+      const htmlMapCode = htmlMapFromRequest(req);
+      if (!htmlMapCode) return err(res, "HTML map file or code is required.", 400);
+      await sql`
+        UPDATE sites
+        SET html_map_code = ${htmlMapCode},
+            html_map_file_url = ${`/api/sites/${siteId}/html-map`},
+            html_map_updated_at = NOW(),
+            updated_at = NOW()
+        WHERE site_id = ${siteId}`;
+      await logAdminAudit(req, "SiteManagement", "UpdateHtmlPlotMap", "sites", siteId, sql.json({ has_html_map: true }));
+      return ok(res, {
+        site_id: Number(siteId),
+        html_map_file_url: `/api/sites/${siteId}/html-map`,
+      }, "HTML plot map saved successfully.");
+    } catch (e) {
+      const status = /Only HTML files/.test(e.message) ? 400 : 500;
+      return err(res, e.message, status);
     }
   }
 );
@@ -2783,6 +4281,7 @@ app.post("/api/admin/sites/:id/plots",
                 ${plot_status || "Vacant"}::plot_status_enum,
                 ${coordinates_x || null}, ${coordinates_y || null}, ${req.admin.admin_id})
         RETURNING plot_id, plot_number, plot_status`;
+      await logAdminAudit(req, "PlotManagement", "CreatePlot", "plots", plot.plot_id, sql.json({ site_id: req.params.id, plot_number }));
       return ok(res, plot, "Plot created", 201);
     } catch (e) {
       return err(res, e.message);
@@ -2813,6 +4312,7 @@ app.post("/api/admin/plots",
                 ${plot_status || "Vacant"}::plot_status_enum,
                 ${coordinates_x || null}, ${coordinates_y || null}, ${req.admin.admin_id})
         RETURNING plot_id, plot_number, plot_status`;
+      await logAdminAudit(req, "PlotManagement", "CreatePlot", "plots", plot.plot_id, sql.json({ site_id, plot_number }));
       return ok(res, plot, "Plot created", 201);
     } catch (e) {
       return err(res, e.message);
@@ -2827,7 +4327,12 @@ app.put("/api/admin/plots/:id",
     try {
       const { plot_number, plot_area, plot_category, base_price, down_payment,
               monthly_emi, emi_tenure_months, file_charge, plot_status,
-              coordinates_x, coordinates_y } = req.body;
+              coordinates_x, coordinates_y, reason } = req.body;
+      const [oldPlot] = await sql`SELECT plot_status FROM plots WHERE plot_id = ${req.params.id}`;
+      if (!oldPlot) return err(res, "Plot not found", 404);
+      if (plot_status && plot_status !== oldPlot.plot_status && !reason) {
+        return err(res, "reason required when changing plot_status", 400);
+      }
 
       const [plot] = await sql`
         UPDATE plots SET
@@ -2846,6 +4351,20 @@ app.put("/api/admin/plots/:id",
         WHERE plot_id = ${req.params.id}
         RETURNING plot_id, plot_number, plot_status`;
       if (!plot) return err(res, "Plot not found", 404);
+      if (plot_status && plot_status !== oldPlot.plot_status) {
+        await sql`
+          INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_admin_id, reason)
+          VALUES (${req.params.id}, ${oldPlot.plot_status}::plot_status_enum,
+                  ${plot_status}::plot_status_enum, ${req.admin.admin_id}, ${reason})`;
+        await addPlotBookingHistory({
+          plotId: req.params.id,
+          eventType: "StatusChangedByAdmin",
+          eventNote: reason,
+          triggeredByAdmin: req.admin.admin_id,
+          plotStatusAtTime: plot_status,
+        });
+      }
+      await logAdminAudit(req, "PlotManagement", "UpdatePlot", "plots", req.params.id, sql.json(req.body || {}));
       return ok(res, plot, "Plot updated");
     } catch (e) {
       return err(res, e.message);
@@ -2879,6 +4398,7 @@ app.put("/api/admin/plots/:id/status",
     try {
       const { new_status, reason } = req.body;
       if (!new_status) return err(res, "new_status required", 400);
+      if (!reason) return err(res, "reason required", 400);
 
       const [plot] = await sql`SELECT plot_status FROM plots WHERE plot_id = ${req.params.id}`;
       if (!plot) return err(res, "Plot not found", 404);
@@ -2888,6 +4408,14 @@ app.put("/api/admin/plots/:id/status",
         INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_admin_id, reason)
         VALUES (${req.params.id}, ${plot.plot_status}::plot_status_enum,
                 ${new_status}::plot_status_enum, ${req.admin.admin_id}, ${reason || null})`;
+      await addPlotBookingHistory({
+        plotId: req.params.id,
+        eventType: "StatusChanged",
+        eventNote: reason || null,
+        triggeredByAdmin: req.admin.admin_id,
+        plotStatusAtTime: new_status,
+      });
+      await logPlotAudit(req, "StatusChanged", req.params.id);
 
       return ok(res, {}, "Plot status updated");
     } catch (e) {
@@ -2982,11 +4510,12 @@ app.post("/api/admin/notifications/bulk",
       const { target, title, message, channel = "All" } = req.body;
       // target: 'All' | 'Customer' | 'Associate'
       if (!message) return err(res, "message required", 400);
+      const targetFilter = target ? String(target) : null;
 
       const users = await sql`
         SELECT user_id FROM users
         WHERE account_status = 'Active'
-          AND (${target || null} IS NULL OR ${target} = 'All' OR user_type = ${target})`;
+          AND (${targetFilter} IS NULL OR ${targetFilter} = 'All' OR user_type = ${targetFilter})`;
 
       for (const u of users) {
         await sql`
@@ -3008,24 +4537,116 @@ app.post("/api/admin/notifications/bulk",
    ─────────────────────────
 ========================== */
 
+const DASHBOARD_QUERY_TIMEOUT_MS = 10000;
+
+function withDashboardTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms);
+    if (timer.unref) timer.unref();
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
+async function timedDashboardQuery(label, queryFactory, fallback) {
+  const startedAt = Date.now();
+  console.log(`[Dashboard API Start] ${label}`);
+  try {
+    const data = await withDashboardTimeout(queryFactory(), DASHBOARD_QUERY_TIMEOUT_MS, label);
+    const size = Buffer.byteLength(JSON.stringify(data || []));
+    console.log(`[Dashboard API Success] ${label} - ${Date.now() - startedAt}ms - ${size} bytes`);
+    return {
+      data,
+      error: null,
+      elapsed_ms: Date.now() - startedAt,
+      size_bytes: size
+    };
+  } catch (e) {
+    console.error(`[Dashboard API Error] ${label} - ${Date.now() - startedAt}ms - ${e.message}`);
+    return {
+      data: fallback,
+      error: e.message,
+      elapsed_ms: Date.now() - startedAt,
+      size_bytes: 0
+    };
+  }
+}
+
 app.get("/api/admin/dashboard",
   verifyAdminToken,
   role("SuperAdmin","FinanceManager","SiteManager"),
   async (req, res) => {
+    const startedAt = Date.now();
+    console.log("[Dashboard API Start] /api/admin/dashboard");
     try {
-      const [stats] = await sql`SELECT * FROM vw_admin_dashboard_stats`;
-      const sites   = await sql`SELECT * FROM vw_site_plot_summary`;
-      const recentBookings = await sql`
-        SELECT b.booking_serial, b.booking_status, b.booking_date,
-               u.full_name, p.plot_number, s.site_name
-        FROM bookings b
-        JOIN users u ON b.user_id = u.user_id
-        JOIN plots p ON b.plot_id = p.plot_id
-        JOIN sites s ON p.site_id = s.site_id
-        ORDER BY b.created_at DESC LIMIT 5`;
-      return ok(res, { stats, sites, recent_bookings: recentBookings });
+      const [statsResult, sitesResult, recentBookingsResult] = await Promise.all([
+        timedDashboardQuery(
+          "/api/admin/dashboard stats",
+          () => sql`SELECT * FROM vw_admin_dashboard_stats`,
+          []
+        ),
+        timedDashboardQuery(
+          "/api/admin/dashboard sites",
+          () => sql`SELECT * FROM vw_site_plot_summary LIMIT 25`,
+          []
+        ),
+        timedDashboardQuery(
+          "/api/admin/dashboard recent-bookings",
+          () => sql`
+            SELECT b.booking_id, b.booking_serial, b.booking_status, b.booking_date,
+                   u.full_name, p.plot_number, s.site_name
+            FROM bookings b
+            JOIN users u ON b.user_id = u.user_id
+            JOIN plots p ON b.plot_id = p.plot_id
+            JOIN sites s ON p.site_id = s.site_id
+            ORDER BY b.created_at DESC LIMIT 5`,
+          []
+        )
+      ]);
+
+      const diagnostics = {
+        stats: {
+          elapsed_ms: statsResult.elapsed_ms,
+          size_bytes: statsResult.size_bytes,
+          error: statsResult.error
+        },
+        sites: {
+          elapsed_ms: sitesResult.elapsed_ms,
+          size_bytes: sitesResult.size_bytes,
+          error: sitesResult.error
+        },
+        recent_bookings: {
+          elapsed_ms: recentBookingsResult.elapsed_ms,
+          size_bytes: recentBookingsResult.size_bytes,
+          error: recentBookingsResult.error
+        }
+      };
+
+      const responseData = {
+        stats: Array.isArray(statsResult.data) ? (statsResult.data[0] || {}) : (statsResult.data || {}),
+        sites: Array.isArray(sitesResult.data) ? sitesResult.data : [],
+        recent_bookings: Array.isArray(recentBookingsResult.data) ? recentBookingsResult.data : [],
+        diagnostics
+      };
+
+      const size = Buffer.byteLength(JSON.stringify(responseData));
+      console.log(`[Dashboard API Success] /api/admin/dashboard - ${Date.now() - startedAt}ms - ${size} bytes`);
+      return ok(res, responseData);
     } catch (e) {
-      return err(res, e.message);
+      console.error(`[Dashboard API Error] /api/admin/dashboard - ${Date.now() - startedAt}ms - ${e.message}`);
+      return ok(res, {
+        stats: {},
+        sites: [],
+        recent_bookings: [],
+        diagnostics: { error: e.message }
+      }, "Dashboard loaded with fallback data.");
     }
   }
 );
@@ -3037,9 +4658,10 @@ app.get("/api/admin/audit-log",
     try {
       const { module, page = 1, limit = 30 } = req.query;
       const offset = (page - 1) * limit;
+      const moduleFilter = module ? String(module) : null;
       const logs = await sql`
         SELECT * FROM audit_log
-        WHERE (${module || null} IS NULL OR module = ${module})
+        WHERE (${moduleFilter} IS NULL OR module = ${moduleFilter})
         ORDER BY created_at DESC
         LIMIT ${limit} OFFSET ${offset}`;
       return ok(res, logs);
@@ -3069,22 +4691,33 @@ app.use((req, res) => res.status(404).json({ success: false, message: "Route not
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError)
     return res.status(400).json({ success: false, message: error.message });
+  if (/Only HTML files are allowed for plot map upload\./.test(error.message || ""))
+    return res.status(400).json({ success: false, message: error.message });
   console.error(error);
   res.status(500).json({ success: false, message: error.message || "Internal server error" });
 });
 
 const PORT = Number(process.env.PORT) || 5000;
-const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[MMR API] Server running on port ${PORT}`);
-});
+const shouldStartServer =
+  !process.env.FUNCTION_TARGET &&
+  !process.env.FUNCTION_SIGNATURE_TYPE &&
+  !process.env.K_SERVICE;
 
-server.on("error", (error) => {
-  console.error("[MMR API] Server startup failed", {
-    code: error.code,
-    message: error.message,
+if (shouldStartServer) {
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`[MMR API] Server running on port ${PORT}`);
   });
-  process.exitCode = 1;
-});
 
-globalThis.__mmrApiServer = server;
+  server.on("error", (error) => {
+    console.error("[MMR API] Server startup failed", {
+      code: error.code,
+      message: error.message,
+    });
+    process.exitCode = 1;
+  });
+
+  globalThis.__mmrApiServer = server;
+}
+
+export default app;
 
