@@ -69,12 +69,14 @@ async function ensurePendingRegistrationTable() {
       password_hash TEXT NOT NULL,
       sponsor_user_id INTEGER,
       sponsor_invite_code TEXT,
+      optional_data JSONB NOT NULL DEFAULT '{}'::jsonb,
       otp_code TEXT NOT NULL,
       attempts INTEGER NOT NULL DEFAULT 0,
       expires_at TIMESTAMPTZ NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
+  await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS optional_data JSONB NOT NULL DEFAULT '{}'::jsonb`;
 
   pendingTableReady = true;
   console.log('[Associate Registration] pending_registrations table ready');
@@ -89,6 +91,43 @@ async function canResend(email) {
 
   if (!last) return true;
   return (Date.now() - new Date(last.updated_at).getTime()) > 60_000;
+}
+
+async function createUserWithUniqueMemberId(pending) {
+  const prefix = pending.user_type === 'Associate' ? 'MMR-A-' : 'MMR-C-';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(hashtext('users_member_id_registration'))`;
+        const [sequence] = await tx`
+          SELECT COALESCE(MAX(
+            CASE WHEN member_id ~ ${`^${prefix}[0-9]+$`}
+              THEN SUBSTRING(member_id FROM ${prefix.length + 1})::integer
+              ELSE 0 END
+          ), 0) + 1 AS next_value
+          FROM users`;
+        const memberId = `${prefix}${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
+        const [created] = await tx`
+          INSERT INTO users (
+            user_type, full_name, mobile_no, email, pan_number, aadhar_number,
+            password_hash, sponsor_user_id, member_id,
+            account_status, email_verified, email_verified_at, is_otp_verified
+          ) VALUES (
+            ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
+            ${pending.optional_data?.pan_number || null}, ${pending.optional_data?.aadhar_number || null},
+            ${pending.password_hash}, ${pending.sponsor_user_id}, ${memberId},
+            ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE
+          )
+          RETURNING user_id, full_name, email, user_type, member_id, invitation_code`;
+        return created;
+      });
+    } catch (error) {
+      const memberIdCollision = error?.code === '23505' && error?.constraint === 'users_member_id_key';
+      if (!memberIdCollision || attempt === 2) throw error;
+      console.warn('[Registration] Member ID collision detected; retrying safely.', { attempt: attempt + 1 });
+    }
+  }
+  throw new Error('Unable to allocate a member ID');
 }
 
 async function validateSignupInput(body) {
@@ -165,6 +204,15 @@ async function validateSignupInput(body) {
       password: body.password,
       sponsorUserId,
       sponsorInviteCode: body.sponsor_invite_code || null,
+      optionalData: {
+        address: body.address || null,
+        city: body.city || null,
+        state: body.state || null,
+        country: body.country || null,
+        pan_number: body.pan_number || null,
+        aadhar_number: body.aadhar_number || null,
+        passport_number: body.passport_number || null,
+      },
     },
   };
 }
@@ -201,6 +249,7 @@ router.post('/register-quick', async (req, res) => {
       password,
       sponsorUserId,
       sponsorInviteCode,
+      optionalData,
     } = validation.value;
 
     const otp = genOTP();
@@ -225,10 +274,10 @@ router.post('/register-quick', async (req, res) => {
     await sql`
       INSERT INTO pending_registrations (
         email, mobile_no, user_type, full_name, password_hash,
-        sponsor_user_id, sponsor_invite_code, otp_code, expires_at
+        sponsor_user_id, sponsor_invite_code, optional_data, otp_code, expires_at
       ) VALUES (
         ${email}, ${mobileNo}, ${userType}, ${fullName}, ${passwordHash},
-        ${sponsorUserId}, ${sponsorInviteCode}, ${otp}, ${expires}
+        ${sponsorUserId}, ${sponsorInviteCode}, ${sql.json(optionalData)}, ${otp}, ${expires}
       )`;
     console.log(`[Associate Registration:${requestId}] Associate pending record created`);
 
@@ -338,17 +387,51 @@ router.post('/verify-email-otp', async (req, res) => {
       return err(res, 'Mobile number already registered', 409);
     }
 
-    const [newUser] = await sql`
-      INSERT INTO users (
-        user_type, full_name, mobile_no, email,
-        password_hash, sponsor_user_id,
-        account_status, email_verified, email_verified_at
-      ) VALUES (
-        ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
-        ${pending.password_hash}, ${pending.sponsor_user_id},
-        'Pending', TRUE, NOW()
-      )
-      RETURNING user_id, full_name, email, user_type, member_id, invitation_code`;
+    const newUser = await createUserWithUniqueMemberId(pending);
+
+    if (pending.optional_data?.address || pending.optional_data?.city || pending.optional_data?.state) {
+      await sql`
+        INSERT INTO user_addresses (user_id, address_type, address_line1, city, state)
+        VALUES (
+          ${newUser.user_id}, 'Permanent', ${pending.optional_data.address || null},
+          ${pending.optional_data.city || null}, ${pending.optional_data.state || null}
+        )`;
+    }
+
+    if (pending.sponsor_user_id) {
+      await sql`
+        CREATE TABLE IF NOT EXISTS referral_registrations (
+          id SERIAL PRIMARY KEY,
+          sponsor_user_id INTEGER REFERENCES users(user_id),
+          referred_user_id INTEGER UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
+          sponsor_invite_code VARCHAR(80),
+          registration_source VARCHAR(80) DEFAULT 'ReferralLink',
+          referral_level INTEGER NOT NULL DEFAULT 1,
+          status VARCHAR(30) NOT NULL DEFAULT 'Pending',
+          approved_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`;
+      await sql`
+        CREATE TABLE IF NOT EXISTS associate_referral_links (
+          id SERIAL PRIMARY KEY,
+          associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+          invite_code VARCHAR(80) NOT NULL UNIQUE,
+          referral_url TEXT,
+          total_clicks INTEGER NOT NULL DEFAULT 0,
+          total_registrations INTEGER NOT NULL DEFAULT 0,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`;
+      await sql`
+        INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, registration_source, status)
+        VALUES (${pending.sponsor_user_id}, ${newUser.user_id}, ${pending.sponsor_invite_code}, 'Signup', 'Pending')
+        ON CONFLICT (referred_user_id) DO NOTHING`;
+      await sql`
+        UPDATE associate_referral_links
+        SET total_registrations = total_registrations + 1, updated_at = NOW()
+        WHERE associate_user_id = ${pending.sponsor_user_id}`;
+    }
 
     await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
 
@@ -381,12 +464,21 @@ router.post('/verify-email-otp', async (req, res) => {
         user_type: newUser.user_type,
         member_id: newUser.member_id,
         invitation_code: newUser.invitation_code,
+        account_status: pending.user_type === 'Customer' ? 'Active' : 'Pending',
+        email_verified: true,
       },
       redirect: newUser.user_type === 'Associate' ? '/associate/dashboard' : '/user/dashboard',
-    }, 'Email verified. Registration completed and is pending admin approval.');
+    }, pending.user_type === 'Customer'
+      ? 'Email verified. Your customer account is active.'
+      : 'Email verified. Registration completed and is pending admin approval.');
   } catch (e) {
-    console.error('[verify-email-otp]', e);
-    return err(res, e.message);
+    logRegistrationError('[verify-email-otp]', e);
+    if (e?.code === '23505') {
+      if (e?.constraint === 'users_email_key') return err(res, 'Email already registered', 409);
+      if (e?.constraint === 'users_mobile_no_key') return err(res, 'Mobile number already registered', 409);
+      return err(res, 'Registration conflict detected. Please try verification again.', 409);
+    }
+    return err(res, 'Unable to complete registration right now. Please try again.', 500);
   }
 });
 
