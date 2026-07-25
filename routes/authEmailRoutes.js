@@ -133,9 +133,26 @@ async function ensureRegistrationUniqueIndexes() {
     WHERE mobile_no IS NOT NULL`;
 }
 
+async function ensureReferralLinkTable() {
+  await sql`
+    CREATE TABLE IF NOT EXISTS associate_referral_links (
+      id SERIAL PRIMARY KEY,
+      associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+      invite_code VARCHAR(80) NOT NULL UNIQUE,
+      referral_url TEXT,
+      total_clicks INTEGER NOT NULL DEFAULT 0,
+      total_registrations INTEGER NOT NULL DEFAULT 0,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
+}
+
 async function findSponsorByCode(code) {
   const sponsorCode = normalizeSponsorCode(code);
   if (!sponsorCode) return null;
+
+  await ensureReferralLinkTable();
 
   const [sponsor] = await sql`
     SELECT DISTINCT u.user_id
@@ -146,9 +163,9 @@ async function findSponsorByCode(code) {
     WHERE u.account_status = 'Active'
       AND u.user_type = 'Associate'
       AND (
-        UPPER(u.invitation_code) = ${sponsorCode}
-        OR UPPER(u.member_id) = ${sponsorCode}
-        OR UPPER(l.invite_code) = ${sponsorCode}
+        UPPER(COALESCE(u.invitation_code, '')) = ${sponsorCode}
+        OR UPPER(COALESCE(u.member_id, '')) = ${sponsorCode}
+        OR UPPER(COALESCE(l.invite_code, '')) = ${sponsorCode}
       )
     LIMIT 1`;
 
