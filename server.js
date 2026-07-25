@@ -1,12 +1,16 @@
 import express from "express";
 import "./config/loadEnv.js";
 import cors from "cors";
+import compression from "compression";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import sql from "./db.js";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import multer from "multer";
 import path from "path";
 import fs from "fs/promises";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 import xlsx from "xlsx";
 import { v2 as cloudinary } from "cloudinary";
@@ -17,13 +21,17 @@ import paymentRoutes from './routes/payment.routes.js';
 import walletRoutes from './routes/wallet.routes.js';
 import bookingWorkflowRoutes from './routes/booking-workflow.routes.js';
 import databaseBackupRoutes from './routes/database-backup.routes.js';
+import whatsappRoutes, { whatsappEvents } from './routes/whatsapp.routes.js';
+import investorRoutes from './routes/investor.routes.js';
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
 
 
 const app = express();
 app.set("trust proxy", 1);
+app.disable("x-powered-by");
 const API_PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const isProduction = process.env.NODE_ENV === "production";
 
 const defaultAllowedOrigins = [
   "http://localhost:4200",
@@ -39,6 +47,60 @@ const envAllowedOrigins = (process.env.FRONTEND_ORIGINS || "")
   .filter(Boolean);
 const allowedOrigins = [...new Set([...defaultAllowedOrigins, ...envAllowedOrigins])];
 
+app.use(helmet({
+  crossOriginResourcePolicy: false,
+  contentSecurityPolicy: false,
+}));
+app.use(compression());
+
+const rateLimitResponse = { success: false, message: "Too many requests. Please try again shortly." };
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 450,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: rateLimitResponse,
+});
+const authLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 25,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: rateLimitResponse,
+});
+const publicFormLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 12,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: rateLimitResponse,
+});
+const uploadLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 35,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: rateLimitResponse,
+});
+
+const containsSuspiciousMarkup = (value) =>
+  typeof value === "string" && /<\s*script|javascript\s*:|on\w+\s*=|data\s*:\s*text\/html/i.test(value);
+
+function rejectSuspiciousInput(req, res, next) {
+  const stack = [req.body, req.query, req.params];
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object") continue;
+    for (const value of Object.values(current)) {
+      if (containsSuspiciousMarkup(value)) {
+        return res.status(400).json({ success: false, message: "Invalid input detected." });
+      }
+      if (value && typeof value === "object") stack.push(value);
+    }
+  }
+  next();
+}
+
 app.use(cors({
   origin(origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -52,6 +114,11 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization", "X-API-Key"],
   optionsSuccessStatus: 204,
 }));
+app.use("/api", apiLimiter);
+app.use("/api/auth", authLimiter);
+app.use("/api/admin/auth", authLimiter);
+app.use(["/api/book-plot/leads", "/api/inquiries"], publicFormLimiter);
+app.use(["/api/profile/upload-doc", "/api/bookings", "/api/emi", "/api/admin"], uploadLimiter);
 
 app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) {
@@ -64,11 +131,13 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({
+  limit: "1mb",
   verify: (req, res, buf) => {
     req.rawBody = buf;
   }
 }));
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: false, limit: "1mb" }));
+app.use(["/api/book-plot/leads", "/api/inquiries"], rejectSuspiciousInput);
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.use('/api/auth', authEmailRoutes);
 app.use('/api', newRoutes);
@@ -76,6 +145,8 @@ app.use('/api', paymentRoutes);
 app.use('/api', walletRoutes);
 app.use('/api', bookingWorkflowRoutes);
 app.use('/api', databaseBackupRoutes);
+app.use('/api', whatsappRoutes);
+app.use('/api', investorRoutes);
 // ─── Cloudinary Config ────────────────────────────────────────
 const envValue = (key) => (process.env[key] || "").trim();
 cloudinary.config({
@@ -94,7 +165,6 @@ const CLOUDINARY_FOLDER = {
   site_map:      "mmr/site-maps",
   slider_image:  "mmr/home-sliders",
   book_plot_background: "mmr/book-plot-backgrounds",
-  home_hero_background: "mmr/home-hero",
   investor_profile: "mmr/investors",
   company_document: "mmr/company-documents",
   site_document: "mmr/site-documents",
@@ -144,14 +214,14 @@ function uploadToCloudinary(buffer, folder, filename) {
       ...(isPdf ? { format: "pdf" } : {}),
     };
 
-    console.log("Params To Sign:", paramsToSign);
-    console.log("Generated Signature:", signature);
-    console.log("Upload Payload:", {
-      ...uploadOptions,
-      api_key: `${cloudinaryConfig.apiKey.slice(0, 4)}...${cloudinaryConfig.apiKey.slice(-4)}`,
-      file_name: filename,
-      file_size: buffer.length,
-    });
+    if (!isProduction) {
+      console.log("[Cloudinary Upload]", {
+        folder,
+        resource_type: resourceType,
+        file_name: filename,
+        file_size: buffer.length,
+      });
+    }
 
     const stream = cloudinary.uploader.upload_stream(
       uploadOptions,
@@ -160,23 +230,19 @@ function uploadToCloudinary(buffer, folder, filename) {
           console.error("[Cloudinary Upload Error]", {
             message: error.message,
             http_code: error.http_code,
-            paramsToSign,
-            generatedSignature: signature,
-            uploadPayload: {
-              ...uploadOptions,
-              api_key: `${cloudinaryConfig.apiKey.slice(0, 4)}...${cloudinaryConfig.apiKey.slice(-4)}`,
-              file_name: filename,
-              file_size: buffer.length,
-            },
+            folder,
+            resource_type: resourceType,
+            file_name: filename,
+            file_size: buffer.length,
           });
 
           if (/invalid signature/i.test(error.message || "")) {
-            return reject(new Error("Cloudinary upload failed: invalid signature. Verify CLOUDINARY_API_SECRET in the deployed environment and ensure folder, public_id, and timestamp match the signed payload."));
+            return reject(new Error("Image upload failed. Please try again."));
           }
           if (/timestamp/i.test(error.message || "")) {
-            return reject(new Error("Cloudinary upload failed: missing or invalid timestamp."));
+            return reject(new Error("Image upload failed. Please try again."));
           }
-          return reject(new Error(error.message || "Cloudinary upload failed."));
+          return reject(new Error("Image upload failed. Please try again."));
         }
         resolve({ url: result.secure_url, public_id: result.public_id });
       }
@@ -220,7 +286,20 @@ const plotImageUpload = multer({
 
 const importUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 3 * 1024 * 1024, files: 1, fields: 10 },
+  fileFilter: (_req, file, cb) => {
+    const allowedExt = [".xlsx", ".csv"];
+    const allowedMime = [
+      "text/csv",
+      "application/csv",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ];
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    allowedExt.includes(ext) && (!file.mimetype || allowedMime.includes(file.mimetype))
+      ? cb(null, true)
+      : cb(new Error("Only .xlsx and .csv files are allowed."));
+  },
 });
 
 const companyAssetUpload = multer({
@@ -298,8 +377,18 @@ const siteDocumentUpload = multer({
 const ok  = (res, data, msg = "Success", status = 200) =>
   res.status(status).json({ success: true,  message: msg, data });
 
+const INTERNAL_ERROR_PATTERN =
+  /(postgres|database|sql|relation|column|constraint|jwt|secret|token|cloudinary|signature|stack|syntax|enoent|econn|enotfound|invalid input syntax|connection string|password|api[_ -]?key)/i;
+const publicErrorMessage = (msg, status = 500) => {
+  const text = String(msg || "Server error").trim();
+  if (!text) return status >= 500 ? "Unable to process request right now." : "Invalid request.";
+  if (status >= 500 || INTERNAL_ERROR_PATTERN.test(text)) {
+    return "Unable to process request right now.";
+  }
+  return text.slice(0, 240);
+};
 const err = (res, msg = "Server error", status = 500) =>
-  res.status(status).json({ success: false, message: msg });
+  res.status(status).json({ success: false, message: publicErrorMessage(msg, status) });
 
 const adminJwtSecret = () => process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
 const parseBool = (value, fallback = false) => {
@@ -433,22 +522,10 @@ const ensureHomeExperienceSchema = () => {
         CREATE TABLE IF NOT EXISTS home_page_settings (
           id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
           display_type VARCHAR(20) NOT NULL DEFAULT 'hero_slider'
-            CHECK (display_type IN ('hero_slider', 'book_plot')),
+            CHECK (display_type IN ('hero_slider')),
           show_hero_slider BOOLEAN NOT NULL DEFAULT TRUE,
           show_information_section BOOLEAN NOT NULL DEFAULT TRUE,
-          section_visibility JSONB NOT NULL DEFAULT '{"hero_book_now":true,"hero_site_slider":true,"investors":true,"sites":true,"why_choose":true,"emi_calculator":true,"buyback":true,"earn":true,"facilities":true,"cta":true,"contact":true}'::jsonb,
-          hero_main_heading VARCHAR(180) NOT NULL DEFAULT 'MMR Constructions',
-          hero_company_name VARCHAR(220) NOT NULL DEFAULT 'MMR Constructions and Developers Private Limited',
-          hero_tagline TEXT,
-          hero_director_name VARCHAR(160),
-          hero_contact_number VARCHAR(20),
-          hero_secondary_contact VARCHAR(20),
-          hero_whatsapp_number VARCHAR(20),
-          hero_background_url TEXT,
-          hero_background_public_id TEXT,
-          hero_form_title VARCHAR(120) NOT NULL DEFAULT 'Book a Site Visit',
-          hero_submit_button_text VARCHAR(80) NOT NULL DEFAULT 'Book Now',
-          hero_site_slider_interval INTEGER NOT NULL DEFAULT 5,
+          section_visibility JSONB NOT NULL DEFAULT '{"investors":true,"sites":true,"why_choose":true,"emi_calculator":true,"buyback":true,"earn":true,"facilities":true,"cta":true,"contact":true}'::jsonb,
           is_active BOOLEAN NOT NULL DEFAULT TRUE,
           is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -458,19 +535,8 @@ const ensureHomeExperienceSchema = () => {
         INSERT INTO home_page_settings (id)
         VALUES (1) ON CONFLICT (id) DO NOTHING`;
       await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS show_hero_slider BOOLEAN NOT NULL DEFAULT TRUE`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS section_visibility JSONB NOT NULL DEFAULT '{"hero_book_now":true,"hero_site_slider":true,"investors":true,"sites":true,"why_choose":true,"emi_calculator":true,"buyback":true,"earn":true,"facilities":true,"cta":true,"contact":true}'::jsonb`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS hero_main_heading VARCHAR(180) NOT NULL DEFAULT 'MMR Constructions'`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS hero_company_name VARCHAR(220) NOT NULL DEFAULT 'MMR Constructions and Developers Private Limited'`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS hero_tagline TEXT`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS hero_director_name VARCHAR(160)`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS hero_contact_number VARCHAR(20)`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS hero_secondary_contact VARCHAR(20)`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS hero_whatsapp_number VARCHAR(20)`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS hero_background_url TEXT`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS hero_background_public_id TEXT`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS hero_form_title VARCHAR(120) NOT NULL DEFAULT 'Book a Site Visit'`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS hero_submit_button_text VARCHAR(80) NOT NULL DEFAULT 'Book Now'`;
-      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS hero_site_slider_interval INTEGER NOT NULL DEFAULT 5`;
+      await sql`ALTER TABLE home_page_settings ADD COLUMN IF NOT EXISTS section_visibility JSONB NOT NULL DEFAULT '{"investors":true,"sites":true,"why_choose":true,"emi_calculator":true,"buyback":true,"earn":true,"facilities":true,"cta":true,"contact":true}'::jsonb`;
+      await sql`UPDATE home_page_settings SET display_type = 'hero_slider', show_hero_slider = TRUE, section_visibility = section_visibility - 'hero_book_now' - 'hero_site_slider' WHERE id = 1`;
       await sql`
         CREATE TABLE IF NOT EXISTS investors (
           id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
@@ -558,6 +624,32 @@ const parseSliderStats = (value) => {
   } catch {
     return [];
   }
+};
+
+const normalizeHeroFieldVisibility = (value) => {
+  let source = value && typeof value === "object" ? value : {};
+  if (typeof value === "string" && value.trim()) {
+    try { source = JSON.parse(value); } catch { source = {}; }
+  }
+  return Object.fromEntries([
+    "tagline", "director_name", "contact_number", "secondary_contact",
+    "whatsapp_number", "form_title", "submit_button_text",
+  ].map((key) => [key, parseBool(source[key], true)]));
+};
+
+const normalizeHeroSliderImages = (value, fallbackUrl = null, fallbackPublicId = null) => {
+  const source = Array.isArray(value) ? value : [];
+  const images = source
+    .map((item) => ({
+      url: String(item?.url || item?.image_url || "").trim(),
+      public_id: String(item?.public_id || item?.image_public_id || "").trim() || null,
+      name: String(item?.name || item?.original_name || "").trim() || null,
+    }))
+    .filter((item) => item.url);
+  if (!images.length && fallbackUrl) {
+    images.push({ url: fallbackUrl, public_id: fallbackPublicId || null, name: null });
+  }
+  return images;
 };
 
 const defaultCompanySettings = {
@@ -1872,6 +1964,14 @@ const addUserNotification = async ({ userId, adminId = null, title = null, messa
   await sql`
     INSERT INTO notification_log (user_id, sent_by_admin_id, channel, title, message)
     VALUES (${userId}, ${adminId}, ${channel}, ${title}, ${message})`;
+  try {
+    const [user] = await sql`SELECT mobile_no FROM users WHERE user_id = ${userId}`;
+    if (user?.mobile_no) {
+      await whatsappEvents.enqueue("general_notification", user.mobile_no, { message: title ? `${title}: ${message}` : message }, userId, adminId, 5);
+    }
+  } catch (error) {
+    console.error("[WhatsApp Notification Queue Error]", error?.message || error);
+  }
 };
 
 const logAdminAudit = async (req, module, action, targetTable, targetRecordId, newValue = null) => {
@@ -1983,10 +2083,20 @@ const parseImportRows = (file) => {
   if (![".xlsx", ".csv"].includes(ext)) {
     throw new Error("Only .xlsx and .csv files are allowed.");
   }
-  const workbook = xlsx.read(file.buffer, { type: "buffer" });
+  const workbook = xlsx.read(file.buffer, {
+    type: "buffer",
+    sheetRows: 2001,
+    cellFormula: false,
+    cellHTML: false,
+    cellStyles: false,
+  });
   const sheetName = workbook.SheetNames[0];
   if (!sheetName) return [];
-  return xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: "" });
+  const rows = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: "", raw: false });
+  if (rows.length > 2000) {
+    throw new Error("Import file can contain a maximum of 2000 rows.");
+  }
+  return rows;
 };
 
 const normalizeImportValue = (value) =>
@@ -2031,13 +2141,19 @@ const plotDetector2Statuses = ["Available", "Booked", "Processing", "Sold", "Res
 // Generate 6-digit OTP
 const genOTP = () => String(Math.floor(100000 + Math.random() * 900000));
 
-// Generate member ID:  MMR-C-00001 / MMR-A-00001
+// Generate member ID: MMR00001
 const genMemberID = async (userType) => {
-  const prefix = userType === "Customer" ? "MMR-C-" : "MMR-A-";
   const [row] = await sql`
-    SELECT COALESCE(MAX(CAST(SUBSTRING(member_id FROM ${prefix.length + 1}) AS INT)), 0) + 1 AS seq
-    FROM users WHERE member_id LIKE ${prefix + "%"}`;
-  return prefix + String(row.seq).padStart(5, "0");
+    SELECT COALESCE(MAX(
+      CASE
+        WHEN member_id ~ '^MMR[0-9]+$'
+          THEN SUBSTRING(member_id FROM 4)::integer
+        WHEN member_id ~ '^MMR-[AC]-[0-9]+$'
+          THEN SUBSTRING(member_id FROM 7)::integer
+        ELSE 0 END
+    ), 0) + 1 AS seq
+    FROM users`;
+  return "MMR" + String(row.seq).padStart(5, "0");
 };
 
 // Generate invite code for Associates
@@ -2188,10 +2304,7 @@ app.get("/api/home-page/settings", async (_req, res) => {
   try {
     await ensureHomeExperienceSchema();
     const [settings] = await sql`
-      SELECT display_type, show_hero_slider, show_information_section, section_visibility,
-             hero_main_heading, hero_company_name, hero_tagline, hero_director_name,
-             hero_contact_number, hero_secondary_contact, hero_whatsapp_number,
-             hero_background_url, hero_form_title, hero_submit_button_text, hero_site_slider_interval
+      SELECT display_type, show_hero_slider, show_information_section, section_visibility
       FROM home_page_settings WHERE id = 1 AND is_active = TRUE AND is_deleted = FALSE`;
     return ok(res, settings || { display_type: "hero_slider", show_hero_slider: true, show_information_section: true, section_visibility: {} });
   } catch (e) {
@@ -2211,65 +2324,21 @@ app.get("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "S
 app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "SiteManager"), async (req, res) => {
   try {
     await ensureHomeExperienceSchema();
-    const displayType = String(req.body.display_type || "").trim();
-    if (!["hero_slider", "book_plot"].includes(displayType))
-      return err(res, "Select either Hero Slider or Book Plot Form", 400);
-    const showHeroSlider = req.body.show_hero_slider;
-    const interval = Number(req.body.hero_site_slider_interval);
-    const validInterval = [2, 3, 5, 7, 10].includes(interval) ? interval : null;
+    const displayType = "hero_slider";
     const sectionVisibility = req.body.section_visibility && typeof req.body.section_visibility === "object"
-      ? Object.fromEntries(["hero_book_now", "hero_site_slider", "investors", "sites", "why_choose", "emi_calculator", "buyback", "earn", "facilities", "cta", "contact"]
+      ? Object.fromEntries(["investors", "sites", "why_choose", "emi_calculator", "buyback", "earn", "facilities", "cta", "contact"]
           .map((key) => [key, parseBool(req.body.section_visibility[key], true)]))
       : null;
     const [settings] = await sql`
       UPDATE home_page_settings SET
         display_type = ${displayType},
-        show_hero_slider = CASE WHEN ${showHeroSlider === undefined} THEN show_hero_slider ELSE ${parseBool(showHeroSlider, true)} END,
+        show_hero_slider = TRUE,
         show_information_section = ${parseBool(req.body.show_information_section, true)},
         section_visibility = CASE WHEN ${sectionVisibility === null} THEN section_visibility ELSE ${sql.json(sectionVisibility || {})} END,
-        hero_site_slider_interval = CASE WHEN ${validInterval === null} THEN hero_site_slider_interval ELSE ${validInterval} END,
         updated_at = NOW()
       WHERE id = 1 RETURNING *`;
     await logAdminAudit(req, "HomePage", "UpdateSettings", "home_page_settings", 1, sql.json(settings));
     return ok(res, settings, "Home page settings updated.");
-  } catch (e) { return err(res, e.message); }
-});
-
-app.put("/api/admin/home-page/hero", verifyAdminToken, role("SuperAdmin", "SiteManager"), upload.single("hero_background"), async (req, res) => {
-  try {
-    await ensureHomeExperienceSchema();
-    const [current] = await sql`SELECT * FROM home_page_settings WHERE id = 1`;
-    const mainHeading = String(req.body.main_heading || "").trim();
-    const companyName = String(req.body.company_name || "").trim();
-    const contact = String(req.body.contact_number || "").replace(/\D/g, "").slice(0, 15) || null;
-    if (!mainHeading || !companyName) return err(res, "Main heading and company name are required", 400);
-    for (const value of [contact, req.body.secondary_contact_number, req.body.whatsapp_number]) {
-      const digits = String(value || "").replace(/\D/g, "");
-      if (digits && (digits.length < 10 || digits.length > 15)) return err(res, "Enter valid contact numbers", 400);
-    }
-    const interval = Number(req.body.hero_site_slider_interval);
-    const siteSliderInterval = [2, 3, 5, 7, 10].includes(interval) ? interval : 5;
-    let backgroundUrl = current.hero_background_url;
-    let backgroundPublicId = current.hero_background_public_id;
-    if (req.file) {
-      if (!/^image\/(jpeg|png|webp)$/.test(req.file.mimetype)) return err(res, "Hero background must be JPG, PNG or WEBP", 400);
-      const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.home_hero_background, req.file.originalname);
-      backgroundUrl = uploaded.url; backgroundPublicId = uploaded.public_id;
-      if (current.hero_background_public_id) cloudinary.uploader.destroy(current.hero_background_public_id).catch(() => {});
-    }
-    const [updated] = await sql`UPDATE home_page_settings SET
-      hero_main_heading = ${mainHeading}, hero_company_name = ${companyName},
-      hero_tagline = ${String(req.body.tagline || "").trim() || null},
-      hero_director_name = ${String(req.body.director_name || "").trim() || null},
-      hero_contact_number = ${contact},
-      hero_secondary_contact = ${String(req.body.secondary_contact_number || "").replace(/\D/g, "").slice(0,15) || null},
-      hero_whatsapp_number = ${String(req.body.whatsapp_number || "").replace(/\D/g, "").slice(0,15) || null},
-      hero_background_url = ${backgroundUrl}, hero_background_public_id = ${backgroundPublicId},
-      hero_form_title = ${String(req.body.form_title || "").trim() || "Book a Site Visit"},
-      hero_submit_button_text = ${String(req.body.submit_button_text || "").trim() || "Book Now"},
-      hero_site_slider_interval = ${siteSliderInterval}, updated_at = NOW()
-      WHERE id = 1 RETURNING *`;
-    return ok(res, updated, "Hero section settings saved.");
   } catch (e) { return err(res, e.message); }
 });
 
@@ -2592,6 +2661,59 @@ app.post("/api/admin/home-sliders",
         RETURNING id, title`;
       await logAdminAudit(req, "HomeSlider", "CreateSlider", "home_sliders", slider.id, sql.json({ title }));
       return ok(res, slider, "Home slider created.", 201);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.post("/api/admin/home-sliders/bulk",
+  verifyAdminToken,
+  role("SuperAdmin", "SiteManager"),
+  upload.array("slider_images", 20),
+  async (req, res) => {
+    try {
+      await ensureHomeSlidersSchema();
+      const files = Array.isArray(req.files) ? req.files : [];
+      if (!files.length) return err(res, "Select at least one slider image", 400);
+      if (files.some((file) => !/^image\/(jpeg|png|webp)$/.test(file.mimetype))) {
+        return err(res, "Only JPG, JPEG, PNG and WEBP slider images are allowed.", 400);
+      }
+
+      const [{ next_order }] = await sql`
+        SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order
+        FROM home_sliders`;
+      const created = [];
+
+      for (const [index, file] of files.entries()) {
+        const uploaded = await uploadToCloudinary(
+          file.buffer,
+          CLOUDINARY_FOLDER.slider_image,
+          file.originalname,
+        );
+        const originalName = path.basename(file.originalname || `Slider ${index + 1}`, path.extname(file.originalname || ""));
+        const title = originalName.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim() || `Slider ${index + 1}`;
+        const [slider] = await sql`
+          INSERT INTO home_sliders (
+            title, image_url, image_public_id, thumbnail_url, thumbnail_title,
+            display_order, is_active, created_by_admin_id, updated_by_admin_id
+          ) VALUES (
+            ${title},
+            ${uploaded.url},
+            ${uploaded.public_id},
+            ${uploaded.url},
+            ${title},
+            ${Number(next_order) + index},
+            TRUE,
+            ${req.admin.admin_id || null},
+            ${req.admin.admin_id || null}
+          )
+          RETURNING id, title, image_url, display_order, is_active`;
+        created.push(slider);
+      }
+
+      await logAdminAudit(req, "HomeSlider", "BulkCreateSliders", "home_sliders", null, sql.json({ count: created.length }));
+      return ok(res, created, `${created.length} slider image${created.length === 1 ? "" : "s"} uploaded.`, 201);
     } catch (e) {
       return err(res, e.message);
     }
@@ -3418,8 +3540,6 @@ app.post("/api/auth/send-otp", async (req, res) => {
       VALUES ('User', 0, ${mobile_no}, ${otp}, ${purpose}, ${exp})`;
 
     // TODO: Integrate real SMS gateway (Fast2SMS / MSG91)
-    console.log(`[OTP] ${mobile_no} → ${otp}`);
-
     return ok(res, { mobile_no }, "OTP sent successfully");
   } catch (e) {
     return err(res, e.message);
@@ -3626,8 +3746,6 @@ app.post("/api/auth/register-quick", async (req, res) => {
       VALUES ('User', ${newUser.user_id}, ${email.toLowerCase().trim()}, ${otp}, 'EmailVerification', ${exp})`;
 
     // TODO: Real email gateway se OTP bhejo (Nodemailer / SendGrid)
-    console.log(`[EMAIL OTP] ${email} -> ${otp}`);
-
     await sql`
       INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
       VALUES ('User', ${newUser.user_id}, ${full_name}, 'Auth', 'QuickRegistered', 'users', ${newUser.user_id})`;
@@ -3705,7 +3823,6 @@ app.post("/api/auth/resend-email-otp", async (req, res) => {
       INSERT INTO otp_log (user_type, reference_id, mobile, otp_code, purpose, expires_at)
       VALUES ('User', ${user.user_id}, ${email.toLowerCase().trim()}, ${otp}, 'EmailVerification', ${exp})`;
 
-    console.log(`[EMAIL OTP RESEND] ${email} -> ${otp}`);
     return ok(res, {}, "OTP resent to your email.");
   } catch (e) {
     return err(res, e.message);
@@ -4733,12 +4850,18 @@ app.get("/api/emi/:emiId/voucher", verifyUserToken, async (req, res) => {
 app.get("/api/referral/validate/:inviteCode", async (req, res) => {
   try {
     await requireMlmSchema();
+    const inviteCode = String(req.params.inviteCode || "").replace(/\*/g, "").trim().toUpperCase();
     const [sponsor] = await sql`
       SELECT u.user_id, u.member_id, u.full_name, u.invitation_code, u.account_status,
              l.referral_url, l.total_clicks, l.total_registrations, l.is_active
       FROM users u
       LEFT JOIN associate_referral_links l ON l.associate_user_id = u.user_id
-      WHERE (u.invitation_code = ${req.params.inviteCode} OR l.invite_code = ${req.params.inviteCode})
+      WHERE (
+          UPPER(COALESCE(u.invitation_code, '')) = ${inviteCode}
+          OR UPPER(COALESCE(u.member_id, '')) = ${inviteCode}
+          OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-[AC]-', 'MMR')) = ${inviteCode}
+          OR UPPER(COALESCE(l.invite_code, '')) = ${inviteCode}
+        )
         AND u.user_type = 'Associate'
       LIMIT 1`;
     if (!sponsor || sponsor.account_status !== "Active" || sponsor.is_active === false) {
@@ -4753,12 +4876,18 @@ app.get("/api/referral/validate/:inviteCode", async (req, res) => {
 app.get("/api/referral/:inviteCode", async (req, res) => {
   try {
     await requireMlmSchema();
+    const inviteCode = String(req.params.inviteCode || "").replace(/\*/g, "").trim().toUpperCase();
     const [sponsor] = await sql`
       SELECT u.user_id, u.member_id, u.full_name, u.invitation_code, u.account_status,
              l.invite_code, l.referral_url, l.is_active
       FROM users u
       LEFT JOIN associate_referral_links l ON l.associate_user_id = u.user_id
-      WHERE (u.invitation_code = ${req.params.inviteCode} OR l.invite_code = ${req.params.inviteCode})
+      WHERE (
+          UPPER(COALESCE(u.invitation_code, '')) = ${inviteCode}
+          OR UPPER(COALESCE(u.member_id, '')) = ${inviteCode}
+          OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-[AC]-', 'MMR')) = ${inviteCode}
+          OR UPPER(COALESCE(l.invite_code, '')) = ${inviteCode}
+        )
         AND u.user_type = 'Associate'
       LIMIT 1`;
     if (!sponsor || sponsor.account_status !== "Active" || sponsor.is_active === false) {
@@ -4766,7 +4895,7 @@ app.get("/api/referral/:inviteCode", async (req, res) => {
     }
     await sql`
       INSERT INTO referral_clicks (associate_user_id, invite_code, ip_address, user_agent)
-      VALUES (${sponsor.user_id}, ${req.params.inviteCode}, ${req.ip || null}, ${req.get("user-agent") || null})`;
+      VALUES (${sponsor.user_id}, ${inviteCode}, ${req.ip || null}, ${req.get("user-agent") || null})`;
     await ensureAssociateReferralLink(req, sponsor);
     await sql`
       UPDATE associate_referral_links SET total_clicks = total_clicks + 1, updated_at = NOW()
@@ -4776,8 +4905,8 @@ app.get("/api/referral/:inviteCode", async (req, res) => {
         user_id: sponsor.user_id,
         member_id: sponsor.member_id,
         full_name: sponsor.full_name,
-        invite_code: sponsor.invite_code || sponsor.invitation_code,
-        referral_url: sponsor.referral_url || publicReferralUrl(req, sponsor.invitation_code),
+        invite_code: sponsor.invite_code || sponsor.invitation_code || sponsor.member_id,
+        referral_url: sponsor.referral_url || publicReferralUrl(req, sponsor.invite_code || sponsor.invitation_code || sponsor.member_id),
       }
     });
   } catch (e) {
@@ -5523,11 +5652,58 @@ const getAdminInquiriesPage = async (query) => {
   return { rows, totalRecords: Number(total?.count || 0), page, pageSize, counts };
 };
 
+const captchaSecret = () => process.env.CAPTCHA_SECRET || process.env.JWT_SECRET || "local-captcha-secret";
+const captchaMaxAgeMs = 5 * 60 * 1000;
+
+function signCaptcha(payload) {
+  return crypto.createHmac("sha256", captchaSecret()).update(payload).digest("hex");
+}
+
+function createCaptchaChallenge() {
+  const left = crypto.randomInt(2, 10);
+  const right = crypto.randomInt(1, 9);
+  const answer = String(left + right);
+  const issuedAt = Date.now();
+  const nonce = crypto.randomBytes(12).toString("hex");
+  const payload = `${nonce}.${issuedAt}.${answer}`;
+  return {
+    question: `${left} + ${right}`,
+    token: `${nonce}.${issuedAt}.${signCaptcha(payload)}`,
+  };
+}
+
+function verifyCaptchaChallenge(token, answer) {
+  const parts = String(token || "").split(".");
+  if (parts.length !== 3) return false;
+
+  const [nonce, issuedAtRaw, signature] = parts;
+  const issuedAt = Number(issuedAtRaw);
+  const submittedAnswer = String(answer || "").trim();
+  if (!nonce || !Number.isFinite(issuedAt) || !submittedAnswer) return false;
+  if (Date.now() - issuedAt > captchaMaxAgeMs || issuedAt > Date.now() + 30_000) return false;
+
+  for (let expected = 3; expected <= 18; expected++) {
+    if (submittedAnswer !== String(expected)) continue;
+    const payload = `${nonce}.${issuedAt}.${expected}`;
+    const expectedSignature = signCaptcha(payload);
+    const actualBuffer = Buffer.from(signature);
+    const expectedBuffer = Buffer.from(expectedSignature);
+    if (actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+app.get("/api/captcha/enquiry", (req, res) => {
+  return ok(res, createCaptchaChallenge(), "Captcha generated");
+});
+
 app.post("/api/inquiries", async (req, res) => {
   try {
     await ensureInquirySchema();
     const body = req.body || {};
-    console.log("[Inquiry Submit Request]", body);
     const fullName = String(body.full_name || body.name || "").trim();
     const mobileNo = String(body.mobile_no || body.mobile || "").replace(/\D/g, "").slice(0, 15);
     const email = String(body.email || "").trim().toLowerCase() || null;
@@ -5537,10 +5713,13 @@ app.post("/api/inquiries", async (req, res) => {
     const message = String(body.inquiry_message || body.message || "").trim() || null;
     const inquiryType = String(body.inquiry_type || body.interest || "General Enquiry").trim() || "General Enquiry";
     const sourcePage = String(body.source_page || "Website").trim() || "Website";
+    const captchaToken = body.captcha_token;
+    const captchaAnswer = body.captcha_answer;
 
     if (!fullName) return err(res, "Full name is required", 400);
     if (!mobileNo) return err(res, "Mobile number is required", 400);
     if (!/^[6-9]\d{9}$/.test(mobileNo)) return err(res, "Valid Indian mobile number is required", 400);
+    if (!verifyCaptchaChallenge(captchaToken, captchaAnswer)) return err(res, "Captcha verification failed. Please try again.", 400);
     if (siteId) {
       const [site] = await sql`SELECT site_id FROM sites WHERE site_id=${siteId} AND is_active=TRUE`;
       if (!site) return err(res, "Selected site is not active", 400);
@@ -5560,7 +5739,6 @@ app.post("/api/inquiries", async (req, res) => {
                 inquiry_message, inquiry_type, source_page, status, remarks,
                 created_at, updated_at`;
 
-    console.log("[Inquiry Insert Result]", created);
     return ok(res, created, "Inquiry submitted successfully", 201);
   } catch (e) {
     console.error("[Inquiry Submit Error]", e);
@@ -5889,17 +6067,22 @@ app.post("/api/admin/users/:id/approve",
     try {
       const uid   = req.params.id;
       const { verify_note } = req.body;
-      const [user] = await sql`SELECT user_id, user_type, full_name, account_status FROM users WHERE user_id = ${uid}`;
+      const [user] = await sql`
+        SELECT user_id, user_type, full_name, account_status, member_id, invitation_code
+        FROM users
+        WHERE user_id = ${uid}`;
       if (!user) return err(res, "User not found", 404);
       if (user.account_status === "Active") return err(res, "Already approved", 400);
 
-      const memberId = await genMemberID(user.user_type);
-      const invCode  = user.user_type === "Associate" ? genInviteCode() : null;
+      const memberId = user.member_id || await genMemberID(user.user_type);
+      const invCode = user.user_type === "Associate"
+        ? (user.invitation_code || memberId)
+        : null;
 
       await sql`
         UPDATE users SET
           account_status = 'Active', member_id = ${memberId},
-          invitation_code = COALESCE(${invCode}, invitation_code),
+          invitation_code = ${user.user_type === "Associate" ? invCode : user.invitation_code},
           approved_by_admin_id = ${req.admin.admin_id}, approved_at = NOW(), updated_at = NOW()
         WHERE user_id = ${uid}`;
 
@@ -5919,7 +6102,6 @@ app.post("/api/admin/users/:id/approve",
                   END) ON CONFLICT (associate_user_id) DO NOTHING`;
         await linkApprovedReferral(uid);
       }
-      await linkApprovedReferral(uid);
 
       await sql`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action,
@@ -9300,12 +9482,24 @@ app.get("/health", async (req, res) => {
 app.use((req, res) => res.status(404).json({ success: false, message: "Route not found" }));
 
 app.use((error, req, res, next) => {
-  if (error instanceof multer.MulterError)
-    return res.status(400).json({ success: false, message: error.message });
+  if (error instanceof multer.MulterError) {
+    const message = error.code === "LIMIT_FILE_SIZE"
+      ? "Uploaded file is too large."
+      : publicErrorMessage(error.message, 400);
+    return res.status(400).json({ success: false, message });
+  }
   if (/Only (HTML files|PDF, JPG, JPEG, and PNG files) are allowed\./.test(error.message || ""))
     return res.status(400).json({ success: false, message: error.message });
-  console.error(error);
-  res.status(500).json({ success: false, message: error.message || "Internal server error" });
+  if (error?.type === "entity.too.large") {
+    return res.status(413).json({ success: false, message: "Request is too large." });
+  }
+  console.error("[Unhandled API Error]", {
+    method: req.method,
+    path: req.originalUrl,
+    message: error?.message,
+    stack: isProduction ? undefined : error?.stack,
+  });
+  res.status(500).json({ success: false, message: "Unable to process request right now." });
 });
 
 const PORT = Number(process.env.PORT) || 5000;
