@@ -17,6 +17,7 @@ const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 const isMobile = (v) => /^[6-9]\d{9}$/.test(v);
 const normalizeEmail = (email) => String(email || '').toLowerCase().trim();
 const normalizeMobileNo = (mobile) => String(mobile || '').replace(/\D/g, '').slice(-10);
+const normalizeSponsorCode = (code) => String(code || '').replace(/\*/g, '').trim().toUpperCase();
 
 const sanitizeBody = (body = {}) => {
   const sanitized = { ...body };
@@ -132,6 +133,28 @@ async function ensureRegistrationUniqueIndexes() {
     WHERE mobile_no IS NOT NULL`;
 }
 
+async function findSponsorByCode(code) {
+  const sponsorCode = normalizeSponsorCode(code);
+  if (!sponsorCode) return null;
+
+  const [sponsor] = await sql`
+    SELECT DISTINCT u.user_id
+    FROM users u
+    LEFT JOIN associate_referral_links l
+      ON l.associate_user_id = u.user_id
+      AND l.is_active = TRUE
+    WHERE u.account_status = 'Active'
+      AND u.user_type = 'Associate'
+      AND (
+        UPPER(u.invitation_code) = ${sponsorCode}
+        OR UPPER(u.member_id) = ${sponsorCode}
+        OR UPPER(l.invite_code) = ${sponsorCode}
+      )
+    LIMIT 1`;
+
+  return sponsor || null;
+}
+
 async function canResend(email) {
   await ensurePendingRegistrationTable();
 
@@ -172,6 +195,7 @@ async function validateSignupInput(body) {
   const userType = body.user_type || 'Customer';
   const email = normalizeEmail(body.email);
   const mobileNo = normalizeMobileNo(body.mobile_no);
+  const sponsorInviteCode = normalizeSponsorCode(body.sponsor_invite_code);
   const fullName = body.full_name?.trim();
   const validationErrors = [];
 
@@ -180,7 +204,7 @@ async function validateSignupInput(body) {
     email,
     mobile_no: mobileNo,
     full_name_present: Boolean(fullName),
-    sponsor_invite_code_present: Boolean(body.sponsor_invite_code),
+    sponsor_invite_code_present: Boolean(sponsorInviteCode),
   });
 
   if (!fullName) validationErrors.push('Full name is required');
@@ -217,15 +241,12 @@ async function validateSignupInput(body) {
   }
 
   let sponsorUserId = null;
-  if (body.sponsor_invite_code) {
+  if (sponsorInviteCode) {
     console.log('[Associate Registration] Validating sponsor invite code...');
-    const [sponsor] = await sql`
-      SELECT user_id FROM users
-      WHERE invitation_code = ${body.sponsor_invite_code}
-        AND account_status = 'Active'`;
+    const sponsor = await findSponsorByCode(sponsorInviteCode);
     if (!sponsor) {
       console.error('[Associate Registration] Invalid sponsor invitation code:', {
-        sponsor_invite_code: body.sponsor_invite_code,
+        sponsor_invite_code: sponsorInviteCode,
       });
       return { error: 'Invalid sponsor invitation code', status: 400 };
     }
@@ -243,7 +264,7 @@ async function validateSignupInput(body) {
       fullName,
       password: body.password,
       sponsorUserId,
-      sponsorInviteCode: body.sponsor_invite_code || null,
+      sponsorInviteCode: sponsorInviteCode || null,
       optionalData: {},
     },
   };
