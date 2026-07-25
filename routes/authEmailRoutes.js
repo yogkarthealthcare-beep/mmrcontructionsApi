@@ -96,6 +96,20 @@ async function ensurePendingRegistrationTable() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
   await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS optional_data JSONB NOT NULL DEFAULT '{}'::jsonb`;
+  ensureRegistrationUniqueIndexes().catch((error) => {
+    console.warn('[Associate Registration] Unique index check skipped; existing duplicates may need cleanup.', {
+      message: error?.message,
+      code: error?.code,
+      detail: error?.detail,
+      constraint: error?.constraint,
+    });
+  });
+
+  pendingTableReady = true;
+  console.log('[Associate Registration] pending_registrations table ready');
+}
+
+async function ensureRegistrationUniqueIndexes() {
   await sql`
     CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_registrations_mobile_no
     ON pending_registrations (mobile_no)`;
@@ -107,9 +121,6 @@ async function ensurePendingRegistrationTable() {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_users_mobile_no_digits
     ON users ((RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10)))
     WHERE mobile_no IS NOT NULL`;
-
-  pendingTableReady = true;
-  console.log('[Associate Registration] pending_registrations table ready');
 }
 
 async function canResend(email) {
