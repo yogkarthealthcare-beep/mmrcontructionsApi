@@ -16,6 +16,7 @@ const genOTP = () => String(Math.floor(100000 + Math.random() * 900000));
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 const isMobile = (v) => /^[6-9]\d{9}$/.test(v);
 const normalizeEmail = (email) => String(email || '').toLowerCase().trim();
+const normalizeMobileNo = (mobile) => String(mobile || '').replace(/\D/g, '').slice(-10);
 
 const sanitizeBody = (body = {}) => {
   const sanitized = { ...body };
@@ -54,6 +55,24 @@ const logRegistrationError = (label, error) => {
   });
 };
 
+const registrationConflictMessage = (error) => {
+  const constraint = String(error?.constraint || '').toLowerCase();
+
+  if (constraint.includes('users_email')) return 'Email already registered';
+  if (constraint.includes('users_mobile')) return 'Mobile number already registered';
+  if (constraint.includes('users_member_id')) {
+    return 'Member ID conflict detected. Please try verification again.';
+  }
+  if (constraint.includes('invitation')) {
+    return 'Invitation code conflict detected. Please try verification again.';
+  }
+  if (constraint.includes('referral')) {
+    return 'Referral registration already exists for this account.';
+  }
+
+  return 'Registration conflict detected. Please start registration again.';
+};
+
 let pendingTableReady = false;
 
 async function ensurePendingRegistrationTable() {
@@ -77,6 +96,17 @@ async function ensurePendingRegistrationTable() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
   await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS optional_data JSONB NOT NULL DEFAULT '{}'::jsonb`;
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_registrations_mobile_no
+    ON pending_registrations (mobile_no)`;
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_normalized
+    ON users (LOWER(email))
+    WHERE email IS NOT NULL`;
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_users_mobile_no_digits
+    ON users ((RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10)))
+    WHERE mobile_no IS NOT NULL`;
 
   pendingTableReady = true;
   console.log('[Associate Registration] pending_registrations table ready');
@@ -93,47 +123,36 @@ async function canResend(email) {
   return (Date.now() - new Date(last.updated_at).getTime()) > 60_000;
 }
 
-async function createUserWithUniqueMemberId(pending) {
+async function createUserWithUniqueMemberId(db, pending) {
   const prefix = pending.user_type === 'Associate' ? 'MMR-A-' : 'MMR-C-';
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      return await sql.begin(async (tx) => {
-        await tx`SELECT pg_advisory_xact_lock(hashtext('users_member_id_registration'))`;
-        const [sequence] = await tx`
-          SELECT COALESCE(MAX(
-            CASE WHEN member_id ~ ${`^${prefix}[0-9]+$`}
-              THEN SUBSTRING(member_id FROM ${prefix.length + 1})::integer
-              ELSE 0 END
-          ), 0) + 1 AS next_value
-          FROM users`;
-        const memberId = `${prefix}${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
-        const [created] = await tx`
-          INSERT INTO users (
-            user_type, full_name, mobile_no, email, pan_number, aadhar_number,
-            password_hash, sponsor_user_id, member_id,
-            account_status, email_verified, email_verified_at, is_otp_verified
-          ) VALUES (
-            ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
-            ${pending.optional_data?.pan_number || null}, ${pending.optional_data?.aadhar_number || null},
-            ${pending.password_hash}, ${pending.sponsor_user_id}, ${memberId},
-            ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE
-          )
-          RETURNING user_id, full_name, email, user_type, member_id, invitation_code`;
-        return created;
-      });
-    } catch (error) {
-      const memberIdCollision = error?.code === '23505' && error?.constraint === 'users_member_id_key';
-      if (!memberIdCollision || attempt === 2) throw error;
-      console.warn('[Registration] Member ID collision detected; retrying safely.', { attempt: attempt + 1 });
-    }
-  }
-  throw new Error('Unable to allocate a member ID');
+  await db`SELECT pg_advisory_xact_lock(hashtext('users_member_id_registration'))`;
+  const [sequence] = await db`
+    SELECT COALESCE(MAX(
+      CASE WHEN member_id ~ ${`^${prefix}[0-9]+$`}
+        THEN SUBSTRING(member_id FROM ${prefix.length + 1})::integer
+        ELSE 0 END
+    ), 0) + 1 AS next_value
+    FROM users`;
+  const memberId = `${prefix}${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
+  const [created] = await db`
+    INSERT INTO users (
+      user_type, full_name, mobile_no, email, pan_number, aadhar_number,
+      password_hash, sponsor_user_id, member_id,
+      account_status, email_verified, email_verified_at, is_otp_verified
+    ) VALUES (
+      ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
+      ${pending.optional_data?.pan_number || null}, ${pending.optional_data?.aadhar_number || null},
+      ${pending.password_hash}, ${pending.sponsor_user_id}, ${memberId},
+      ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE
+    )
+    RETURNING user_id, full_name, email, user_type, member_id, invitation_code`;
+  return created;
 }
 
 async function validateSignupInput(body) {
   const userType = body.user_type || 'Customer';
   const email = normalizeEmail(body.email);
-  const mobileNo = body.mobile_no;
+  const mobileNo = normalizeMobileNo(body.mobile_no);
   const fullName = body.full_name?.trim();
   const validationErrors = [];
 
@@ -163,14 +182,16 @@ async function validateSignupInput(body) {
   }
 
   console.log('[Associate Registration] Checking duplicate email...');
-  const [dupEmail] = await sql`SELECT user_id FROM users WHERE email = ${email}`;
+  const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${email}`;
   if (dupEmail) {
     console.error('[Associate Registration] Duplicate email found:', { email, user_id: dupEmail.user_id });
     return { error: 'Email already registered', status: 409 };
   }
 
   console.log('[Associate Registration] Checking duplicate mobile...');
-  const [dupMobile] = await sql`SELECT user_id FROM users WHERE mobile_no = ${mobileNo}`;
+  const [dupMobile] = await sql`
+    SELECT user_id FROM users
+    WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${mobileNo}`;
   if (dupMobile) {
     console.error('[Associate Registration] Duplicate mobile found:', { mobile_no: mobileNo, user_id: dupMobile.user_id });
     return { error: 'Mobile number already registered', status: 409 };
@@ -296,6 +317,9 @@ router.post('/register-quick', async (req, res) => {
     logRegistrationError(`[Associate Registration:${requestId}] Associate Registration Error`, e);
 
     if (e?.code === '23505') {
+      if (String(e?.constraint || '').includes('pending_registrations_mobile')) {
+        return err(res, 'Mobile number already has a pending registration. Please verify OTP or try again.', 409);
+      }
       return err(res, 'Duplicate registration record found', 409);
     }
     if (/cloudinary/i.test(e?.message || '')) {
@@ -374,73 +398,78 @@ router.post('/verify-email-otp', async (req, res) => {
       return err(res, 'Invalid OTP. Please check and try again.', 400);
     }
 
-    const [dupEmail] = await sql`SELECT user_id FROM users WHERE email = ${email}`;
+    const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${email}`;
     if (dupEmail) {
       await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
       return err(res, 'Email already registered', 409);
     }
 
     const [dupMobile] = await sql`
-      SELECT user_id FROM users WHERE mobile_no = ${pending.mobile_no}`;
+      SELECT user_id FROM users
+      WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${pending.mobile_no}`;
     if (dupMobile) {
       await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
       return err(res, 'Mobile number already registered', 409);
     }
 
-    const newUser = await createUserWithUniqueMemberId(pending);
+    const newUser = await sql.begin(async (tx) => {
+      const createdUser = await createUserWithUniqueMemberId(tx, pending);
 
-    if (pending.optional_data?.address || pending.optional_data?.city || pending.optional_data?.state) {
-      await sql`
-        INSERT INTO user_addresses (user_id, address_type, address_line1, city, state)
-        VALUES (
-          ${newUser.user_id}, 'Permanent', ${pending.optional_data.address || null},
-          ${pending.optional_data.city || null}, ${pending.optional_data.state || null}
-        )`;
-    }
+      if (pending.optional_data?.address || pending.optional_data?.city || pending.optional_data?.state) {
+        await tx`
+          INSERT INTO user_addresses (user_id, address_type, address_line1, city, state)
+          VALUES (
+            ${createdUser.user_id}, 'Permanent', ${pending.optional_data.address || null},
+            ${pending.optional_data.city || null}, ${pending.optional_data.state || null}
+          )`;
+      }
 
-    if (pending.sponsor_user_id) {
-      await sql`
-        CREATE TABLE IF NOT EXISTS referral_registrations (
-          id SERIAL PRIMARY KEY,
-          sponsor_user_id INTEGER REFERENCES users(user_id),
-          referred_user_id INTEGER UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
-          sponsor_invite_code VARCHAR(80),
-          registration_source VARCHAR(80) DEFAULT 'ReferralLink',
-          referral_level INTEGER NOT NULL DEFAULT 1,
-          status VARCHAR(30) NOT NULL DEFAULT 'Pending',
-          approved_at TIMESTAMPTZ,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )`;
-      await sql`
-        CREATE TABLE IF NOT EXISTS associate_referral_links (
-          id SERIAL PRIMARY KEY,
-          associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-          invite_code VARCHAR(80) NOT NULL UNIQUE,
-          referral_url TEXT,
-          total_clicks INTEGER NOT NULL DEFAULT 0,
-          total_registrations INTEGER NOT NULL DEFAULT 0,
-          is_active BOOLEAN NOT NULL DEFAULT TRUE,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )`;
-      await sql`
-        INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, registration_source, status)
-        VALUES (${pending.sponsor_user_id}, ${newUser.user_id}, ${pending.sponsor_invite_code}, 'Signup', 'Pending')
-        ON CONFLICT (referred_user_id) DO NOTHING`;
-      await sql`
-        UPDATE associate_referral_links
-        SET total_registrations = total_registrations + 1, updated_at = NOW()
-        WHERE associate_user_id = ${pending.sponsor_user_id}`;
-    }
+      if (pending.sponsor_user_id) {
+        await tx`
+          CREATE TABLE IF NOT EXISTS referral_registrations (
+            id SERIAL PRIMARY KEY,
+            sponsor_user_id INTEGER REFERENCES users(user_id),
+            referred_user_id INTEGER UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
+            sponsor_invite_code VARCHAR(80),
+            registration_source VARCHAR(80) DEFAULT 'ReferralLink',
+            referral_level INTEGER NOT NULL DEFAULT 1,
+            status VARCHAR(30) NOT NULL DEFAULT 'Pending',
+            approved_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )`;
+        await tx`
+          CREATE TABLE IF NOT EXISTS associate_referral_links (
+            id SERIAL PRIMARY KEY,
+            associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            invite_code VARCHAR(80) NOT NULL UNIQUE,
+            referral_url TEXT,
+            total_clicks INTEGER NOT NULL DEFAULT 0,
+            total_registrations INTEGER NOT NULL DEFAULT 0,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )`;
+        await tx`
+          INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, registration_source, status)
+          VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, ${pending.sponsor_invite_code}, 'Signup', 'Pending')
+          ON CONFLICT (referred_user_id) DO NOTHING`;
+        await tx`
+          UPDATE associate_referral_links
+          SET total_registrations = total_registrations + 1, updated_at = NOW()
+          WHERE associate_user_id = ${pending.sponsor_user_id}`;
+      }
 
-    await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
+      await tx`DELETE FROM pending_registrations WHERE email = ${email}`;
 
-    await sql`
-      INSERT INTO audit_log
-        (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-      VALUES
-        ('User', ${newUser.user_id}, ${newUser.full_name},
-         'Auth', 'RegisteredAfterEmailOtp', 'users', ${newUser.user_id})`;
+      await tx`
+        INSERT INTO audit_log
+          (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+        VALUES
+          ('User', ${createdUser.user_id}, ${createdUser.full_name},
+           'Auth', 'RegisteredAfterEmailOtp', 'users', ${createdUser.user_id})`;
+
+      return createdUser;
+    });
 
     const payload = {
       user_id: newUser.user_id,
@@ -473,10 +502,9 @@ router.post('/verify-email-otp', async (req, res) => {
       : 'Email verified. Registration completed and is pending admin approval.');
   } catch (e) {
     logRegistrationError('[verify-email-otp]', e);
+    if (e?.status) return err(res, e.message, e.status);
     if (e?.code === '23505') {
-      if (e?.constraint === 'users_email_key') return err(res, 'Email already registered', 409);
-      if (e?.constraint === 'users_mobile_no_key') return err(res, 'Mobile number already registered', 409);
-      return err(res, 'Registration conflict detected. Please try verification again.', 409);
+      return err(res, registrationConflictMessage(e), 409);
     }
     return err(res, 'Unable to complete registration right now. Please try again.', 500);
   }
