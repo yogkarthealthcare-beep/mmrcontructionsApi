@@ -66,6 +66,15 @@ const registrationConflictMessage = (error) => {
   if (constraint.includes('invitation')) {
     return 'Invitation code conflict detected. Please try verification again.';
   }
+  if (constraint.includes('pan')) {
+    return 'PAN details can be added after login. Please start registration again.';
+  }
+  if (constraint.includes('aadhar') || constraint.includes('aadhaar')) {
+    return 'Aadhaar details can be added after login. Please start registration again.';
+  }
+  if (constraint.includes('passport')) {
+    return 'Passport details can be added after login. Please start registration again.';
+  }
   if (constraint.includes('referral')) {
     return 'Referral registration already exists for this account.';
   }
@@ -147,12 +156,11 @@ async function createUserWithUniqueMemberId(db, pending) {
   const memberId = `${prefix}${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
   const [created] = await db`
     INSERT INTO users (
-      user_type, full_name, mobile_no, email, pan_number, aadhar_number,
+      user_type, full_name, mobile_no, email,
       password_hash, sponsor_user_id, member_id,
       account_status, email_verified, email_verified_at, is_otp_verified
     ) VALUES (
       ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
-      ${pending.optional_data?.pan_number || null}, ${pending.optional_data?.aadhar_number || null},
       ${pending.password_hash}, ${pending.sponsor_user_id}, ${memberId},
       ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE
     )
@@ -236,15 +244,7 @@ async function validateSignupInput(body) {
       password: body.password,
       sponsorUserId,
       sponsorInviteCode: body.sponsor_invite_code || null,
-      optionalData: {
-        address: body.address || null,
-        city: body.city || null,
-        state: body.state || null,
-        country: body.country || null,
-        pan_number: body.pan_number || null,
-        aadhar_number: body.aadhar_number || null,
-        passport_number: body.passport_number || null,
-      },
+      optionalData: {},
     },
   };
 }
