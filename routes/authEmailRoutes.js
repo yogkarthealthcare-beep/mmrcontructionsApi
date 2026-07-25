@@ -165,6 +165,7 @@ async function findSponsorByCode(code) {
       AND (
         UPPER(COALESCE(u.invitation_code, '')) = ${sponsorCode}
         OR UPPER(COALESCE(u.member_id, '')) = ${sponsorCode}
+        OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-[AC]-', 'MMR')) = ${sponsorCode}
         OR UPPER(COALESCE(l.invite_code, '')) = ${sponsorCode}
       )
     LIMIT 1`;
@@ -184,16 +185,18 @@ async function canResend(email) {
 }
 
 async function createUserWithUniqueMemberId(db, pending) {
-  const prefix = pending.user_type === 'Associate' ? 'MMR-A-' : 'MMR-C-';
   await db`SELECT pg_advisory_xact_lock(hashtext('users_member_id_registration'))`;
   const [sequence] = await db`
     SELECT COALESCE(MAX(
-      CASE WHEN member_id ~ ${`^${prefix}[0-9]+$`}
-        THEN SUBSTRING(member_id FROM ${prefix.length + 1})::integer
+      CASE
+        WHEN member_id ~ '^MMR[0-9]+$'
+          THEN SUBSTRING(member_id FROM 4)::integer
+        WHEN member_id ~ '^MMR-[AC]-[0-9]+$'
+          THEN SUBSTRING(member_id FROM 7)::integer
         ELSE 0 END
     ), 0) + 1 AS next_value
     FROM users`;
-  const memberId = `${prefix}${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
+  const memberId = `MMR${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
   const [created] = await db`
     INSERT INTO users (
       user_type, full_name, mobile_no, email,
