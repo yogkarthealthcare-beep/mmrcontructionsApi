@@ -33,7 +33,7 @@ async function testImpersonation() {
     const [customer] = await sql`
       SELECT user_id, full_name, email, user_type, account_status
       FROM users
-      WHERE user_type = 'Customer' AND account_status IN ('Active', 'Approved') LIMIT 1`;
+      WHERE user_type = 'Customer' AND account_status = 'Active' LIMIT 1`;
 
     if (customer) {
       console.log(`\n2. Testing Customer Impersonation for: ${customer.full_name} (ID: ${customer.user_id})`);
@@ -55,7 +55,7 @@ async function testImpersonation() {
     const [associate] = await sql`
       SELECT user_id, full_name, email, user_type, account_status
       FROM users
-      WHERE user_type = 'Associate' AND account_status IN ('Active', 'Approved') LIMIT 1`;
+      WHERE user_type = 'Associate' AND account_status = 'Active' LIMIT 1`;
 
     if (associate) {
       console.log(`\n3. Testing Associate Impersonation for: ${associate.full_name} (ID: ${associate.user_id})`);

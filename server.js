@@ -4318,7 +4318,7 @@ app.post("/api/admin/login-as-user", verifyAdminToken, async (req, res) => {
         return err(res, "User account not found", 404);
       }
 
-      if (user.account_status !== "Active" && user.account_status !== "Approved") {
+      if (user.account_status !== "Active") {
         return err(res, `Account cannot be accessed because status is '${user.account_status}'.`, 403);
       }
 
