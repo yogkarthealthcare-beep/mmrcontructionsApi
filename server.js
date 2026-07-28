@@ -3576,8 +3576,8 @@ app.post("/api/auth/register", upload.fields([
     // ── Validate required fields ──
     if (!user_type || !full_name || !mobile_no || !pan_number || !aadhar_number)
       return err(res, "Required fields missing", 400);
-    if (!["Customer", "Associate"].includes(user_type))
-      return err(res, "user_type must be Customer or Associate", 400);
+    if (!["Customer", "Associate", "Investor"].includes(user_type))
+      return err(res, "user_type must be Customer, Associate, or Investor", 400);
 
     if (!terms_accepted || terms_accepted !== "true")
       return err(res, "Terms & Conditions must be accepted", 400);
@@ -3706,19 +3706,23 @@ app.post("/api/auth/register-quick", async (req, res) => {
 
     if (!user_type || !full_name || !email || !mobile_no || !password)
       return err(res, "user_type, full_name, email, mobile_no, password required", 400);
-    if (!["Customer", "Associate"].includes(user_type))
-      return err(res, "user_type must be Customer or Associate", 400);
+    if (!["Customer", "Associate", "Investor"].includes(user_type))
+      return err(res, "user_type must be Customer, Associate, or Investor", 400);
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanMobile = String(mobile_no).replace(/\D/g, "");
 
     // Duplicate checks
-    const [dupMobile] = await sql`SELECT user_id FROM users WHERE mobile_no = ${mobile_no}`;
-    if (dupMobile) return err(res, "Mobile number already registered", 409);
+    const [dupMobile] = await sql`SELECT user_id FROM users WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}`;
+    const [dupInvestorMobile] = await sql`SELECT id FROM investor_users WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile} AND (deleted_at IS NULL) LIMIT 1`;
+    if (dupMobile || dupInvestorMobile) return err(res, "Mobile number already registered", 409);
 
-    const [dupEmail] = await sql`SELECT user_id FROM users WHERE email = ${email}`;
-    if (dupEmail) return err(res, "Email already registered", 409);
+    const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${cleanEmail}`;
+    const [dupInvestorEmail] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${cleanEmail} AND (deleted_at IS NULL) LIMIT 1`;
+    if (dupEmail || dupInvestorEmail) return err(res, "Email already registered", 409);
 
-    // Find sponsor
     let sponsorUserId = null;
-    if (sponsor_invite_code) {
+    if (sponsor_invite_code && user_type !== "Investor") {
       const [sponsor] = await sql`
         SELECT user_id FROM users WHERE invitation_code = ${sponsor_invite_code}
           AND account_status = 'Active'`;
@@ -3727,31 +3731,45 @@ app.post("/api/auth/register-quick", async (req, res) => {
     }
 
     const passwordHash = await bcrypt.hash(password, 12);
-
-    // Insert user with Pending status
-    const [newUser] = await sql`
-      INSERT INTO users (user_type, full_name, email, mobile_no, password_hash,
-                         sponsor_user_id, account_status, is_otp_verified)
-      VALUES (${user_type}, ${full_name.trim()}, ${email.toLowerCase().trim()},
-              ${mobile_no}, ${passwordHash}, ${sponsorUserId}, 'Pending', FALSE)
-      RETURNING user_id, full_name, email, user_type`;
-
-    // Generate 6-digit email OTP aur email_otp_log mein store karo
     const otp = genOTP();
-    const exp = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+    const exp = new Date(Date.now() + 10 * 60 * 1000);
 
-    // otp_log table use kar raha hai (mobile field mein email store karo)
     await sql`
-      INSERT INTO otp_log (user_type, reference_id, mobile, otp_code, purpose, expires_at)
-      VALUES ('User', ${newUser.user_id}, ${email.toLowerCase().trim()}, ${otp}, 'EmailVerification', ${exp})`;
+      CREATE TABLE IF NOT EXISTS pending_registrations (
+        email TEXT PRIMARY KEY,
+        mobile_no TEXT NOT NULL,
+        user_type TEXT NOT NULL,
+        full_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        sponsor_user_id INTEGER,
+        sponsor_invite_code TEXT,
+        optional_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        otp_code TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
 
-    // TODO: Real email gateway se OTP bhejo (Nodemailer / SendGrid)
+    await sql`DELETE FROM pending_registrations WHERE email = ${cleanEmail} OR mobile_no = ${cleanMobile}`;
     await sql`
-      INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-      VALUES ('User', ${newUser.user_id}, ${full_name}, 'Auth', 'QuickRegistered', 'users', ${newUser.user_id})`;
+      INSERT INTO pending_registrations (
+        email, mobile_no, user_type, full_name, password_hash, sponsor_user_id, sponsor_invite_code, otp_code, expires_at
+      ) VALUES (
+        ${cleanEmail}, ${cleanMobile}, ${user_type}, ${full_name.trim()}, ${passwordHash}, ${sponsorUserId}, ${sponsor_invite_code || null}, ${otp}, ${exp}
+      )`;
 
-    return ok(res, { user_id: newUser.user_id, email: newUser.email },
-      "Registration initiated. OTP sent to your email.", 201);
+    try {
+      await sendEmail({
+        to: cleanEmail,
+        subject: "Verify your MMR Constructions account",
+        html: otpEmailHtml(otp, "Verification")
+      });
+    } catch (mailErr) {
+      console.warn("Mail send error:", mailErr.message);
+    }
+
+    return ok(res, { email: cleanEmail, user_type }, "Registration initiated. OTP sent to your email.", 201);
   } catch (e) {
     return err(res, e.message);
   }
@@ -3762,42 +3780,100 @@ app.post("/api/auth/verify-email-otp", async (req, res) => {
   try {
     const { email, otp } = req.body;
     if (!email || !otp) return err(res, "email and otp required", 400);
+    const cleanEmail = String(email).trim().toLowerCase();
 
-    const [otpRow] = await sql`
-      SELECT * FROM otp_log
-      WHERE mobile = ${email.toLowerCase().trim()} AND otp_code = ${otp}
-        AND purpose = 'EmailVerification' AND is_used = FALSE AND expires_at > NOW()
-      ORDER BY otp_id DESC LIMIT 1`;
+    const [pending] = await sql`SELECT * FROM pending_registrations WHERE email = ${cleanEmail}`;
+    if (!pending) return err(res, "No pending registration found. Please sign up again.", 400);
+    if (new Date() > new Date(pending.expires_at)) {
+      await sql`DELETE FROM pending_registrations WHERE email = ${cleanEmail}`;
+      return err(res, "OTP expired. Please sign up again.", 400);
+    }
+    if (pending.otp_code !== String(otp).trim()) {
+      return err(res, "Invalid OTP. Please check and try again.", 400);
+    }
 
-    if (!otpRow) return err(res, "Invalid or expired OTP", 400);
+    if (pending.user_type === "Investor") {
+      const [createdInvestor] = await sql`
+        INSERT INTO investor_users (
+          full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
+        ) VALUES (
+          ${pending.full_name}, ${pending.mobile_no}, ${pending.email}, ${pending.password_hash},
+          'active', true, NOW(), NOW()
+        )
+        RETURNING id, full_name, email, mobile_number, status, is_verified`;
 
-    const [user] = await sql`
-      SELECT user_id, full_name, mobile_no, user_type, account_status, member_id, invitation_code
-      FROM users WHERE user_id = ${otpRow.reference_id}`;
+      await sql`DELETE FROM pending_registrations WHERE email = ${cleanEmail}`;
 
-    if (!user) return err(res, "User not found", 404);
+      const payload = {
+        id: createdInvestor.id,
+        user_id: createdInvestor.id,
+        user_type: "Investor",
+        role: "Investor",
+        email: createdInvestor.email,
+        full_name: createdInvestor.full_name
+      };
+      const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
+      const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, { expiresIn: "30d" });
 
-    // Mark email verified
-    await sql`UPDATE users SET is_otp_verified = TRUE, updated_at = NOW() WHERE user_id = ${user.user_id}`;
-    await sql`UPDATE otp_log SET is_used = TRUE WHERE otp_id = ${otpRow.otp_id}`;
+      return ok(res, {
+        token,
+        refresh_token: refreshToken,
+        user: {
+          id: createdInvestor.id,
+          user_id: createdInvestor.id,
+          full_name: createdInvestor.full_name,
+          email: createdInvestor.email,
+          mobile_no: createdInvestor.mobile_number,
+          user_type: "Investor"
+        }
+      }, "Investor email verified successfully.");
+    }
 
-    // JWT token generate karo
+    // Customer or Associate
+    const [sequence] = await sql`
+      SELECT COALESCE(MAX(
+        CASE
+          WHEN member_id ~ '^MMR[0-9]+$' THEN SUBSTRING(member_id FROM 4)::integer
+          WHEN member_id ~ '^MMR-[AC]-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
+          ELSE 0 END
+      ), 0) + 1 AS next_value FROM users`;
+    const memberId = `MMR${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
+
+    const [createdUser] = await sql`
+      INSERT INTO users (
+        user_type, full_name, mobile_no, email,
+        password_hash, sponsor_user_id, member_id,
+        account_status, email_verified, email_verified_at, is_otp_verified
+      ) VALUES (
+        ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
+        ${pending.password_hash}, ${pending.sponsor_user_id}, ${memberId},
+        ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE
+      )
+      RETURNING user_id, full_name, email, user_type, member_id, invitation_code`;
+
+    await sql`DELETE FROM pending_registrations WHERE email = ${cleanEmail}`;
+
     const payload = {
-      user_id:   user.user_id,
-      user_type: user.user_type,
-      member_id: user.member_id,
-      mobile_no: user.mobile_no,
+      user_id:   createdUser.user_id,
+      user_type: createdUser.user_type,
+      member_id: createdUser.member_id,
+      mobile_no: pending.mobile_no,
+      email:     createdUser.email,
     };
-    const token        = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
     const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, { expiresIn: "30d" });
 
     return ok(res, {
       token,
       refresh_token: refreshToken,
-      user: { user_id: user.user_id, full_name: user.full_name,
-              user_type: user.user_type, member_id: user.member_id,
-              invitation_code: user.invitation_code },
-    }, "Email verified successfully. Registration pending admin approval.");
+      user: {
+        user_id: createdUser.user_id,
+        full_name: createdUser.full_name,
+        user_type: createdUser.user_type,
+        member_id: createdUser.member_id,
+        email: createdUser.email
+      }
+    }, "Email verified successfully.");
   } catch (e) {
     return err(res, e.message);
   }

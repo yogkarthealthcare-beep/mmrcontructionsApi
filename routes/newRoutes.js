@@ -178,8 +178,8 @@ router.post('/auth/register', async (req, res) => {
 
     if (!full_name || !email || !password)
       return res.status(400).json({ success: false, message: 'Name, email aur password required hain' });
-    if (user_type && !['Customer', 'Associate'].includes(user_type))
-      return res.status(400).json({ success: false, message: 'user_type must be Customer or Associate' });
+    if (user_type && !['Customer', 'Associate', 'Investor'].includes(user_type))
+      return res.status(400).json({ success: false, message: 'user_type must be Customer, Associate, or Investor' });
 
     // Email OTP verified check
     const [otpRecord] = await sql`
