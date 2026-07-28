@@ -4021,8 +4021,10 @@ app.post("/api/auth/login", async (req, res) => {
       email:      user.email,
     };
 
-    const token        = jwt.sign(payload, process.env.JWT_SECRET,         { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
-    const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, { expiresIn: "30d" });
+    const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+    const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
+    const token        = jwt.sign(payload, jwtSecret,         { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
+    const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "30d" });
 
     return ok(res, {
       token, refresh_token: refreshToken,
