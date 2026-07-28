@@ -1,7 +1,17 @@
 import sql from "../db.js";
+
 async function check() {
-  const enums = await sql`SELECT enumlabel FROM pg_enum WHERE enumtypid = (SELECT oid FROM pg_type WHERE typname = 'actor_type_enum')`;
-  console.log("actor_type_enum values:", enums);
-  process.exit(0);
+  try {
+    const res = await sql`
+      INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+      VALUES ('Admin', 1, 'MMR Admin', 'AdminImpersonation', 'LoginAsUser', 'users', 7, ${JSON.stringify({ test: true })})
+      RETURNING audit_id`;
+    console.log("Audit log insert SUCCESS:", res);
+  } catch (e) {
+    console.error("Audit log insert ERROR:", e);
+  } finally {
+    process.exit(0);
+  }
 }
+
 check();

@@ -4347,7 +4347,7 @@ app.post("/api/admin/login-as-user", verifyAdminToken, async (req, res) => {
         mobile_no: user.mobile_no,
         email: user.email,
         full_name: user.full_name,
-        impersonated_by_admin_id: req.admin.admin_id
+        impersonated_by_admin_id: req.admin?.admin_id || req.admin?.id || 1
       };
     } else if (normalizedType === "Investor") {
       const [investor] = await sql`
@@ -4381,7 +4381,7 @@ app.post("/api/admin/login-as-user", verifyAdminToken, async (req, res) => {
         role: "Investor",
         email: investor.email,
         full_name: investor.full_name,
-        impersonated_by_admin_id: req.admin.admin_id
+        impersonated_by_admin_id: req.admin?.admin_id || req.admin?.id || 1
       };
     } else {
       return err(res, "Invalid user_type. Expected 'Customer', 'Associate', or 'Investor'.", 400);
@@ -4393,9 +4393,11 @@ app.post("/api/admin/login-as-user", verifyAdminToken, async (req, res) => {
     const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "7d" });
 
     try {
+      const adminId = req.admin?.admin_id || req.admin?.id || 1;
+      const adminName = req.admin?.full_name || req.admin?.name || 'Admin';
       await sql`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
-        VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name || 'Admin'},
+        VALUES ('Admin', ${adminId}, ${adminName},
                 'AdminImpersonation', 'LoginAsUser',
                 ${normalizedType === 'Investor' ? 'investor_users' : 'users'},
                 ${cleanUserId},
