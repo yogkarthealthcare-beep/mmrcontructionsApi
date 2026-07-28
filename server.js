@@ -390,7 +390,7 @@ const publicErrorMessage = (msg, status = 400) => {
 const err = (res, msg = "Request failed", status = 400) =>
   res.status(status).json({ success: false, message: publicErrorMessage(msg, status) });
 
-const adminJwtSecret = () => process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
+const adminJwtSecret = () => process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
 const parseBool = (value, fallback = false) => {
   if (value === undefined || value === null || value === "") return fallback;
   if (typeof value === "boolean") return value;
