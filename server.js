@@ -3909,11 +3909,12 @@ app.post("/api/auth/resend-email-otp", async (req, res) => {
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { mobile_no, email, identifier, password, otp_code } = req.body;
-    const loginId = String(identifier || email || mobile_no || "").trim();
-    const loginEmail = loginId.includes("@") ? loginId.toLowerCase() : null;
-    const loginMobile = loginEmail ? null : String(mobile_no || loginId).replace(/\D/g, "");
+    const loginId = String(identifier || email || mobile_no || "").trim().toLowerCase();
+    const loginEmail = loginId.includes("@") ? loginId : null;
+    const loginMobile = loginId.replace(/\D/g, "");
+    const cleanMobile = loginMobile.length >= 10 ? loginMobile.slice(-10) : (loginMobile || null);
 
-    if (!loginEmail && !loginMobile) {
+    if (!loginEmail && !cleanMobile) {
       return err(res, "Email or phone number required", 400);
     }
 
@@ -3922,17 +3923,17 @@ app.post("/api/auth/login", async (req, res) => {
           SELECT user_id, full_name, email, mobile_no, user_type, account_status,
                  member_id, invitation_code, password_hash, email_verified, is_otp_verified
           FROM users
-          WHERE email = ${loginEmail}`
+          WHERE LOWER(email) = ${loginEmail}`
       : await sql`
           SELECT user_id, full_name, email, mobile_no, user_type, account_status,
                  member_id, invitation_code, password_hash, email_verified, is_otp_verified
           FROM users
-          WHERE mobile_no = ${loginMobile}`;
+          WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}`;
 
     if (!user) {
       const [investor] = loginEmail
         ? await sql`SELECT id, full_name, email, mobile_number, password_hash, status, is_verified FROM investor_users WHERE LOWER(email) = ${loginEmail} AND deleted_at IS NULL LIMIT 1`
-        : await sql`SELECT id, full_name, email, mobile_number, password_hash, status, is_verified FROM investor_users WHERE mobile_number = ${loginMobile} AND deleted_at IS NULL LIMIT 1`;
+        : await sql`SELECT id, full_name, email, mobile_number, password_hash, status, is_verified FROM investor_users WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile} AND deleted_at IS NULL LIMIT 1`;
 
       if (investor) {
         if (!investor.is_verified || investor.status === "pending_verification") {
@@ -3957,8 +3958,10 @@ app.post("/api/auth/login", async (req, res) => {
           full_name: investor.full_name,
         };
 
-        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
-        const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, { expiresIn: "30d" });
+        const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+        const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
+        const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
+        const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "30d" });
 
         return ok(res, {
           token,

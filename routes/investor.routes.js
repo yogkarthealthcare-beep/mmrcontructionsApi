@@ -465,10 +465,12 @@ router.post("/investor/login", async (req, res) => {
       user_type: "Investor"
     };
 
-    const token = jwt.sign(payload, process.env.JWT_SECRET, {
+    const secret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+    const refreshSecret = process.env.JWT_REFRESH_SECRET || secret;
+    const token = jwt.sign(payload, secret, {
       expiresIn: process.env.JWT_EXPIRES_IN || "7d"
     });
-    const refresh_token = jwt.sign(payload, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, {
+    const refresh_token = jwt.sign(payload, refreshSecret, {
       expiresIn: "30d"
     });
 
