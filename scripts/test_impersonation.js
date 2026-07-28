@@ -1,4 +1,5 @@
 import sql from "../db.js";
+import jwt from "jsonwebtoken";
 
 async function testImpersonation() {
   console.log("==================================================");
@@ -6,34 +7,34 @@ async function testImpersonation() {
   console.log("==================================================");
 
   try {
-    // 1. Login as Admin using live API
-    const loginRes = await fetch("https://mmrcontructions-api-self.vercel.app/api/admin/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: "admin@mmrconstructions.in", password: "AdminPassword123!" })
-    });
-    const loginData = await loginRes.json();
-    console.log("1. Admin Login Response:", loginRes.status, loginData.message);
+    // 1. Get active admin from DB
+    const [admin] = await sql`
+      SELECT a.admin_id, a.full_name, a.email, r.role_name AS role
+      FROM admin_users a
+      JOIN admin_roles r ON a.role_id = r.role_id
+      WHERE a.is_active = true LIMIT 1`;
 
-    let adminToken = loginData.data?.token;
-
-    if (!adminToken) {
-      // Fallback: get admin from DB and sign token using fallback secret
-      const [admin] = await sql`
-        SELECT a.admin_id, a.full_name, a.email, r.role_name AS role
-        FROM admin_users a
-        JOIN admin_roles r ON a.role_id = r.role_id
-        WHERE a.is_active = true LIMIT 1`;
-      console.log(`1b. Admin fallback from DB: ${admin.full_name} (${admin.email})`);
+    if (!admin) {
+      console.error("No active admin found");
+      process.exit(1);
     }
+    console.log(`1. Found Active Admin: ${admin.full_name} (${admin.email}, Role: ${admin.role})`);
 
-    // 2. Get an active customer user from DB
+    const secret = process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+    const adminToken = jwt.sign({
+      admin_id: admin.admin_id,
+      email: admin.email,
+      full_name: admin.full_name,
+      role: admin.role
+    }, secret, { expiresIn: "1h" });
+
+    // 2. Get active customer
     const [customer] = await sql`
       SELECT user_id, full_name, email, user_type, account_status
       FROM users
       WHERE user_type = 'Customer' AND account_status = 'Active' LIMIT 1`;
 
-    if (customer && adminToken) {
+    if (customer) {
       console.log(`\n2. Testing Customer Impersonation for: ${customer.full_name} (ID: ${customer.user_id})`);
       const res = await fetch("https://mmrcontructions-api-self.vercel.app/api/admin/login-as-user", {
         method: "POST",
@@ -47,13 +48,13 @@ async function testImpersonation() {
       console.log("   Customer Result:", res.status, data);
     }
 
-    // 3. Get an active associate user from DB
+    // 3. Get active associate
     const [associate] = await sql`
       SELECT user_id, full_name, email, user_type, account_status
       FROM users
       WHERE user_type = 'Associate' AND account_status = 'Active' LIMIT 1`;
 
-    if (associate && adminToken) {
+    if (associate) {
       console.log(`\n3. Testing Associate Impersonation for: ${associate.full_name} (ID: ${associate.user_id})`);
       const res = await fetch("https://mmrcontructions-api-self.vercel.app/api/admin/login-as-user", {
         method: "POST",
@@ -67,13 +68,13 @@ async function testImpersonation() {
       console.log("   Associate Result:", res.status, data);
     }
 
-    // 4. Get an active investor user from DB
+    // 4. Get active investor
     const [investor] = await sql`
       SELECT id, full_name, email, status, is_verified
       FROM investor_users
       WHERE status = 'active' AND is_verified = true AND deleted_at IS NULL LIMIT 1`;
 
-    if (investor && adminToken) {
+    if (investor) {
       console.log(`\n4. Testing Investor Impersonation for: ${investor.full_name} (ID: ${investor.id})`);
       const res = await fetch("https://mmrcontructions-api-self.vercel.app/api/admin/login-as-user", {
         method: "POST",
