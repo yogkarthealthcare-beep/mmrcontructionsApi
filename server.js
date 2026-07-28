@@ -4411,7 +4411,7 @@ app.post("/api/admin/login-as-user", verifyAdminToken, async (req, res) => {
       redirect_url: redirectUrl
     }, `Successfully generated login session for ${targetUser.full_name}`);
   } catch (e) {
-    return err(res, e.message);
+    return res.status(400).json({ success: false, message: e.message || "Failed to impersonate user" });
   }
 });
 
