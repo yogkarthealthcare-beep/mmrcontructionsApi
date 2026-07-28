@@ -9674,7 +9674,7 @@ app.use((error, req, res, next) => {
     message: error?.message,
     stack: isProduction ? undefined : error?.stack,
   });
-  res.status(500).json({ success: false, message: "Unable to process request right now." });
+  res.status(500).json({ success: false, message: error?.message || "Unable to process request right now." });
 });
 
 const PORT = Number(process.env.PORT) || 5000;
