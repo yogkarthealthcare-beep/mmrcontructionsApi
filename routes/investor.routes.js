@@ -20,7 +20,7 @@ const upload = multer({
 const ok = (res, data, msg = "Success", status = 200) =>
   res.status(status).json({ success: true, message: msg, data });
 
-const err = (res, msg = "Server error", status = 500) =>
+const err = (res, msg = "Request failed", status = 400) =>
   res.status(status).json({ success: false, message: msg });
 
 const strongPassword = (value = "") =>

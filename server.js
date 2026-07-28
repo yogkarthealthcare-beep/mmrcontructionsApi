@@ -379,15 +379,15 @@ const ok  = (res, data, msg = "Success", status = 200) =>
 
 const INTERNAL_ERROR_PATTERN =
   /(postgres|database|sql|relation|column|constraint|cloudinary|syntax|enoent|econn|enotfound|connection string|api[_ -]?key)/i;
-const publicErrorMessage = (msg, status = 500) => {
-  const text = String(msg || "Server error").trim();
+const publicErrorMessage = (msg, status = 400) => {
+  const text = String(msg || "Request failed").trim();
   if (!text) return status >= 500 ? "Unable to process request right now." : "Invalid request.";
-  if (status >= 500 || INTERNAL_ERROR_PATTERN.test(text)) {
+  if (status >= 500 && INTERNAL_ERROR_PATTERN.test(text)) {
     return "Unable to process request right now.";
   }
   return text.slice(0, 240);
 };
-const err = (res, msg = "Server error", status = 500) =>
+const err = (res, msg = "Request failed", status = 400) =>
   res.status(status).json({ success: false, message: publicErrorMessage(msg, status) });
 
 const adminJwtSecret = () => process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
