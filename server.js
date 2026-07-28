@@ -378,7 +378,7 @@ const ok  = (res, data, msg = "Success", status = 200) =>
   res.status(status).json({ success: true,  message: msg, data });
 
 const INTERNAL_ERROR_PATTERN =
-  /(postgres|database|sql|relation|column|constraint|jwt|secret|token|cloudinary|signature|stack|syntax|enoent|econn|enotfound|invalid input syntax|connection string|password|api[_ -]?key)/i;
+  /(postgres|database|sql|relation|column|constraint|cloudinary|syntax|enoent|econn|enotfound|connection string|api[_ -]?key)/i;
 const publicErrorMessage = (msg, status = 500) => {
   const text = String(msg || "Server error").trim();
   if (!text) return status >= 500 ? "Unable to process request right now." : "Invalid request.";
