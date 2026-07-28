@@ -4251,16 +4251,19 @@ app.post("/api/admin/auth/login", async (req, res) => {
                       full_name: admin.full_name, role: admin.role };
 
     const token        = jwt.sign(payload, adminJwtSecret(),               { expiresIn: "8h" });
-    const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, { expiresIn: "1d" });
+    const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET || adminJwtSecret(), { expiresIn: "1d" });
 
     // Log session
-    await sql`
-      INSERT INTO admin_sessions (admin_id, session_token, ip_address)
-      VALUES (${admin.admin_id}, ${token}, ${req.ip})`;
-
-    await sql`
-      INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, ip_address)
-      VALUES ('Admin', ${admin.admin_id}, ${admin.full_name}, 'Auth', 'AdminLogin', ${req.ip})`;
+    try {
+      await sql`
+        INSERT INTO admin_sessions (admin_id, session_token)
+        VALUES (${admin.admin_id}, ${token})`;
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action)
+        VALUES ('Admin', ${admin.admin_id}, ${admin.full_name}, 'Auth', 'AdminLogin')`;
+    } catch (logErr) {
+      console.warn("[Admin Login Log Warning]:", logErr.message);
+    }
 
     return ok(res, { token, refresh_token: refreshToken,
       admin: { admin_id: admin.admin_id, full_name: admin.full_name,
