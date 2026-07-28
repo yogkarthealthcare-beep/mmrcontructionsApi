@@ -3841,7 +3841,7 @@ app.post("/api/auth/login", async (req, res) => {
       return err(res, "Email or phone number required", 400);
     }
 
-    const [user] = loginEmail
+    let [user] = loginEmail
       ? await sql`
           SELECT user_id, full_name, email, mobile_no, user_type, account_status,
                  member_id, invitation_code, password_hash, email_verified, is_otp_verified
@@ -3853,7 +3853,55 @@ app.post("/api/auth/login", async (req, res) => {
           FROM users
           WHERE mobile_no = ${loginMobile}`;
 
-    if (!user) return err(res, "User not found", 404);
+    if (!user) {
+      const [investor] = loginEmail
+        ? await sql`SELECT id, full_name, email, mobile_number, password_hash, status, is_verified FROM investor_users WHERE LOWER(email) = ${loginEmail} AND deleted_at IS NULL LIMIT 1`
+        : await sql`SELECT id, full_name, email, mobile_number, password_hash, status, is_verified FROM investor_users WHERE mobile_number = ${loginMobile} AND deleted_at IS NULL LIMIT 1`;
+
+      if (investor) {
+        if (!investor.is_verified || investor.status === "pending_verification") {
+          return err(res, "Please verify your email address before login.", 403);
+        }
+        if (investor.status === "inactive" || investor.status === "rejected") {
+          return err(res, `Account is currently ${investor.status}. Contact support.`, 403);
+        }
+        if (password) {
+          const valid = await bcrypt.compare(password, investor.password_hash);
+          if (!valid) return err(res, "Invalid credentials", 401);
+        } else {
+          return err(res, "Password required for investor login.", 400);
+        }
+
+        const payload = {
+          id: investor.id,
+          user_id: investor.id,
+          user_type: "Investor",
+          role: "Investor",
+          email: investor.email,
+          full_name: investor.full_name,
+        };
+
+        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
+        const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, { expiresIn: "30d" });
+
+        return ok(res, {
+          token,
+          refresh_token: refreshToken,
+          user: {
+            id: investor.id,
+            user_id: investor.id,
+            full_name: investor.full_name,
+            user_type: "Investor",
+            email: investor.email,
+            mobile_no: investor.mobile_number,
+            account_status: investor.status,
+            email_verified: Boolean(investor.is_verified)
+          }
+        }, "Investor login successful");
+      }
+
+      return err(res, "User not found", 404);
+    }
 
     if (!(user.email_verified || user.is_otp_verified)) {
       return err(res, "Please verify your email address before login.", 403);

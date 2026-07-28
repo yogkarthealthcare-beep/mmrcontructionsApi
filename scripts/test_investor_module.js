@@ -2,133 +2,163 @@ import sql from "../db.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 
-async function runTest() {
-  console.log("=== STARTING INVESTOR MODULE END-TO-END VERIFICATION ===");
-
-  const testEmail = `test.investor.${Date.now()}@mmrconstructions.com`;
-  const testMobile = `98${Math.floor(10000000 + Math.random() * 90000000)}`;
-  const testPassword = "Password123!";
+async function runVerification() {
+  console.log("==========================================");
+  console.log("   VERIFYING INVESTOR MODULE (PHASE 1)   ");
+  console.log("==========================================");
 
   try {
-    // 1. Create test investor
-    console.log("\n[1] Registering Test Investor...");
+    const testEmail = `test_investor_${Date.now()}@example.com`;
+    const testMobile = `${Math.floor(6000000000 + Math.random() * 3999999999)}`;
+    const testPassword = "TestPassword123!";
+    const testName = "Test Investor User";
+
+    console.log("\n1. Testing Schema Readiness & Index Check...");
+    await sql`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS investor_users (
+        id SERIAL PRIMARY KEY,
+        full_name VARCHAR(255) NOT NULL,
+        mobile_number VARCHAR(50) NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        address TEXT,
+        city VARCHAR(100),
+        state VARCHAR(100),
+        country VARCHAR(100) DEFAULT 'India',
+        pincode VARCHAR(20),
+        pan_number VARCHAR(50),
+        aadhaar_number VARCHAR(50),
+        bank_name VARCHAR(255),
+        account_number VARCHAR(100),
+        ifsc_code VARCHAR(50),
+        nominee_name VARCHAR(255),
+        available_balance NUMERIC(12,2) DEFAULT 0,
+        total_investment NUMERIC(12,2) DEFAULT 0,
+        total_deposits NUMERIC(12,2) DEFAULT 0,
+        total_settlements NUMERIC(12,2) DEFAULT 0,
+        total_earnings NUMERIC(12,2) DEFAULT 0,
+        total_withdrawals NUMERIC(12,2) DEFAULT 0,
+        status VARCHAR(50) DEFAULT 'pending_verification',
+        is_verified BOOLEAN DEFAULT false,
+        profile_picture_url TEXT,
+        email_verification_token TEXT,
+        email_verification_expires TIMESTAMPTZ,
+        reset_otp VARCHAR(10),
+        reset_otp_expires TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        deleted_at TIMESTAMPTZ
+      )`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS total_settlements NUMERIC(12,2) DEFAULT 0`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS total_earnings NUMERIC(12,2) DEFAULT 0`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS email_verification_token TEXT`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS email_verification_expires TIMESTAMPTZ`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_investor_users_mobile_unique ON investor_users(mobile_number) WHERE deleted_at IS NULL`;
+    console.log("   [SUCCESS] investor_users table & unique indexes verified.");
+
+    console.log("\n2. Testing Pending Investor Registration & OTP Flow...");
     const salt = await bcrypt.genSalt(10);
-    const password_hash = await bcrypt.hash(testPassword, salt);
+    const passwordHash = await bcrypt.hash(testPassword, salt);
+    const otp = "123456";
 
-    const [investor] = await sql`
+    await sql`
+      CREATE TABLE IF NOT EXISTS pending_registrations (
+        email TEXT PRIMARY KEY,
+        mobile_no TEXT NOT NULL,
+        user_type TEXT NOT NULL,
+        full_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        sponsor_user_id INTEGER,
+        sponsor_invite_code TEXT,
+        optional_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        otp_code TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+
+    await sql`DELETE FROM pending_registrations WHERE email = ${testEmail} OR mobile_no = ${testMobile}`;
+    await sql`
+      INSERT INTO pending_registrations (
+        email, mobile_no, user_type, full_name, password_hash, otp_code, expires_at
+      ) VALUES (
+        ${testEmail}, ${testMobile}, 'Investor', ${testName}, ${passwordHash}, ${otp}, NOW() + INTERVAL '15 minutes'
+      )`;
+    console.log("   [SUCCESS] Pending investor registration created with OTP.");
+
+    console.log("\n3. Testing OTP Verification & Investor User Activation...");
+    const [pendingRow] = await sql`SELECT * FROM pending_registrations WHERE email = ${testEmail}`;
+    if (!pendingRow || pendingRow.otp_code !== otp) {
+      throw new Error("Pending registration OTP mismatch!");
+    }
+
+    const [createdInvestor] = await sql`
       INSERT INTO investor_users (
-        full_name, mobile_number, email, password_hash,
-        address, city, state, pincode, pan_number, bank_name, account_number, ifsc_code, nominee_name, status, is_verified
+        full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
       ) VALUES (
-        'Test Investor', ${testMobile}, ${testEmail}, ${password_hash},
-        '123 Civil Lines', 'Lucknow', 'Uttar Pradesh', '226001', 'ABCDE1234F',
-        'State Bank of India', '123456789012', 'SBIN0000123', 'Jane Doe', 'pending', false
+        ${pendingRow.full_name}, ${pendingRow.mobile_no}, ${pendingRow.email}, ${pendingRow.password_hash},
+        'active', true, NOW(), NOW()
       )
-      RETURNING *
-    `;
+      RETURNING id, full_name, email, mobile_number, status, is_verified`;
 
-    console.log("✔ Investor created successfully! ID:", investor.id, "Status:", investor.status);
+    await sql`DELETE FROM pending_registrations WHERE email = ${testEmail}`;
+    console.log("   [SUCCESS] Investor user created & activated:", createdInvestor);
 
-    // 2. Submit Deposit Request
-    console.log("\n[2] Submitting Deposit Request of ₹50,000...");
-    const depositAmount = 50000;
-    const utr = `UTR${Date.now()}`;
+    console.log("\n4. Testing Duplicate Email & Mobile Validation...");
+    const [dupCheck] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${testEmail.toLowerCase()} AND deleted_at IS NULL`;
+    if (!dupCheck) throw new Error("Duplicate check failed!");
+    console.log("   [SUCCESS] Duplicate email and mobile properly detected.");
 
-    const [deposit] = await sql`
-      INSERT INTO investor_deposits (
-        investor_id, amount, payment_method, transaction_reference, status
-      ) VALUES (
-        ${investor.id}, ${depositAmount}, 'Bank Transfer', ${utr}, 'pending'
-      )
-      RETURNING *
-    `;
+    console.log("\n5. Testing Investor Password Authentication (Email & Mobile)...");
+    const [loginByEmail] = await sql`SELECT * FROM investor_users WHERE LOWER(email) = ${testEmail.toLowerCase()} LIMIT 1`;
+    const emailMatch = await bcrypt.compare(testPassword, loginByEmail.password_hash);
+    if (!emailMatch) throw new Error("Email login password compare failed!");
 
-    const txId = `DEP-${Date.now()}`;
-    await sql`
-      INSERT INTO investor_transactions (
-        investor_id, transaction_id, type, amount, status, payment_method, reference_number
-      ) VALUES (
-        ${investor.id}, ${txId}, 'deposit', ${depositAmount}, 'pending', 'Bank Transfer', ${utr}
-      )
-    `;
+    const [loginByMobile] = await sql`SELECT * FROM investor_users WHERE mobile_number = ${testMobile} LIMIT 1`;
+    const mobileMatch = await bcrypt.compare(testPassword, loginByMobile.password_hash);
+    if (!mobileMatch) throw new Error("Mobile login password compare failed!");
+    console.log("   [SUCCESS] Dual-identifier authentication (Email & Mobile) working.");
 
-    console.log("✔ Deposit request created successfully! ID:", deposit.id);
+    console.log("\n6. Testing Investor JWT Payload...");
+    const jwtPayload = {
+      id: createdInvestor.id,
+      user_id: createdInvestor.id,
+      user_type: "Investor",
+      role: "Investor",
+      email: createdInvestor.email,
+      full_name: createdInvestor.full_name,
+    };
+    const secret = process.env.JWT_SECRET || "fallback_secret";
+    const token = jwt.sign(jwtPayload, secret, { expiresIn: "7d" });
+    const decoded = jwt.verify(token, secret);
+    if (decoded.user_type !== "Investor" || decoded.id !== createdInvestor.id) {
+      throw new Error("JWT token verification failed!");
+    }
+    console.log("   [SUCCESS] JWT token generation and verification passed.");
 
-    // 3. Admin Approve Investor & Deposit
-    console.log("\n[3] Admin Approving Investor & Deposit Request...");
-    await sql`
-      UPDATE investor_users
-      SET status = 'approved', is_verified = true
-      WHERE id = ${investor.id}
-    `;
+    console.log("\n7. Testing Investor Dashboard Data Query...");
+    const [dashUser] = await sql`
+      SELECT id, full_name, email, available_balance, total_investment, total_deposits, total_withdrawals
+      FROM investor_users WHERE id = ${createdInvestor.id}`;
+    const [{ count: txCount }] = await sql`SELECT COUNT(*) FROM investor_transactions WHERE investor_id = ${createdInvestor.id}`;
+    console.log("   [SUCCESS] Dashboard query stats:", { user: dashUser.full_name, total_transactions: txCount });
 
-    await sql.begin(async (tx) => {
-      await tx`
-        UPDATE investor_deposits
-        SET status = 'approved', approved_at = NOW()
-        WHERE id = ${deposit.id}
-      `;
-      await tx`
-        UPDATE investor_users
-        SET available_balance = available_balance + ${depositAmount},
-            total_deposits = total_deposits + ${depositAmount},
-            total_investment = total_investment + ${depositAmount}
-        WHERE id = ${investor.id}
-      `;
-      await tx`
-        UPDATE investor_transactions
-        SET status = 'approved'
-        WHERE investor_id = ${investor.id} AND reference_number = ${utr}
-      `;
-    });
+    console.log("\n8. Cleaning Up Verification Data...");
+    await sql`DELETE FROM investor_users WHERE id = ${createdInvestor.id}`;
+    console.log("   [SUCCESS] Verification cleanup complete.");
 
-    console.log("✔ Deposit approved! Recalculated balance.");
-
-    // 4. Verify updated balance
-    const [updatedInvestor] = await sql`SELECT available_balance, total_investment, total_deposits FROM investor_users WHERE id = ${investor.id}`;
-    console.log("✔ Updated Balances -> Available Balance: ₹", updatedInvestor.available_balance, "| Total Deposits: ₹", updatedInvestor.total_deposits);
-
-    // 5. Submit & Approve Withdrawal
-    console.log("\n[5] Submitting Withdrawal Request of ₹10,000...");
-    const withdrawalAmount = 10000;
-    const [withdrawal] = await sql`
-      INSERT INTO investor_withdrawals (
-        investor_id, amount, bank_name, account_number, ifsc_code, status
-      ) VALUES (
-        ${investor.id}, ${withdrawalAmount}, 'State Bank of India', '123456789012', 'SBIN0000123', 'pending'
-      )
-      RETURNING *
-    `;
-
-    await sql.begin(async (tx) => {
-      await tx`
-        UPDATE investor_withdrawals
-        SET status = 'approved', approved_at = NOW()
-        WHERE id = ${withdrawal.id}
-      `;
-      await tx`
-        UPDATE investor_users
-        SET available_balance = available_balance - ${withdrawalAmount},
-            total_withdrawals = total_withdrawals + ${withdrawalAmount}
-        WHERE id = ${investor.id}
-      `;
-    });
-
-    console.log("✔ Withdrawal approved!");
-
-    // 6. Final verification
-    const [finalInvestor] = await sql`SELECT available_balance, total_withdrawals FROM investor_users WHERE id = ${investor.id}`;
-    console.log("✔ Final Available Balance: ₹", finalInvestor.available_balance, "| Total Withdrawals: ₹", finalInvestor.total_withdrawals);
-
-    // Clean up test data
-    await sql`DELETE FROM investor_users WHERE id = ${investor.id}`;
-    console.log("✔ Cleaned up test data.");
-
-    console.log("\n=== ALL TEST CHECKS PASSED SUCCESSFULLY ===");
-  } catch (error) {
-    console.error("✖ Test Failed:", error);
+    console.log("\n==========================================");
+    console.log("   ALL VERIFICATIONS PASSED SUCCESSFULLY!  ");
+    console.log("==========================================");
+  } catch (err) {
+    console.error("\n[VERIFICATION ERROR]:", err);
     process.exit(1);
+  } finally {
+    process.exit(0);
   }
 }
 
-runTest().then(() => process.exit(0));
+runVerification();

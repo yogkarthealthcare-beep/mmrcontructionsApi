@@ -2,10 +2,19 @@ import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import multer from "multer";
 import sql from "../db.js";
 import { sendEmail } from "../emailService.js";
 
 const router = express.Router();
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const okMime = ["application/pdf", "image/jpeg", "image/png"].includes(file.mimetype);
+    okMime ? cb(null, true) : cb(new Error("Only PDF, JPG, and PNG files are supported."));
+  },
+});
 
 // ── Helpers ───────────────────────────────────────────────────
 const ok = (res, data, msg = "Success", status = 200) =>
@@ -13,6 +22,196 @@ const ok = (res, data, msg = "Success", status = 200) =>
 
 const err = (res, msg = "Server error", status = 500) =>
   res.status(status).json({ success: false, message: msg });
+
+const strongPassword = (value = "") =>
+  /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/.test(value);
+
+const publicBaseUrl = () => (process.env.FRONTEND_URL || "https://mmrconstructions.in").replace(/\/$/, "");
+
+const notifyInvestor = async (investorId, title, message, type = "info", tx = sql) => {
+  await tx`
+    INSERT INTO investor_notifications (investor_id, title, message, notification_type)
+    VALUES (${investorId}, ${title}, ${message}, ${type})
+  `;
+};
+
+let investorSchemaReady;
+async function ensureInvestorSchema() {
+  if (investorSchemaReady) return investorSchemaReady;
+  investorSchemaReady = (async () => {
+    await sql`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS investor_users (
+        id SERIAL PRIMARY KEY,
+        full_name VARCHAR(255) NOT NULL,
+        mobile_number VARCHAR(50) NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        address TEXT,
+        city VARCHAR(100),
+        state VARCHAR(100),
+        country VARCHAR(100) DEFAULT 'India',
+        pincode VARCHAR(20),
+        pan_number VARCHAR(50),
+        aadhaar_number VARCHAR(50),
+        bank_name VARCHAR(255),
+        account_number VARCHAR(100),
+        ifsc_code VARCHAR(50),
+        nominee_name VARCHAR(255),
+        available_balance NUMERIC(12,2) DEFAULT 0,
+        total_investment NUMERIC(12,2) DEFAULT 0,
+        total_deposits NUMERIC(12,2) DEFAULT 0,
+        total_settlements NUMERIC(12,2) DEFAULT 0,
+        total_earnings NUMERIC(12,2) DEFAULT 0,
+        total_withdrawals NUMERIC(12,2) DEFAULT 0,
+        status VARCHAR(50) DEFAULT 'pending_verification',
+        is_verified BOOLEAN DEFAULT false,
+        profile_picture_url TEXT,
+        email_verification_token TEXT,
+        email_verification_expires TIMESTAMPTZ,
+        reset_otp VARCHAR(10),
+        reset_otp_expires TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        deleted_at TIMESTAMPTZ
+      )`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS total_settlements NUMERIC(12,2) DEFAULT 0`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS total_earnings NUMERIC(12,2) DEFAULT 0`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS email_verification_token TEXT`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS email_verification_expires TIMESTAMPTZ`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_investor_users_mobile_unique ON investor_users(mobile_number) WHERE deleted_at IS NULL`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_investor_users_status ON investor_users(status)`;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS investor_deposits (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        investor_id INTEGER NOT NULL REFERENCES investor_users(id) ON DELETE CASCADE,
+        amount NUMERIC(12,2) NOT NULL,
+        payment_method VARCHAR(100) NOT NULL,
+        gateway VARCHAR(50),
+        transaction_reference VARCHAR(255),
+        payment_screenshot_url TEXT,
+        payment_screenshot_data BYTEA,
+        payment_screenshot_mime_type VARCHAR(120),
+        status VARCHAR(50) DEFAULT 'pending',
+        admin_remarks TEXT,
+        approved_by INTEGER,
+        approved_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        deleted_at TIMESTAMPTZ
+      )`;
+    await sql`ALTER TABLE investor_deposits ADD COLUMN IF NOT EXISTS gateway VARCHAR(50)`;
+    await sql`ALTER TABLE investor_deposits ADD COLUMN IF NOT EXISTS payment_screenshot_data BYTEA`;
+    await sql`ALTER TABLE investor_deposits ADD COLUMN IF NOT EXISTS payment_screenshot_mime_type VARCHAR(120)`;
+    await sql`ALTER TABLE investor_deposits ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE investor_deposits ALTER COLUMN transaction_reference DROP NOT NULL`;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS investor_withdrawals (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        investor_id INTEGER NOT NULL REFERENCES investor_users(id) ON DELETE CASCADE,
+        amount NUMERIC(12,2) NOT NULL,
+        bank_name VARCHAR(255) NOT NULL,
+        account_number VARCHAR(100) NOT NULL,
+        ifsc_code VARCHAR(50) NOT NULL,
+        remarks TEXT,
+        status VARCHAR(50) DEFAULT 'pending',
+        admin_remarks TEXT,
+        approved_by INTEGER,
+        approved_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS investor_transactions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        investor_id INTEGER NOT NULL REFERENCES investor_users(id) ON DELETE CASCADE,
+        transaction_id VARCHAR(100) UNIQUE NOT NULL,
+        type VARCHAR(50) NOT NULL,
+        amount NUMERIC(12,2) NOT NULL,
+        status VARCHAR(50) NOT NULL,
+        payment_method VARCHAR(100),
+        gateway VARCHAR(50),
+        reference_number VARCHAR(255),
+        remarks TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )`;
+    await sql`ALTER TABLE investor_transactions ADD COLUMN IF NOT EXISTS gateway VARCHAR(50)`;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS investor_documents (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        investor_id INTEGER NOT NULL REFERENCES investor_users(id) ON DELETE CASCADE,
+        document_type VARCHAR(80) NOT NULL,
+        original_file_name VARCHAR(255) NOT NULL,
+        mime_type VARCHAR(120) NOT NULL,
+        file_size_bytes BIGINT NOT NULL,
+        file_data BYTEA NOT NULL,
+        status VARCHAR(50) DEFAULT 'pending',
+        admin_remarks TEXT,
+        reviewed_by INTEGER,
+        reviewed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        deleted_at TIMESTAMPTZ
+      )`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS investor_settlement_preferences (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        investor_id INTEGER NOT NULL UNIQUE REFERENCES investor_users(id) ON DELETE CASCADE,
+        frequency VARCHAR(30) NOT NULL CHECK (frequency IN ('monthly','half_yearly','yearly')),
+        locked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS settlement_change_requests (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        investor_id INTEGER NOT NULL REFERENCES investor_users(id) ON DELETE CASCADE,
+        current_frequency VARCHAR(30),
+        requested_frequency VARCHAR(30) NOT NULL CHECK (requested_frequency IN ('monthly','half_yearly','yearly')),
+        reason TEXT,
+        status VARCHAR(50) DEFAULT 'pending',
+        admin_remarks TEXT,
+        reviewed_by INTEGER,
+        reviewed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS investor_notifications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        investor_id INTEGER NOT NULL REFERENCES investor_users(id) ON DELETE CASCADE,
+        title VARCHAR(180) NOT NULL,
+        message TEXT NOT NULL,
+        notification_type VARCHAR(50) DEFAULT 'info',
+        is_read BOOLEAN DEFAULT false,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_investor_documents_investor ON investor_documents(investor_id, status)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_investor_deposits_status ON investor_deposits(status, created_at)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_investor_transactions_investor ON investor_transactions(investor_id, created_at)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_settlement_requests_status ON settlement_change_requests(status, created_at)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_investor_notifications_investor ON investor_notifications(investor_id, created_at)`;
+  })().catch((error) => {
+    investorSchemaReady = null;
+    throw error;
+  });
+  return investorSchemaReady;
+}
+
+router.use(async (_req, res, next) => {
+  try {
+    await ensureInvestorSchema();
+    next();
+  } catch (error) {
+    console.error("[Investor Schema Error]", error);
+    return err(res, "Investor module is not available right now.");
+  }
+});
 
 const isAdminPrincipal = (principal = {}) => {
   const adminRoles = new Set(["SuperAdmin", "FinanceManager", "SiteManager", "SupportStaff", "Admin", "admin", "super_admin"]);
@@ -68,12 +267,13 @@ function authAdmin(req, res, next) {
 //  INVESTOR AUTHENTICATION APIs
 // ──────────────────────────────────────────────────────────────
 
-// POST /api/investor/signup
-router.post("/investor/signup", async (req, res) => {
+// POST /api/investor/register (or /signup)
+async function handleInvestorRegistration(req, res) {
   try {
     const {
       full_name,
       mobile_number,
+      mobile_no,
       email,
       password,
       address,
@@ -89,16 +289,19 @@ router.post("/investor/signup", async (req, res) => {
       nominee_name
     } = req.body;
 
-    if (!full_name || !mobile_number || !email || !password) {
+    const rawMobile = mobile_number || mobile_no;
+
+    if (!full_name || !rawMobile || !email || !password) {
       return err(res, "Full Name, Mobile Number, Email, and Password are required.", 400);
     }
+    if (!/^\S+@\S+\.\S+$/.test(String(email))) return err(res, "Please enter a valid email address.", 400);
+    if (!/^\d{10}$/.test(String(rawMobile).replace(/\D/g, ""))) return err(res, "Please enter a valid 10 digit mobile number.", 400);
 
     const cleanEmail = String(email).trim().toLowerCase();
-    const cleanMobile = String(mobile_number).trim();
+    const cleanMobile = String(rawMobile).replace(/\D/g, "");
 
-    // Check existing email
     const [existing] = await sql`
-      SELECT id FROM investor_users WHERE email = ${cleanEmail} OR mobile_number = ${cleanMobile} LIMIT 1
+      SELECT id FROM investor_users WHERE deleted_at IS NULL AND (LOWER(email) = ${cleanEmail} OR mobile_number = ${cleanMobile}) LIMIT 1
     `;
     if (existing) {
       return err(res, "An investor account with this Email or Mobile Number already exists.", 409);
@@ -106,27 +309,118 @@ router.post("/investor/signup", async (req, res) => {
 
     const salt = await bcrypt.genSalt(10);
     const password_hash = await bcrypt.hash(password, salt);
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const expires = new Date(Date.now() + 15 * 60 * 1000);
+
+    // Save pending registration
+    await sql`
+      CREATE TABLE IF NOT EXISTS pending_registrations (
+        email TEXT PRIMARY KEY,
+        mobile_no TEXT NOT NULL,
+        user_type TEXT NOT NULL,
+        full_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        sponsor_user_id INTEGER,
+        sponsor_invite_code TEXT,
+        optional_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        otp_code TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+
+    await sql`
+      DELETE FROM pending_registrations WHERE email = ${cleanEmail} OR mobile_no = ${cleanMobile}`;
+
+    await sql`
+      INSERT INTO pending_registrations (
+        email, mobile_no, user_type, full_name, password_hash, otp_code, expires_at
+      ) VALUES (
+        ${cleanEmail}, ${cleanMobile}, 'Investor', ${full_name.trim()}, ${password_hash}, ${otp}, ${expires}
+      )`;
+
+    try {
+      await sendEmail({
+        to: cleanEmail,
+        subject: "Verify your MMR Constructions Investor account",
+        html: `<p>Hello ${full_name.trim()},</p><p>Your OTP for Investor account registration is: <strong>${otp}</strong></p><p>This OTP expires in 15 minutes.</p>`
+      });
+    } catch (mailErr) {
+      console.warn("[Investor Verification Mail Error]", mailErr.message);
+    }
+
+    return ok(res, { email: cleanEmail, mobile_number: cleanMobile }, "OTP sent to your email. Please verify OTP to activate your account.", 201);
+  } catch (e) {
+    console.error("Investor Signup Error:", e);
+    return err(res, e.message || "Failed to process signup.");
+  }
+}
+
+router.post("/investor/register", handleInvestorRegistration);
+router.post("/investor/signup", handleInvestorRegistration);
+
+// POST /api/investor/send-otp
+router.post("/investor/send-otp", async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || !/^\S+@\S+\.\S+$/.test(String(email))) {
+      return err(res, "Valid email address is required.", 400);
+    }
+    const cleanEmail = String(email).trim().toLowerCase();
+    const [pending] = await sql`SELECT email, full_name FROM pending_registrations WHERE email = ${cleanEmail}`;
+    if (!pending) {
+      return err(res, "No pending registration found for this email.", 404);
+    }
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const expires = new Date(Date.now() + 15 * 60 * 1000);
+    await sql`
+      UPDATE pending_registrations
+      SET otp_code = ${otp}, attempts = 0, expires_at = ${expires}, updated_at = NOW()
+      WHERE email = ${cleanEmail}`;
+
+    await sendEmail({
+      to: cleanEmail,
+      subject: "MMR Constructions — Investor OTP Code",
+      html: `<p>Hello ${pending.full_name},</p><p>Your OTP code is: <strong>${otp}</strong></p>`
+    });
+    return ok(res, { email: cleanEmail }, "OTP code sent to email.");
+  } catch (e) {
+    return err(res, "Failed to send OTP.");
+  }
+});
+
+// POST /api/investor/verify-otp
+router.post("/investor/verify-otp", async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) return err(res, "Email and OTP are required.", 400);
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanOtp = String(otp).trim();
+
+    const [pending] = await sql`SELECT * FROM pending_registrations WHERE email = ${cleanEmail}`;
+    if (!pending) return err(res, "No pending registration found.", 400);
+    if (new Date() > new Date(pending.expires_at)) return err(res, "OTP has expired.", 400);
+    if (pending.otp_code !== cleanOtp) return err(res, "Invalid OTP.", 400);
 
     const [newInvestor] = await sql`
       INSERT INTO investor_users (
-        full_name, mobile_number, email, password_hash,
-        address, city, state, country, pincode,
-        pan_number, aadhaar_number, bank_name, account_number, ifsc_code, nominee_name,
-        status, is_verified
+        full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
       ) VALUES (
-        ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${password_hash},
-        ${address || null}, ${city || null}, ${state || null}, ${country || 'India'}, ${pincode || null},
-        ${pan_number ? pan_number.trim().toUpperCase() : null}, ${aadhaar_number || null},
-        ${bank_name || null}, ${account_number || null}, ${ifsc_code ? ifsc_code.trim().toUpperCase() : null}, ${nominee_name || null},
-        'pending', false
+        ${pending.full_name}, ${pending.mobile_no}, ${pending.email}, ${pending.password_hash},
+        'active', true, NOW(), NOW()
       )
       RETURNING id, full_name, email, mobile_number, status, is_verified, created_at
     `;
 
-    return ok(res, newInvestor, "Investor registration submitted successfully! Pending approval.", 201);
+    await sql`DELETE FROM pending_registrations WHERE email = ${cleanEmail}`;
+    await notifyInvestor(newInvestor.id, "Account Activated", "Your investor account is now active.", "registration");
+
+    return ok(res, newInvestor, "Investor account verified and activated successfully.");
   } catch (e) {
-    console.error("Investor Signup Error:", e);
-    return err(res, e.message || "Failed to process signup.");
+    console.error("Investor Verify OTP Error:", e);
+    return err(res, "Failed to verify OTP.");
   }
 });
 
@@ -155,6 +449,9 @@ router.post("/investor/login", async (req, res) => {
       return err(res, "Invalid credentials.", 401);
     }
 
+    if (!user.is_verified || user.status === "pending_verification") {
+      return err(res, "Please verify your email before login.", 403);
+    }
     if (user.status === "inactive" || user.status === "rejected") {
       return err(res, `Account is currently ${user.status}. Please contact support.`, 403);
     }
@@ -185,6 +482,31 @@ router.post("/investor/login", async (req, res) => {
   } catch (e) {
     console.error("Investor Login Error:", e);
     return err(res, e.message || "Failed to process login.");
+  }
+});
+
+router.get("/investor/verify-email", async (req, res) => {
+  try {
+    const token = String(req.query.token || "").trim();
+    if (!token) return err(res, "Verification token is required.", 400);
+    const [investor] = await sql`
+      SELECT id FROM investor_users
+      WHERE email_verification_token = ${token}
+        AND email_verification_expires > NOW()
+        AND deleted_at IS NULL
+      LIMIT 1`;
+    if (!investor) return err(res, "Verification link is invalid or expired.", 400);
+    const [updated] = await sql`
+      UPDATE investor_users
+      SET is_verified = TRUE, status = 'active', email_verification_token = NULL,
+          email_verification_expires = NULL, updated_at = NOW()
+      WHERE id = ${investor.id}
+      RETURNING id, full_name, email, status, is_verified`;
+    await notifyInvestor(updated.id, "Email Verified", "Your investor email has been verified successfully.", "success");
+    return ok(res, updated, "Email verified successfully. You can login now.");
+  } catch (e) {
+    console.error("Investor Verify Email Error:", e);
+    return err(res, "Failed to verify email.");
   }
 });
 
@@ -282,6 +604,10 @@ router.get("/investor/dashboard", authInvestor, async (req, res) => {
 
     if (!user) return err(res, "Investor user not found.", 44);
 
+    const [{ count: txCount }] = await sql`
+      SELECT COUNT(*) FROM investor_transactions WHERE investor_id = ${investorId}
+    `;
+
     const recentTransactions = await sql`
       SELECT id, transaction_id, type, amount, status, payment_method, reference_number, created_at
       FROM investor_transactions
@@ -296,7 +622,8 @@ router.get("/investor/dashboard", authInvestor, async (req, res) => {
         total_investment: Number(user.total_investment || 0),
         available_balance: Number(user.available_balance || 0),
         total_deposits: Number(user.total_deposits || 0),
-        total_withdrawals: Number(user.total_withdrawals || 0)
+        total_withdrawals: Number(user.total_withdrawals || 0),
+        total_transactions: parseInt(txCount, 10) || 0
       },
       recent_transactions: recentTransactions
     });
@@ -328,10 +655,23 @@ router.put("/investor/profile", authInvestor, async (req, res) => {
   try {
     const { full_name, mobile_number, address, city, state, country, pincode, nominee_name, pan_number, aadhaar_number } = req.body;
 
+    if (mobile_number && !/^\d{10}$/.test(String(mobile_number).replace(/\D/g, ""))) {
+      return err(res, "Please enter a valid 10 digit mobile number.", 400);
+    }
+    if (mobile_number) {
+      const [existingMobile] = await sql`
+        SELECT id FROM investor_users
+        WHERE mobile_number = ${String(mobile_number).replace(/\D/g, "")}
+          AND id <> ${req.investor.id}
+          AND deleted_at IS NULL
+        LIMIT 1`;
+      if (existingMobile) return err(res, "Mobile number is already used by another investor.", 409);
+    }
+
     const [updated] = await sql`
       UPDATE investor_users
       SET full_name = COALESCE(${full_name}, full_name),
-          mobile_number = COALESCE(${mobile_number}, mobile_number),
+          mobile_number = COALESCE(${mobile_number ? String(mobile_number).replace(/\D/g, "") : null}, mobile_number),
           address = COALESCE(${address}, address),
           city = COALESCE(${city}, city),
           state = COALESCE(${state}, state),
@@ -348,6 +688,203 @@ router.put("/investor/profile", authInvestor, async (req, res) => {
     return ok(res, updated, "Profile updated successfully.");
   } catch (e) {
     return err(res, "Failed to update profile.");
+  }
+});
+
+router.post("/investor/profile/photo", authInvestor, upload.single("profile_photo"), async (req, res) => {
+  try {
+    if (!req.file) return err(res, "Profile photo is required.", 400);
+    const dataUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+    const [updated] = await sql`
+      UPDATE investor_users
+      SET profile_picture_url = ${dataUrl}, updated_at = NOW()
+      WHERE id = ${req.investor.id}
+      RETURNING id, profile_picture_url`;
+    return ok(res, updated, "Profile photo updated successfully.");
+  } catch (e) {
+    return err(res, "Failed to update profile photo.");
+  }
+});
+
+router.get("/investor/documents", authInvestor, async (req, res) => {
+  try {
+    const rows = await sql`
+      SELECT id, document_type, original_file_name, mime_type, file_size_bytes, status,
+             admin_remarks, reviewed_at, created_at, updated_at
+      FROM investor_documents
+      WHERE investor_id = ${req.investor.id} AND deleted_at IS NULL
+      ORDER BY created_at DESC`;
+    return ok(res, rows);
+  } catch (e) {
+    return err(res, "Failed to load investor documents.");
+  }
+});
+
+router.post("/investor/documents", authInvestor, upload.single("document"), async (req, res) => {
+  try {
+    const documentType = String(req.body.document_type || "").trim();
+    const allowedTypes = ["pan_card", "aadhaar_card", "passport_photo", "property_document", "supporting_document"];
+    if (!allowedTypes.includes(documentType)) return err(res, "Invalid document type.", 400);
+    if (!req.file) return err(res, "Document file is required.", 400);
+
+    const [existingApproved] = await sql`
+      SELECT id FROM investor_documents
+      WHERE investor_id = ${req.investor.id}
+        AND document_type = ${documentType}
+        AND status = 'approved'
+        AND deleted_at IS NULL
+      LIMIT 1`;
+    if (existingApproved) return err(res, "Approved documents cannot be replaced from investor panel.", 400);
+
+    await sql`
+      UPDATE investor_documents
+      SET deleted_at = NOW(), updated_at = NOW()
+      WHERE investor_id = ${req.investor.id}
+        AND document_type = ${documentType}
+        AND status <> 'approved'
+        AND deleted_at IS NULL`;
+
+    const [created] = await sql`
+      INSERT INTO investor_documents (
+        investor_id, document_type, original_file_name, mime_type, file_size_bytes, file_data, status
+      ) VALUES (
+        ${req.investor.id}, ${documentType}, ${req.file.originalname}, ${req.file.mimetype},
+        ${req.file.size}, ${req.file.buffer}, 'pending'
+      )
+      RETURNING id, document_type, original_file_name, mime_type, file_size_bytes, status, created_at`;
+    await notifyInvestor(req.investor.id, "Document Submitted", "Your document was uploaded and is pending admin review.", "document");
+    return ok(res, created, "Document uploaded successfully.", 201);
+  } catch (e) {
+    console.error("Investor Document Upload Error:", e);
+    return err(res, "Failed to upload document.");
+  }
+});
+
+router.get("/investor/documents/:id/file", authInvestor, async (req, res) => {
+  try {
+    const [doc] = await sql`
+      SELECT original_file_name, mime_type, file_data FROM investor_documents
+      WHERE id = ${req.params.id} AND investor_id = ${req.investor.id} AND deleted_at IS NULL`;
+    if (!doc) return err(res, "Document not found.", 404);
+    res.setHeader("Content-Type", doc.mime_type);
+    res.setHeader("Content-Disposition", `inline; filename="${doc.original_file_name.replace(/"/g, "")}"`);
+    return res.send(doc.file_data);
+  } catch (e) {
+    return err(res, "Failed to load document.");
+  }
+});
+
+router.delete("/investor/documents/:id", authInvestor, async (req, res) => {
+  try {
+    const [doc] = await sql`
+      UPDATE investor_documents
+      SET deleted_at = NOW(), updated_at = NOW()
+      WHERE id = ${req.params.id}
+        AND investor_id = ${req.investor.id}
+        AND status <> 'approved'
+        AND deleted_at IS NULL
+      RETURNING id`;
+    if (!doc) return err(res, "Only pending or rejected documents can be deleted.", 400);
+    return ok(res, doc, "Document deleted successfully.");
+  } catch (e) {
+    return err(res, "Failed to delete document.");
+  }
+});
+
+router.get("/investor/wallet", authInvestor, async (req, res) => {
+  try {
+    const [wallet] = await sql`
+      SELECT available_balance AS current_balance, total_deposits, total_settlements,
+             total_earnings, total_withdrawals
+      FROM investor_users WHERE id = ${req.investor.id}`;
+    const [lastTransaction] = await sql`
+      SELECT transaction_id, type, amount, status, created_at
+      FROM investor_transactions
+      WHERE investor_id = ${req.investor.id}
+      ORDER BY created_at DESC
+      LIMIT 1`;
+    return ok(res, { ...wallet, last_transaction: lastTransaction || null });
+  } catch (e) {
+    return err(res, "Failed to load wallet.");
+  }
+});
+
+router.get("/investor/settlement-preference", authInvestor, async (req, res) => {
+  try {
+    const [preference] = await sql`
+      SELECT * FROM investor_settlement_preferences WHERE investor_id = ${req.investor.id}`;
+    const requests = await sql`
+      SELECT * FROM settlement_change_requests
+      WHERE investor_id = ${req.investor.id}
+      ORDER BY created_at DESC LIMIT 10`;
+    return ok(res, { preference: preference || null, requests });
+  } catch (e) {
+    return err(res, "Failed to load settlement preference.");
+  }
+});
+
+router.post("/investor/settlement-preference", authInvestor, async (req, res) => {
+  try {
+    const frequency = String(req.body.frequency || "").trim();
+    if (!["monthly", "half_yearly", "yearly"].includes(frequency)) return err(res, "Invalid settlement frequency.", 400);
+    const [created] = await sql`
+      INSERT INTO investor_settlement_preferences (investor_id, frequency)
+      VALUES (${req.investor.id}, ${frequency})
+      ON CONFLICT (investor_id) DO NOTHING
+      RETURNING *`;
+    if (!created) return err(res, "Settlement frequency can be selected only once. Please request an admin change.", 400);
+    await notifyInvestor(req.investor.id, "Settlement Preference Saved", "Your settlement frequency has been locked.", "settlement");
+    return ok(res, created, "Settlement preference saved.");
+  } catch (e) {
+    return err(res, "Failed to save settlement preference.");
+  }
+});
+
+router.post("/investor/settlement-change-request", authInvestor, async (req, res) => {
+  try {
+    const requested = String(req.body.requested_frequency || "").trim();
+    const reason = String(req.body.reason || "").trim();
+    if (!["monthly", "half_yearly", "yearly"].includes(requested)) return err(res, "Invalid requested frequency.", 400);
+    const [preference] = await sql`SELECT frequency FROM investor_settlement_preferences WHERE investor_id = ${req.investor.id}`;
+    if (!preference) return err(res, "Please select your first settlement preference before requesting a change.", 400);
+    const [pending] = await sql`
+      SELECT id FROM settlement_change_requests
+      WHERE investor_id = ${req.investor.id} AND status = 'pending'
+      LIMIT 1`;
+    if (pending) return err(res, "A settlement change request is already pending.", 400);
+    const [created] = await sql`
+      INSERT INTO settlement_change_requests (investor_id, current_frequency, requested_frequency, reason)
+      VALUES (${req.investor.id}, ${preference.frequency}, ${requested}, ${reason || null})
+      RETURNING *`;
+    return ok(res, created, "Settlement change request submitted.", 201);
+  } catch (e) {
+    return err(res, "Failed to submit settlement change request.");
+  }
+});
+
+router.get("/investor/notifications", authInvestor, async (req, res) => {
+  try {
+    const rows = await sql`
+      SELECT * FROM investor_notifications
+      WHERE investor_id = ${req.investor.id}
+      ORDER BY created_at DESC
+      LIMIT 100`;
+    return ok(res, rows);
+  } catch (e) {
+    return err(res, "Failed to load notifications.");
+  }
+});
+
+router.patch("/investor/notifications/:id/read", authInvestor, async (req, res) => {
+  try {
+    const [row] = await sql`
+      UPDATE investor_notifications SET is_read = TRUE
+      WHERE id = ${req.params.id} AND investor_id = ${req.investor.id}
+      RETURNING id`;
+    if (!row) return err(res, "Notification not found.", 404);
+    return ok(res, row, "Notification marked as read.");
+  } catch (e) {
+    return err(res, "Failed to update notification.");
   }
 });
 
@@ -397,16 +934,19 @@ router.put("/investor/bank-details", authInvestor, async (req, res) => {
 });
 
 // POST /api/investor/deposit
-router.post("/investor/deposit", authInvestor, async (req, res) => {
+router.post("/investor/deposit", authInvestor, upload.single("payment_screenshot"), async (req, res) => {
   try {
-    const { amount, payment_method, transaction_reference, payment_screenshot_url } = req.body;
+    const { amount, payment_method, gateway, transaction_reference, payment_screenshot_url } = req.body;
     const numAmount = Number(amount);
 
     if (isNaN(numAmount) || numAmount <= 0) {
       return err(res, "Please enter a valid deposit amount greater than zero.", 400);
     }
-    if (!payment_method || !transaction_reference) {
-      return err(res, "Payment Method and Transaction Reference are required.", 400);
+    if (!payment_method) {
+      return err(res, "Payment Method is required.", 400);
+    }
+    if (payment_method !== "online" && !transaction_reference) {
+      return err(res, "Transaction Reference / UTR Number is required for manual payment.", 400);
     }
 
     const investorId = req.investor.id;
@@ -414,9 +954,11 @@ router.post("/investor/deposit", authInvestor, async (req, res) => {
     // Create Deposit request
     const [deposit] = await sql`
       INSERT INTO investor_deposits (
-        investor_id, amount, payment_method, transaction_reference, payment_screenshot_url, status
+        investor_id, amount, payment_method, gateway, transaction_reference, payment_screenshot_url,
+        payment_screenshot_data, payment_screenshot_mime_type, status
       ) VALUES (
-        ${investorId}, ${numAmount}, ${payment_method}, ${transaction_reference}, ${payment_screenshot_url || null}, 'pending'
+        ${investorId}, ${numAmount}, ${payment_method}, ${gateway || null}, ${transaction_reference || null},
+        ${payment_screenshot_url || null}, ${req.file?.buffer || null}, ${req.file?.mimetype || null}, 'pending'
       )
       RETURNING *
     `;
@@ -427,14 +969,29 @@ router.post("/investor/deposit", authInvestor, async (req, res) => {
       INSERT INTO investor_transactions (
         investor_id, transaction_id, type, amount, status, payment_method, reference_number
       ) VALUES (
-        ${investorId}, ${txId}, 'deposit', ${numAmount}, 'pending', ${payment_method}, ${transaction_reference}
+        ${investorId}, ${txId}, 'deposit', ${numAmount}, 'pending', ${payment_method}, ${transaction_reference || deposit.id}
       )
     `;
+    await notifyInvestor(investorId, "Deposit Submitted", "Your deposit request is pending admin verification.", "deposit");
 
     return ok(res, deposit, "Deposit request submitted successfully! Awaiting admin approval.", 201);
   } catch (e) {
     console.error("Deposit Error:", e);
     return err(res, "Failed to submit deposit request.");
+  }
+});
+
+router.get("/investor/deposits/:id/screenshot", authInvestor, async (req, res) => {
+  try {
+    const [deposit] = await sql`
+      SELECT payment_screenshot_data, payment_screenshot_mime_type
+      FROM investor_deposits
+      WHERE id = ${req.params.id} AND investor_id = ${req.investor.id}`;
+    if (!deposit?.payment_screenshot_data) return err(res, "Screenshot not found.", 404);
+    res.setHeader("Content-Type", deposit.payment_screenshot_mime_type || "application/octet-stream");
+    return res.send(deposit.payment_screenshot_data);
+  } catch (e) {
+    return err(res, "Failed to load payment screenshot.");
   }
 });
 
@@ -522,8 +1079,8 @@ router.get("/investor/withdrawals", authInvestor, async (req, res) => {
   }
 });
 
-// GET /api/investor/payments
-router.get("/investor/payments", authInvestor, async (req, res) => {
+// GET /api/investor/payments or /transactions
+async function handleInvestorTransactions(req, res) {
   try {
     const investorId = req.investor.id;
     const { search, type, status, page = 1, limit = 20 } = req.query;
@@ -559,7 +1116,10 @@ router.get("/investor/payments", authInvestor, async (req, res) => {
     console.error("Investor Payments Error:", e);
     return err(res, "Failed to fetch transaction history.");
   }
-});
+}
+
+router.get("/investor/payments", authInvestor, handleInvestorTransactions);
+router.get("/investor/transactions", authInvestor, handleInvestorTransactions);
 
 // ──────────────────────────────────────────────────────────────
 //  ADMIN INVESTOR PORTAL APIs
@@ -683,6 +1243,7 @@ router.put("/admin/investors-portal/deposits/:id/status", authAdmin, async (req,
           SET status = 'approved', updated_at = NOW()
           WHERE investor_id = ${deposit.investor_id} AND reference_number = ${deposit.transaction_reference}
         `;
+        await notifyInvestor(deposit.investor_id, "Deposit Approved", `Your deposit of ₹${amount.toFixed(2)} has been approved and credited.`, "success", tx);
       });
     } else {
       await sql.begin(async (tx) => {
@@ -697,6 +1258,7 @@ router.put("/admin/investors-portal/deposits/:id/status", authAdmin, async (req,
           SET status = 'rejected', updated_at = NOW()
           WHERE investor_id = ${deposit.investor_id} AND reference_number = ${deposit.transaction_reference}
         `;
+        await notifyInvestor(deposit.investor_id, "Deposit Rejected", admin_remarks || "Your deposit request was rejected by admin.", "error", tx);
       });
     }
 
@@ -704,6 +1266,141 @@ router.put("/admin/investors-portal/deposits/:id/status", authAdmin, async (req,
   } catch (e) {
     console.error("Admin Deposit Status Error:", e);
     return err(res, "Failed to update deposit status.");
+  }
+});
+
+router.get("/admin/investors-portal/documents", authAdmin, async (req, res) => {
+  try {
+    const { status, investor_id } = req.query;
+    let query = sql`
+      SELECT d.id, d.investor_id, d.document_type, d.original_file_name, d.mime_type,
+             d.file_size_bytes, d.status, d.admin_remarks, d.reviewed_at, d.created_at,
+             u.full_name AS investor_name, u.email AS investor_email, u.mobile_number AS investor_mobile
+      FROM investor_documents d
+      JOIN investor_users u ON u.id = d.investor_id
+      WHERE d.deleted_at IS NULL`;
+    if (status && status !== "all") query = sql`${query} AND d.status = ${status}`;
+    if (investor_id) query = sql`${query} AND d.investor_id = ${Number(investor_id)}`;
+    const rows = await sql`${query} ORDER BY d.created_at DESC`;
+    return ok(res, rows);
+  } catch (e) {
+    return err(res, "Failed to load investor documents.");
+  }
+});
+
+router.get("/admin/investors-portal/documents/:id/file", authAdmin, async (req, res) => {
+  try {
+    const [doc] = await sql`
+      SELECT original_file_name, mime_type, file_data FROM investor_documents
+      WHERE id = ${req.params.id} AND deleted_at IS NULL`;
+    if (!doc) return err(res, "Document not found.", 404);
+    res.setHeader("Content-Type", doc.mime_type);
+    res.setHeader("Content-Disposition", `inline; filename="${doc.original_file_name.replace(/"/g, "")}"`);
+    return res.send(doc.file_data);
+  } catch (e) {
+    return err(res, "Failed to load document.");
+  }
+});
+
+router.put("/admin/investors-portal/documents/:id/status", authAdmin, async (req, res) => {
+  try {
+    const status = String(req.body.status || "").trim();
+    const remarks = req.body.admin_remarks || null;
+    if (!["approved", "rejected"].includes(status)) return err(res, "Status must be approved or rejected.", 400);
+    const [doc] = await sql`
+      UPDATE investor_documents
+      SET status = ${status}, admin_remarks = ${remarks}, reviewed_by = ${req.admin.admin_id || null},
+          reviewed_at = NOW(), updated_at = NOW()
+      WHERE id = ${req.params.id} AND deleted_at IS NULL
+      RETURNING id, investor_id, document_type, status`;
+    if (!doc) return err(res, "Document not found.", 404);
+    await notifyInvestor(
+      doc.investor_id,
+      status === "approved" ? "Document Approved" : "Document Rejected",
+      status === "approved" ? `Your ${doc.document_type} document was approved.` : (remarks || `Your ${doc.document_type} document was rejected.`),
+      status === "approved" ? "success" : "error"
+    );
+    return ok(res, doc, `Document ${status}.`);
+  } catch (e) {
+    return err(res, "Failed to update document status.");
+  }
+});
+
+router.get("/admin/investors-portal/settlement-requests", authAdmin, async (req, res) => {
+  try {
+    const rows = await sql`
+      SELECT r.*, u.full_name AS investor_name, u.email AS investor_email, u.mobile_number AS investor_mobile
+      FROM settlement_change_requests r
+      JOIN investor_users u ON u.id = r.investor_id
+      ORDER BY r.created_at DESC`;
+    return ok(res, rows);
+  } catch (e) {
+    return err(res, "Failed to load settlement change requests.");
+  }
+});
+
+router.put("/admin/investors-portal/settlement-requests/:id/status", authAdmin, async (req, res) => {
+  try {
+    const status = String(req.body.status || "").trim();
+    const remarks = req.body.admin_remarks || null;
+    if (!["approved", "rejected"].includes(status)) return err(res, "Status must be approved or rejected.", 400);
+    const [request] = await sql`SELECT * FROM settlement_change_requests WHERE id = ${req.params.id}`;
+    if (!request) return err(res, "Settlement change request not found.", 404);
+    if (request.status !== "pending") return err(res, `Request is already ${request.status}.`, 400);
+
+    await sql.begin(async (tx) => {
+      await tx`
+        UPDATE settlement_change_requests
+        SET status = ${status}, admin_remarks = ${remarks}, reviewed_by = ${req.admin.admin_id || null},
+            reviewed_at = NOW(), updated_at = NOW()
+        WHERE id = ${req.params.id}`;
+      if (status === "approved") {
+        await tx`
+          UPDATE investor_settlement_preferences
+          SET frequency = ${request.requested_frequency}, updated_at = NOW()
+          WHERE investor_id = ${request.investor_id}`;
+      }
+      await notifyInvestor(
+        request.investor_id,
+        status === "approved" ? "Settlement Change Approved" : "Settlement Change Rejected",
+        status === "approved" ? "Your settlement frequency change was approved." : (remarks || "Your settlement frequency change was rejected."),
+        status === "approved" ? "success" : "error",
+        tx
+      );
+    });
+    return ok(res, null, `Settlement change request ${status}.`);
+  } catch (e) {
+    return err(res, "Failed to update settlement change request.");
+  }
+});
+
+router.post("/admin/investors-portal/:id/wallet-adjustment", authAdmin, async (req, res) => {
+  try {
+    const investorId = Number(req.params.id);
+    const amount = Number(req.body.amount);
+    const direction = String(req.body.direction || "credit").trim();
+    const remarks = String(req.body.remarks || "").trim();
+    if (!Number.isFinite(amount) || amount <= 0) return err(res, "Enter a valid adjustment amount.", 400);
+    if (!["credit", "debit"].includes(direction)) return err(res, "Direction must be credit or debit.", 400);
+
+    const signedAmount = direction === "credit" ? amount : -amount;
+    const txId = `ADJ-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    await sql.begin(async (tx) => {
+      const [user] = await tx`SELECT available_balance FROM investor_users WHERE id = ${investorId} FOR UPDATE`;
+      if (!user) throw new Error("Investor account not found.");
+      if (direction === "debit" && Number(user.available_balance || 0) < amount) throw new Error("Insufficient investor balance.");
+      await tx`
+        UPDATE investor_users
+        SET available_balance = available_balance + ${signedAmount}, updated_at = NOW()
+        WHERE id = ${investorId}`;
+      await tx`
+        INSERT INTO investor_transactions (investor_id, transaction_id, type, amount, status, payment_method, remarks)
+        VALUES (${investorId}, ${txId}, ${direction === "credit" ? "adjustment_credit" : "adjustment_debit"}, ${amount}, 'approved', 'Admin Adjustment', ${remarks || null})`;
+      await notifyInvestor(investorId, "Wallet Adjustment", `Admin ${direction} adjustment of ₹${amount.toFixed(2)} was applied.`, "wallet", tx);
+    });
+    return ok(res, { transaction_id: txId }, "Wallet adjustment completed.");
+  } catch (e) {
+    return err(res, e.message || "Failed to adjust investor wallet.", 400);
   }
 });
 

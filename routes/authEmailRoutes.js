@@ -235,28 +235,32 @@ async function validateSignupInput(body) {
   if (!body.password || body.password.length < 6) {
     validationErrors.push('Password must be at least 6 characters');
   }
-  if (!['Customer', 'Associate'].includes(userType)) {
-    validationErrors.push('user_type must be Customer or Associate');
+  if (!['Customer', 'Associate', 'Investor'].includes(userType)) {
+    validationErrors.push('user_type must be Customer, Associate, or Investor');
   }
 
   if (validationErrors.length) {
-    console.error('[Associate Registration] Validation Failed:', validationErrors);
+    console.error('[Registration] Validation Failed:', validationErrors);
     return { error: validationErrors[0], status: 400, validationErrors };
   }
 
-  console.log('[Associate Registration] Checking duplicate email...');
+  console.log('[Registration] Checking duplicate email...');
   const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${email}`;
-  if (dupEmail) {
-    console.error('[Associate Registration] Duplicate email found:', { email, user_id: dupEmail.user_id });
+  const [dupInvestorEmail] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${email} AND (deleted_at IS NULL) LIMIT 1`;
+  if (dupEmail || dupInvestorEmail) {
+    console.error('[Registration] Duplicate email found:', { email });
     return { error: 'Email already registered', status: 409 };
   }
 
-  console.log('[Associate Registration] Checking duplicate mobile...');
+  console.log('[Registration] Checking duplicate mobile...');
   const [dupMobile] = await sql`
     SELECT user_id FROM users
     WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${mobileNo}`;
-  if (dupMobile) {
-    console.error('[Associate Registration] Duplicate mobile found:', { mobile_no: mobileNo, user_id: dupMobile.user_id });
+  const [dupInvestorMobile] = await sql`
+    SELECT id FROM investor_users
+    WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${mobileNo} AND (deleted_at IS NULL) LIMIT 1`;
+  if (dupMobile || dupInvestorMobile) {
+    console.error('[Registration] Duplicate mobile found:', { mobile_no: mobileNo });
     return { error: 'Mobile number already registered', status: 409 };
   }
 
@@ -448,6 +452,42 @@ router.post('/verify-email-otp', async (req, res) => {
         SET attempts = attempts + 1, updated_at = NOW()
         WHERE email = ${email}`;
       return err(res, 'Invalid OTP. Please check and try again.', 400);
+    }
+
+    if (pending.user_type === 'Investor') {
+      const [dupInvestorEmail] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`;
+      if (dupInvestorEmail) {
+        await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
+        return err(res, 'Email already registered', 409);
+      }
+      const [dupInvestorMobile] = await sql`
+        SELECT id FROM investor_users
+        WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${pending.mobile_no} AND deleted_at IS NULL LIMIT 1`;
+      if (dupInvestorMobile) {
+        await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
+        return err(res, 'Mobile number already registered', 409);
+      }
+
+      const [createdInvestor] = await sql`
+        INSERT INTO investor_users (
+          full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
+        ) VALUES (
+          ${pending.full_name}, ${pending.mobile_no}, ${pending.email}, ${pending.password_hash},
+          'active', true, NOW(), NOW()
+        )
+        RETURNING id, full_name, email, mobile_number, status, is_verified`;
+
+      await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
+
+      return ok(res, {
+        user: {
+          id: createdInvestor.id,
+          full_name: createdInvestor.full_name,
+          email: createdInvestor.email,
+          mobile_number: createdInvestor.mobile_number,
+          user_type: 'Investor',
+        }
+      }, 'Investor registration verified and completed successfully.');
     }
 
     const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${email}`;
