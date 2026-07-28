@@ -1381,7 +1381,7 @@ const linkApprovedReferral = async (userId) => {
   await sql`
     INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
     VALUES (${user.user_id}, ${user.sponsor_user_id},
-      COALESCE((SELECT level + 1 FROM mlm_network WHERE associate_user_id = ${user.sponsor_user_id}), 1))
+      COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${user.sponsor_user_id}), 0) + 1)
     ON CONFLICT (associate_user_id) DO NOTHING`;
   await sql`
     INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
@@ -6268,12 +6268,12 @@ app.post("/api/admin/users/:id/approve",
           VALUES (${uid}) ON CONFLICT (associate_user_id) DO NOTHING`;
 
         const [sponsor] = await sql`SELECT sponsor_user_id FROM users WHERE user_id = ${uid}`;
+        const sponsorId = sponsor?.sponsor_user_id || null;
         await sql`
           INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
-          VALUES (${uid}, ${sponsor?.sponsor_user_id || null},
-                  CASE WHEN ${sponsor?.sponsor_user_id} IS NULL THEN 1
-                       ELSE (SELECT COALESCE(level,0)+1 FROM mlm_network
-                             WHERE associate_user_id = ${sponsor?.sponsor_user_id})
+          VALUES (${uid}, ${sponsorId},
+                  CASE WHEN ${sponsorId} IS NULL THEN 1
+                       ELSE COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${sponsorId}), 0) + 1
                   END) ON CONFLICT (associate_user_id) DO NOTHING`;
         await linkApprovedReferral(uid);
       }
