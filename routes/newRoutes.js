@@ -235,15 +235,65 @@ router.post('/auth/login', async (req, res) => {
           SELECT user_id, full_name, email, mobile_no, password_hash,
                  account_status, user_type, member_id, invitation_code
           FROM users
-          WHERE email = ${loginEmail}`
+          WHERE LOWER(email) = ${loginEmail}`
       : await sql`
           SELECT user_id, full_name, email, mobile_no, password_hash,
                  account_status, user_type, member_id, invitation_code
           FROM users
-          WHERE mobile_no = ${loginMobile}`;
+          WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${loginMobile}`;
 
-    if (!user)
+    if (!user) {
+      const [investor] = loginEmail
+        ? await sql`SELECT id, full_name, email, mobile_number, password_hash, status, is_verified FROM investor_users WHERE LOWER(email) = ${loginEmail} AND deleted_at IS NULL LIMIT 1`
+        : await sql`SELECT id, full_name, email, mobile_number, password_hash, status, is_verified FROM investor_users WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${loginMobile} AND deleted_at IS NULL LIMIT 1`;
+
+      if (investor) {
+        if (!investor.is_verified || investor.status === "pending_verification") {
+          return res.status(403).json({ success: false, message: "Please verify your email address before login." });
+        }
+        if (investor.status === "inactive" || investor.status === "rejected") {
+          return res.status(403).json({ success: false, message: `Account is currently ${investor.status}. Contact support.` });
+        }
+        const valid = await bcrypt.compare(password, investor.password_hash);
+        if (!valid)
+          return res.status(401).json({ success: false, message: "Email ya password galat hai" });
+
+        const payload = {
+          id: investor.id,
+          user_id: investor.id,
+          user_type: "Investor",
+          role: "Investor",
+          email: investor.email,
+          full_name: investor.full_name,
+        };
+
+        const secret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+        const refreshSecret = process.env.JWT_REFRESH_SECRET || secret;
+        const token = jwt.sign(payload, secret, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
+        const refreshToken = jwt.sign(payload, refreshSecret, { expiresIn: "30d" });
+
+        return res.json({
+          success: true,
+          message: "Investor login successful",
+          data: {
+            token,
+            refresh_token: refreshToken,
+            user: {
+              id: investor.id,
+              user_id: investor.id,
+              full_name: investor.full_name,
+              user_type: "Investor",
+              email: investor.email,
+              mobile_no: investor.mobile_number,
+              account_status: investor.status,
+              email_verified: Boolean(investor.is_verified)
+            }
+          }
+        });
+      }
+
       return res.status(401).json({ success: false, message: 'Email ya password galat hai' });
+    }
 
     if (user.account_status === 'Pending')
       return res.status(403).json({ success: false, message: 'Account abhi pending approval mein hai।', code: 'PENDING_APPROVAL' });
