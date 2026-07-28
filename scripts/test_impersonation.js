@@ -7,7 +7,6 @@ async function testImpersonation() {
   console.log("==================================================");
 
   try {
-    // 1. Get active admin from DB
     const [admin] = await sql`
       SELECT a.admin_id, a.full_name, a.email, r.role_name AS role
       FROM admin_users a
@@ -28,7 +27,6 @@ async function testImpersonation() {
       role: admin.role
     }, secret, { expiresIn: "1h" });
 
-    // 2. Get active customer
     const [customer] = await sql`
       SELECT user_id, full_name, email, user_type, account_status
       FROM users
@@ -44,11 +42,10 @@ async function testImpersonation() {
         },
         body: JSON.stringify({ user_id: customer.user_id, user_type: "Customer" })
       });
-      const data = await res.json();
-      console.log("   Customer Result:", res.status, data);
+      const text = await res.text();
+      console.log("   Customer Status:", res.status, text);
     }
 
-    // 3. Get active associate
     const [associate] = await sql`
       SELECT user_id, full_name, email, user_type, account_status
       FROM users
@@ -64,11 +61,10 @@ async function testImpersonation() {
         },
         body: JSON.stringify({ user_id: associate.user_id, user_type: "Associate" })
       });
-      const data = await res.json();
-      console.log("   Associate Result:", res.status, data);
+      const text = await res.text();
+      console.log("   Associate Status:", res.status, text);
     }
 
-    // 4. Get active investor
     const [investor] = await sql`
       SELECT id, full_name, email, status, is_verified
       FROM investor_users
@@ -84,11 +80,10 @@ async function testImpersonation() {
         },
         body: JSON.stringify({ user_id: investor.id, user_type: "Investor" })
       });
-      const data = await res.json();
-      console.log("   Investor Result:", res.status, data);
+      const text = await res.text();
+      console.log("   Investor Status:", res.status, text);
     }
 
-    // 5. Verify audit log entry
     const [audit] = await sql`
       SELECT id, actor_name, action, target_table, target_record_id, new_value, created_at
       FROM audit_log
