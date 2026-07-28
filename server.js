@@ -4379,13 +4379,12 @@ app.post("/api/admin/login-as-user", verifyAdminToken, async (req, res) => {
 
     try {
       await sql`
-        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value, ip_address)
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
         VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name || 'Admin'},
                 'AdminImpersonation', 'LoginAsUser',
                 ${normalizedType === 'Investor' ? 'investor_users' : 'users'},
                 ${cleanUserId},
-                ${JSON.stringify({ target_user_type: normalizedType, target_name: targetUser.full_name, target_email: targetUser.email, ip: req.ip, user_agent: req.headers['user-agent'] })},
-                ${req.ip || null})`;
+                ${JSON.stringify({ target_user_type: normalizedType, target_name: targetUser.full_name, target_email: targetUser.email, ip: req.ip, user_agent: req.headers['user-agent'] })})`;
     } catch (auditErr) {
       console.warn("[Audit Log Warning]:", auditErr.message);
     }

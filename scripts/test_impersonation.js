@@ -45,8 +45,8 @@ async function testImpersonation() {
         },
         body: JSON.stringify({ user_id: customer.user_id, user_type: "Customer" })
       });
-      const data = await res.json();
-      console.log("   Customer Result:", data.success ? "SUCCESS" : "FAILED", data.data?.redirect_url || data.message);
+      const text = await res.text();
+      console.log("   Customer Status:", res.status, text);
     } else {
       console.log("\n2. No active customer user found in DB to test.");
     }
