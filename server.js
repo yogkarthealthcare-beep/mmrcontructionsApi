@@ -3731,7 +3731,7 @@ app.post("/api/auth/register-quick", async (req, res) => {
     }
 
     const passwordHash = await bcrypt.hash(password, 12);
-    const otp = genOTP();
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
     const exp = new Date(Date.now() + 10 * 60 * 1000);
 
     await sql`
