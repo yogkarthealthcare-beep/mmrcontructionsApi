@@ -9764,9 +9764,10 @@ app.put("/api/admin/plot-detector-2/plots/:plotId",
       return ok(res, detail, "Plot details updated.");
     } catch (e) {
       console.error("[Plot Detector 2 Plot Update Error]", e);
-      return err(res, e.message || "Failed to update plot details");
     }
   }
+);
+
 /* ==========================
    HEALTH CHECK
 ========================== */

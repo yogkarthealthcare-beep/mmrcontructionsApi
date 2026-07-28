@@ -85,7 +85,7 @@ async function testImpersonation() {
     }
 
     const [audit] = await sql`
-      SELECT id, actor_name, action, target_table, target_record_id, new_value, created_at
+      SELECT audit_id, actor_name, action, target_table, target_record_id, new_value, created_at
       FROM audit_log
       WHERE module = 'AdminImpersonation'
       ORDER BY id DESC LIMIT 1`;
