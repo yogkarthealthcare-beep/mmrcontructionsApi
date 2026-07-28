@@ -4068,11 +4068,37 @@ app.post("/api/auth/forgot-password", async (req, res) => {
           FROM users
           WHERE mobile_no = ${mobileNo}`;
 
-    if (!user) return err(res, "Email not registered", 404);
+    if (!user) {
+      const [investor] = email
+        ? await sql`SELECT id, full_name, email, mobile_number FROM investor_users WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`
+        : await sql`SELECT id, full_name, email, mobile_number FROM investor_users WHERE mobile_number = ${mobileNo} AND deleted_at IS NULL LIMIT 1`;
+
+      if (investor) {
+        const resetEmail = String(investor.email).toLowerCase().trim();
+        const otp = String(Math.floor(100000 + Math.random() * 900000));
+        const expires = new Date(Date.now() + 15 * 60 * 1000);
+
+        await sql`
+          UPDATE investor_users
+          SET reset_otp = ${otp}, reset_otp_expires = ${expires}
+          WHERE id = ${investor.id}`;
+
+        try {
+          await sendEmail(resetEmail, "MMR Investor Password Reset OTP", otpEmailHtml(otp, "Password Reset"));
+        } catch (mailErr) {
+          console.warn("[Investor Reset Mail Error]", mailErr.message);
+        }
+
+        return ok(res, { email: resetEmail, user_type: "Investor" }, "OTP sent to your registered email");
+      }
+
+      return err(res, "Email not registered", 404);
+    }
+
     if (!user.email) return err(res, "Registered email not available for this account", 400);
 
     const resetEmail = String(user.email).toLowerCase().trim();
-    const otp = genOTP();
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
 
     await sql`
       UPDATE otp_log SET is_used = TRUE
@@ -4082,7 +4108,11 @@ app.post("/api/auth/forgot-password", async (req, res) => {
       VALUES ('User', ${user.user_id}, ${resetEmail}, ${otp}, 'ResetPassword',
               ${new Date(Date.now() + 10*60*1000)})`;
 
-    await sendEmail(resetEmail, "MMR password reset OTP", otpEmailHtml(otp, "Password Reset"));
+    try {
+      await sendEmail(resetEmail, "MMR password reset OTP", otpEmailHtml(otp, "Password Reset"));
+    } catch (mailErr) {
+      console.warn("Mail send error:", mailErr.message);
+    }
     return ok(res, { email: resetEmail }, "OTP sent to your registered email");
   } catch (e) {
     return err(res, e.message);
@@ -4092,15 +4122,31 @@ app.post("/api/auth/forgot-password", async (req, res) => {
 app.post("/api/auth/reset-password", async (req, res) => {
   try {
     const email = String(req.body.email || "").toLowerCase().trim();
-    const { otp_code, new_password } = req.body;
-    if (!email || !otp_code || !new_password)
-      return err(res, "email, otp_code, new_password required", 400);
+    const { otp_code, otp, new_password } = req.body;
+    const rawOtp = String(otp_code || otp || "").trim();
+
+    if (!email || !rawOtp || !new_password)
+      return err(res, "email, otp, and new_password required", 400);
     if (String(new_password).length < 8)
       return err(res, "New password minimum 8 characters required", 400);
 
+    const [investor] = await sql`
+      SELECT id, reset_otp, reset_otp_expires FROM investor_users
+      WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`;
+
+    if (investor && investor.reset_otp === rawOtp && new Date() <= new Date(investor.reset_otp_expires)) {
+      const salt = await bcrypt.genSalt(10);
+      const password_hash = await bcrypt.hash(new_password, salt);
+      await sql`
+        UPDATE investor_users
+        SET password_hash = ${password_hash}, reset_otp = NULL, reset_otp_expires = NULL, updated_at = NOW()
+        WHERE id = ${investor.id}`;
+      return ok(res, {}, "Password reset successfully");
+    }
+
     const [otpRow] = await sql`
       SELECT * FROM otp_log
-      WHERE mobile = ${email} AND otp_code = ${otp_code}
+      WHERE mobile = ${email} AND otp_code = ${rawOtp}
         AND purpose = 'ResetPassword' AND is_used = FALSE AND expires_at > NOW()
       ORDER BY otp_id DESC LIMIT 1`;
     if (!otpRow) return err(res, "Invalid or expired OTP", 400);
