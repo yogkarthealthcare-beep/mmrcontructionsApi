@@ -9545,6 +9545,150 @@ app.get("/api/admin/dashboard",
   }
 );
 
+app.get("/api/admin/dashboard/turnover",
+  verifyAdminToken,
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
+  async (req, res) => {
+    try {
+      const period = String(req.query.period || "monthly").toLowerCase();
+
+      // 1. Customer Collections
+      const customerBookingAdvances = await sql`
+        SELECT b.booking_id AS id, b.advance_amount AS amount, b.booking_date AS tx_date,
+               b.booking_serial, u.full_name AS payer_name, u.email AS payer_email,
+               'Customer' AS category, 'Plot Downpayment' AS tx_type, 'Booking' AS payment_mode
+        FROM bookings b
+        JOIN users u ON b.user_id = u.user_id
+        WHERE b.booking_status <> 'Cancelled' AND u.user_type = 'Customer'
+        ${period === 'monthly' ? sql`AND b.booking_date >= date_trunc('month', CURRENT_DATE)` :
+          period === 'quarterly' ? sql`AND b.booking_date >= date_trunc('quarter', CURRENT_DATE)` :
+          period === 'yearly' ? sql`AND b.booking_date >= date_trunc('year', CURRENT_DATE)` : sql``}
+      `.catch(() => []);
+
+      const customerEmis = await sql`
+        SELECT e.emi_id AS id, e.paid_amount AS amount, COALESCE(e.payment_date, e.updated_at, e.created_at) AS tx_date,
+               b.booking_serial, u.full_name AS payer_name, u.email AS payer_email,
+               'Customer' AS category, 'EMI Payment' AS tx_type, COALESCE(e.payment_mode, 'Online/Bank') AS payment_mode
+        FROM emi_schedules e
+        JOIN bookings b ON e.booking_id = b.booking_id
+        JOIN users u ON b.user_id = u.user_id
+        WHERE e.emi_status = 'Paid' AND u.user_type = 'Customer'
+        ${period === 'monthly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('month', CURRENT_DATE)` :
+          period === 'quarterly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('quarter', CURRENT_DATE)` :
+          period === 'yearly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('year', CURRENT_DATE)` : sql``}
+      `.catch(() => []);
+
+      const customerWallet = await sql`
+        SELECT w.transaction_id AS id, w.amount, w.created_at AS tx_date,
+               '' AS booking_serial, u.full_name AS payer_name, u.email AS payer_email,
+               'Customer' AS category, 'Wallet Topup' AS tx_type, COALESCE(w.payment_method, 'Wallet/Gateway') AS payment_mode
+        FROM wallet_transactions w
+        JOIN users u ON w.user_id = u.user_id
+        WHERE w.type = 'CREDIT' AND w.category IN ('ADD_FUND', 'DEPOSIT') AND u.user_type = 'Customer'
+        ${period === 'monthly' ? sql`AND w.created_at >= date_trunc('month', CURRENT_DATE)` :
+          period === 'quarterly' ? sql`AND w.created_at >= date_trunc('quarter', CURRENT_DATE)` :
+          period === 'yearly' ? sql`AND w.created_at >= date_trunc('year', CURRENT_DATE)` : sql``}
+      `.catch(() => []);
+
+      // 2. Associate Collections
+      const associateBookingAdvances = await sql`
+        SELECT b.booking_id AS id, b.advance_amount AS amount, b.booking_date AS tx_date,
+               b.booking_serial, u.full_name AS payer_name, u.email AS payer_email,
+               'Associate' AS category, 'Associate Plot Booking' AS tx_type, 'Booking' AS payment_mode
+        FROM bookings b
+        JOIN users u ON b.user_id = u.user_id
+        WHERE b.booking_status <> 'Cancelled' AND u.user_type = 'Associate'
+        ${period === 'monthly' ? sql`AND b.booking_date >= date_trunc('month', CURRENT_DATE)` :
+          period === 'quarterly' ? sql`AND b.booking_date >= date_trunc('quarter', CURRENT_DATE)` :
+          period === 'yearly' ? sql`AND b.booking_date >= date_trunc('year', CURRENT_DATE)` : sql``}
+      `.catch(() => []);
+
+      const associateEmis = await sql`
+        SELECT e.emi_id AS id, e.paid_amount AS amount, COALESCE(e.payment_date, e.updated_at, e.created_at) AS tx_date,
+               b.booking_serial, u.full_name AS payer_name, u.email AS payer_email,
+               'Associate' AS category, 'EMI Payment' AS tx_type, COALESCE(e.payment_mode, 'Online/Bank') AS payment_mode
+        FROM emi_schedules e
+        JOIN bookings b ON e.booking_id = b.booking_id
+        JOIN users u ON b.user_id = u.user_id
+        WHERE e.emi_status = 'Paid' AND u.user_type = 'Associate'
+        ${period === 'monthly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('month', CURRENT_DATE)` :
+          period === 'quarterly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('quarter', CURRENT_DATE)` :
+          period === 'yearly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('year', CURRENT_DATE)` : sql``}
+      `.catch(() => []);
+
+      const associateWallet = await sql`
+        SELECT w.transaction_id AS id, w.amount, w.created_at AS tx_date,
+               '' AS booking_serial, u.full_name AS payer_name, u.email AS payer_email,
+               'Associate' AS category, 'Wallet Topup' AS tx_type, COALESCE(w.payment_method, 'Wallet/Gateway') AS payment_mode
+        FROM wallet_transactions w
+        JOIN users u ON w.user_id = u.user_id
+        WHERE w.type = 'CREDIT' AND w.category IN ('ADD_FUND', 'DEPOSIT') AND u.user_type = 'Associate'
+        ${period === 'monthly' ? sql`AND w.created_at >= date_trunc('month', CURRENT_DATE)` :
+          period === 'quarterly' ? sql`AND w.created_at >= date_trunc('quarter', CURRENT_DATE)` :
+          period === 'yearly' ? sql`AND w.created_at >= date_trunc('year', CURRENT_DATE)` : sql``}
+      `.catch(() => []);
+
+      // 3. Investor Collections
+      const investorDeposits = await sql`
+        SELECT d.id, d.amount, COALESCE(d.approved_at, d.created_at) AS tx_date,
+               '' AS booking_serial, iu.full_name AS payer_name, iu.email AS payer_email,
+               'Investor' AS category, 'Capital Deposit' AS tx_type, COALESCE(d.payment_method, 'Bank Transfer') AS payment_mode
+        FROM investor_deposits d
+        JOIN investor_users iu ON d.investor_id = iu.id
+        WHERE d.status IN ('approved', 'Approved') AND (d.deleted_at IS NULL)
+        ${period === 'monthly' ? sql`AND COALESCE(d.approved_at, d.created_at) >= date_trunc('month', CURRENT_DATE)` :
+          period === 'quarterly' ? sql`AND COALESCE(d.approved_at, d.created_at) >= date_trunc('quarter', CURRENT_DATE)` :
+          period === 'yearly' ? sql`AND COALESCE(d.approved_at, d.created_at) >= date_trunc('year', CURRENT_DATE)` : sql``}
+      `.catch(() => []);
+
+      const customerHistory = [...customerBookingAdvances, ...customerEmis, ...customerWallet]
+        .map(i => ({ ...i, amount: Number(i.amount || 0) }))
+        .sort((a, b) => new Date(b.tx_date).getTime() - new Date(a.tx_date).getTime());
+
+      const associateHistory = [...associateBookingAdvances, ...associateEmis, ...associateWallet]
+        .map(i => ({ ...i, amount: Number(i.amount || 0) }))
+        .sort((a, b) => new Date(b.tx_date).getTime() - new Date(a.tx_date).getTime());
+
+      const investorHistory = [...investorDeposits]
+        .map(i => ({ ...i, amount: Number(i.amount || 0) }))
+        .sort((a, b) => new Date(b.tx_date).getTime() - new Date(a.tx_date).getTime());
+
+      const allHistory = [...customerHistory, ...associateHistory, ...investorHistory]
+        .sort((a, b) => new Date(b.tx_date).getTime() - new Date(a.tx_date).getTime());
+
+      const customerTotal = customerHistory.reduce((sum, item) => sum + item.amount, 0);
+      const associateTotal = associateHistory.reduce((sum, item) => sum + item.amount, 0);
+      const investorTotal = investorHistory.reduce((sum, item) => sum + item.amount, 0);
+      const grandTotal = customerTotal + associateTotal + investorTotal;
+
+      return ok(res, {
+        period,
+        totals: {
+          grand_total: grandTotal,
+          customer_total: customerTotal,
+          associate_total: associateTotal,
+          investor_total: investorTotal
+        },
+        counts: {
+          customer_count: customerHistory.length,
+          associate_count: associateHistory.length,
+          investor_count: investorHistory.length,
+          total_count: allHistory.length
+        },
+        history: {
+          customer: customerHistory,
+          associate: associateHistory,
+          investor: investorHistory,
+          all: allHistory
+        }
+      });
+    } catch (e) {
+      console.error("[Turnover API Error]", e);
+      return err(res, "Failed to load turnover analytics");
+    }
+  }
+);
+
 app.get("/api/admin/audit-log",
   verifyAdminToken,
   role("SuperAdmin"),
