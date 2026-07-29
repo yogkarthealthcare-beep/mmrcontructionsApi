@@ -594,6 +594,23 @@ const ensureHomeExperienceSchema = () => {
   return homeExperienceReady;
 };
 
+const publicApiCache = new Map();
+const getCachedOrFetch = async (key, ttlMs, fetchFn) => {
+  const now = Date.now();
+  const cached = publicApiCache.get(key);
+  if (cached && (now - cached.timestamp < ttlMs)) {
+    return cached.data;
+  }
+  const data = await fetchFn();
+  publicApiCache.set(key, { data, timestamp: now });
+  return data;
+};
+const invalidateApiCache = (prefix = '') => {
+  for (const key of publicApiCache.keys()) {
+    if (!prefix || key.startsWith(prefix)) publicApiCache.delete(key);
+  }
+};
+
 const optionalUserToken = async (req, _res, next) => {
   const auth = req.headers.authorization;
   if (!auth?.startsWith("Bearer ")) return next();
@@ -2315,10 +2332,13 @@ app.put("/api/admin/company-settings",
 app.get("/api/home-page/settings", async (_req, res) => {
   try {
     await ensureHomeExperienceSchema();
-    const [settings] = await sql`
-      SELECT display_type, show_hero_slider, show_information_section, section_visibility
-      FROM home_page_settings WHERE id = 1 AND is_active = TRUE AND is_deleted = FALSE`;
-    return ok(res, settings || { display_type: "hero_slider", show_hero_slider: true, show_information_section: true, section_visibility: {} });
+    const settings = await getCachedOrFetch("home-page-settings", 15000, async () => {
+      const [row] = await sql`
+        SELECT display_type, show_hero_slider, show_information_section, section_visibility
+        FROM home_page_settings WHERE id = 1 AND is_active = TRUE AND is_deleted = FALSE`;
+      return row || { display_type: "hero_slider", show_hero_slider: true, show_information_section: true, section_visibility: {} };
+    });
+    return ok(res, settings);
   } catch (e) {
     console.error("[Home Settings Fetch Error]", e);
     return err(res, "Failed to load home page settings");
@@ -2350,15 +2370,21 @@ app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "S
         updated_at = NOW()
       WHERE id = 1 RETURNING *`;
     await logAdminAudit(req, "HomePage", "UpdateSettings", "home_page_settings", 1, sql.json(settings));
+    invalidateApiCache("home-page-settings");
     return ok(res, settings, "Home page settings updated.");
   } catch (e) { return err(res, e.message); }
 });
 
 app.get("/api/investors", async (_req, res) => {
-  try { await ensureHomeExperienceSchema(); return ok(res, await sql`
-    SELECT id, name, profile_image_url, display_order FROM investors
-    WHERE is_active = TRUE AND is_deleted = FALSE ORDER BY display_order ASC, created_at ASC`); }
-  catch (e) { return err(res, "Failed to load investors"); }
+  try {
+    await ensureHomeExperienceSchema();
+    const investors = await getCachedOrFetch("investors", 15000, async () => {
+      return await sql`
+        SELECT id, name, profile_image_url, display_order FROM investors
+        WHERE is_active = TRUE AND is_deleted = FALSE ORDER BY display_order ASC, created_at ASC`;
+    });
+    return ok(res, investors);
+  } catch (e) { return err(res, "Failed to load investors"); }
 });
 
 app.get("/api/admin/investors", verifyAdminToken, role("SuperAdmin", "SiteManager"), async (_req, res) => {
@@ -2403,11 +2429,13 @@ app.delete("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "Sit
 app.get("/api/book-plot/backgrounds", async (_req, res) => {
   try {
     await ensureHomeExperienceSchema();
-    const images = await sql`
-      SELECT id, image_url, alt_text, display_order
-      FROM book_plot_background_images
-      WHERE is_active = TRUE AND is_deleted = FALSE
-      ORDER BY display_order, id`;
+    const images = await getCachedOrFetch("book-plot-backgrounds", 15000, async () => {
+      return await sql`
+        SELECT id, image_url, alt_text, display_order
+        FROM book_plot_background_images
+        WHERE is_active = TRUE AND is_deleted = FALSE
+        ORDER BY display_order, id`;
+    });
     return ok(res, images);
   } catch (e) { return err(res, "Failed to load Book Plot backgrounds"); }
 });
@@ -2540,17 +2568,19 @@ app.get("/api/admin/book-plot/leads/export", verifyAdminToken, role("SuperAdmin"
 app.get("/api/home-sliders", async (_req, res) => {
   try {
     await ensureHomeSlidersSchema();
-    const sliders = await sql`
-      SELECT id, title, subtitle, description, image_url,
-             button_text, button_link, button_icon,
-             button2_text, button2_link, button2_icon,
-             tag_text, tag_icon, thumbnail_url, thumbnail_title, thumbnail_subtitle,
-             stats_json, show_image, show_tag, show_title, show_subtitle,
-             show_description, show_button1, show_button2, show_stats, show_thumbnail,
-             display_order, created_at, updated_at
-      FROM home_sliders
-      WHERE is_active = TRUE
-      ORDER BY display_order ASC, id ASC`;
+    const sliders = await getCachedOrFetch("home-sliders", 15000, async () => {
+      return await sql`
+        SELECT id, title, subtitle, description, image_url,
+               button_text, button_link, button_icon,
+               button2_text, button2_link, button2_icon,
+               tag_text, tag_icon, thumbnail_url, thumbnail_title, thumbnail_subtitle,
+               stats_json, show_image, show_tag, show_title, show_subtitle,
+               show_description, show_button1, show_button2, show_stats, show_thumbnail,
+               display_order, created_at, updated_at
+        FROM home_sliders
+        WHERE is_active = TRUE
+        ORDER BY display_order ASC, id ASC`;
+    });
     return ok(res, sliders, "Active home sliders fetched.");
   } catch (e) {
     console.error("[Home Sliders Fetch Error]", e);
@@ -4590,20 +4620,22 @@ app.get("/api/sites", async (req, res) => {
 app.get("/api/sites/home", async (req, res) => {
   try {
     await ensureSiteHtmlMapSchema();
-    const sites = await sql`
-      SELECT s.site_id, s.site_name, s.site_prefix, s.city, s.state, s.full_address,
-             s.description, s.starting_price, s.total_area, s.highlights,
-             s.property_image_url, s.map_image_url, s.display_on_home_page,
-             s.site_status, s.has_govt_approval,
-             COUNT(p.plot_id)                                             AS total_plots,
-             COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Vacant')    AS vacant,
-             COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'InProcess') AS in_process,
-             COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Booked')    AS booked,
-             COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Sold')      AS sold
-      FROM sites s
-      LEFT JOIN plots p ON s.site_id = p.site_id AND p.is_active = TRUE
-      WHERE s.site_status = 'Active' AND COALESCE(s.display_on_home_page, TRUE) = TRUE
-      GROUP BY s.site_id ORDER BY s.site_id`;
+    const sites = await getCachedOrFetch("sites-home", 15000, async () => {
+      return await sql`
+        SELECT s.site_id, s.site_name, s.site_prefix, s.city, s.state, s.full_address,
+               s.description, s.starting_price, s.total_area, s.highlights,
+               s.property_image_url, s.map_image_url, s.display_on_home_page,
+               s.site_status, s.has_govt_approval,
+               COUNT(p.plot_id)                                             AS total_plots,
+               COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Vacant')    AS vacant,
+               COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'InProcess') AS in_process,
+               COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Booked')    AS booked,
+               COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Sold')      AS sold
+        FROM sites s
+        LEFT JOIN plots p ON s.site_id = p.site_id AND p.is_active = TRUE
+        WHERE s.site_status = 'Active' AND COALESCE(s.display_on_home_page, TRUE) = TRUE
+        GROUP BY s.site_id ORDER BY s.site_id`;
+    });
     return ok(res, sites);
   } catch (e) {
     return err(res, e.message);
@@ -9825,6 +9857,11 @@ if (shouldStartServer) {
   const server = app.listen(PORT, "0.0.0.0", async () => {
     try {
       await requirePlotManagementSchema();
+      await Promise.all([
+        ensureHomeExperienceSchema().catch(() => {}),
+        ensureHomeSlidersSchema().catch(() => {}),
+        ensureSiteHtmlMapSchema().catch(() => {}),
+      ]);
     } catch (error) {
       console.error("[MMR API] Plot management schema initialization failed", {
         message: error.message,
