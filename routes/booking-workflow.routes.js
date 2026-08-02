@@ -188,25 +188,83 @@ async function bookingDetails(bookingId, userId = null) {
 }
 
 async function ensureInvoice(db, booking, paymentId = null) {
-  const number = invoiceNumber(booking.booking_id);
+  const currentYear = new Date().getFullYear();
+  let [inv] = await db`SELECT * FROM invoices WHERE booking_id = ${booking.booking_id}`;
+  let number = inv ? inv.invoice_number : null;
+
+  if (!number) {
+    const [seqRow] = await db`
+      INSERT INTO invoice_number_sequence (year, last_sequence)
+      VALUES (${currentYear}, 1)
+      ON CONFLICT (year) DO UPDATE SET last_sequence = invoice_number_sequence.last_sequence + 1, updated_at = NOW()
+      RETURNING last_sequence`;
+    const seq = seqRow ? seqRow.last_sequence : 1;
+    number = `MMR-${currentYear}-${String(seq).padStart(6, "0")}`;
+  }
+
+  let associateId = null;
+  let associateName = null;
+  let associateMobile = null;
+  const [ref] = await db`
+    SELECT sponsor_user_id FROM referral_registrations WHERE referred_user_id = ${booking.user_id}`;
+  if (ref) {
+    const [assoc] = await db`SELECT user_id, full_name, mobile_no FROM users WHERE user_id = ${ref.sponsor_user_id}`;
+    if (assoc) {
+      associateId = assoc.user_id;
+      associateName = assoc.full_name;
+      associateMobile = assoc.mobile_no;
+    }
+  }
+
+  const totalPlotPrice = money(booking.base_price || (booking.plot_area * 1000) || 0);
+  const paidAmt = money(booking.required_booking_amount || booking.advance_amount || booking.booking_amount || 0);
+  const remBalance = money(booking.remaining_balance || Math.max(0, totalPlotPrice - paidAmt));
+
   const invoiceData = {
     invoice_number: number,
     booking_id: booking.booking_id,
-    booking_serial: booking.booking_serial,
+    booking_serial: booking.booking_serial || `BK-${booking.booking_id}`,
     customer_name: booking.full_name,
     mobile_no: booking.mobile_no,
     email: booking.email,
+    site_name: booking.site_name,
     plot_number: booking.plot_number,
-    plot_size: `${booking.plot_area} ${booking.plot_category || ""}`.trim(),
-    plot_price: money(booking.base_price),
-    booking_amount_paid: money(booking.required_booking_amount || booking.advance_amount),
-    remaining_balance: money(booking.remaining_balance),
-    emi_amount: money(booking.monthly_emi),
-    emi_tenure_months: Number(booking.emi_tenure_months || 0),
-    payment_method: booking.payment_method,
+    plot_size: `${booking.plot_area} ${booking.plot_category || "Sq.Ft."}`.trim(),
+    plot_area_sqft: Number(booking.plot_area || 0),
+    rate_per_sqft: booking.plot_area ? Math.round(totalPlotPrice / booking.plot_area) : 0,
+    total_plot_price: totalPlotPrice,
+    discount: 0,
+    registration_charges: 0,
+    other_charges: 0,
+    grand_total: totalPlotPrice,
+    paid_amount: paidAmt,
+    balance_amount: remBalance,
+    payment_method: booking.payment_method || "Online",
+    payment_status: "Paid",
+    order_status: "Completed",
     booking_date: booking.booking_date,
-    project_name: booking.site_name,
+    associate_id: associateId,
+    associate_name: associateName,
+    associate_mobile: associateMobile,
   };
+
+  await db`
+    INSERT INTO invoices (
+      invoice_number, booking_id, user_id, associate_id, payment_id, order_id, invoice_date,
+      subtotal, grand_total, paid_amount, balance_amount, payment_method,
+      payment_status, order_status, invoice_data, verification_token
+    ) VALUES (
+      ${number}, ${booking.booking_id}, ${booking.user_id}, ${associateId}, ${paymentId}, ${booking.booking_serial || `ORDER-${booking.booking_id}`}, ${booking.booking_date || new Date()},
+      ${totalPlotPrice}, ${totalPlotPrice}, ${paidAmt}, ${remBalance}, ${booking.payment_method || "Online"},
+      'Paid', 'Completed', ${db.json(invoiceData)}, ${number}
+    )
+    ON CONFLICT (booking_id) DO UPDATE SET
+      payment_id = COALESCE(EXCLUDED.payment_id, invoices.payment_id),
+      invoice_data = EXCLUDED.invoice_data,
+      paid_amount = EXCLUDED.paid_amount,
+      balance_amount = EXCLUDED.balance_amount,
+      updated_at = NOW()`;
+
   await db`
     INSERT INTO booking_invoices (invoice_number, booking_id, user_id, payment_id, invoice_data)
     VALUES (${number}, ${booking.booking_id}, ${booking.user_id}, ${paymentId}, ${db.json(invoiceData)})
@@ -214,6 +272,7 @@ async function ensureInvoice(db, booking, paymentId = null) {
       payment_id = COALESCE(EXCLUDED.payment_id, booking_invoices.payment_id),
       invoice_data = EXCLUDED.invoice_data,
       updated_at = NOW()`;
+
   return invoiceData;
 }
 

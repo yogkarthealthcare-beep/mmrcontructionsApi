@@ -23,6 +23,7 @@ import bookingWorkflowRoutes from './routes/booking-workflow.routes.js';
 import databaseBackupRoutes from './routes/database-backup.routes.js';
 import whatsappRoutes, { whatsappEvents } from './routes/whatsapp.routes.js';
 import investorRoutes from './routes/investor.routes.js';
+import invoiceModuleRoutes from './routes/invoice-module.routes.js';
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
 
@@ -147,6 +148,7 @@ app.use('/api', bookingWorkflowRoutes);
 app.use('/api', databaseBackupRoutes);
 app.use('/api', whatsappRoutes);
 app.use('/api', investorRoutes);
+app.use('/api', invoiceModuleRoutes);
 // ─── Cloudinary Config ────────────────────────────────────────
 const envValue = (key) => (process.env[key] || "").trim();
 cloudinary.config({
@@ -3653,6 +3655,9 @@ app.post("/api/auth/register", upload.fields([
       if (!sponsor) return err(res, "Invalid sponsor invitation code", 400);
       sponsorUserId = sponsor.user_id;
     }
+    if (!sponsorUserId && user_type !== "Investor") {
+      sponsorUserId = await getDefaultSponsorUserId();
+    }
 
     // ── Hash password if provided ──
     const passwordHash = password ? await bcrypt.hash(password, 12) : null;
@@ -3770,6 +3775,9 @@ app.post("/api/auth/register-quick", async (req, res) => {
           AND account_status = 'Active'`;
       if (!sponsor) return err(res, "Invalid sponsor invitation code", 400);
       sponsorUserId = sponsor.user_id;
+    }
+    if (!sponsorUserId && user_type !== "Investor") {
+      sponsorUserId = await getDefaultSponsorUserId();
     }
 
     const passwordHash = await bcrypt.hash(password, 12);
@@ -5493,6 +5501,71 @@ app.get("/api/associate/referral-link", verifyUserToken, requireAssociate, async
     if (!user || user.user_type !== "Associate" || user.account_status !== "Active")
       return err(res, "Only active associates can access referral link", 403);
     return ok(res, await ensureAssociateReferralLink(req, user));
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+const getDefaultSponsorUserId = async () => {
+  const [defaultUser] = await sql`
+    SELECT user_id FROM users
+    WHERE LOWER(email) = 'mmrconstructions@hotmail.com' OR mobile_no = '7071951011' OR user_id = 1 OR member_id = 'MMR-ASC-0001'
+    ORDER BY user_id ASC LIMIT 1`;
+  return defaultUser?.user_id || 1;
+};
+
+const ensureAdminReferralLink = async (req) => {
+  await requireMlmSchema();
+  const passwordHash = await bcrypt.hash("Mmr@2026", 12);
+  let [adminAssoc] = await sql`
+    SELECT user_id, invitation_code, member_id, full_name, email, user_type, account_status
+    FROM users
+    WHERE LOWER(email) = 'mmrconstructions@hotmail.com' OR mobile_no = '7071951011' OR user_id = 1 OR member_id = 'MMR-ASC-0001'
+    ORDER BY user_id ASC
+    LIMIT 1`;
+
+  if (!adminAssoc) {
+    const [inserted] = await sql`
+      INSERT INTO users (user_id, member_id, full_name, email, mobile_no, password_hash, user_type, account_status, invitation_code, is_active, is_verified)
+      VALUES (1, 'MMR-ASC-0001', 'Suraj Kumar Verma', 'mmrconstructions@hotmail.com', '7071951011', ${passwordHash}, 'Associate', 'Active', 'MMR0001', TRUE, TRUE)
+      ON CONFLICT (user_id) DO UPDATE SET
+        full_name = EXCLUDED.full_name,
+        email = EXCLUDED.email,
+        mobile_no = EXCLUDED.mobile_no,
+        account_status = 'Active',
+        is_active = TRUE
+      RETURNING user_id, invitation_code, member_id, full_name, email, user_type, account_status`;
+    adminAssoc = inserted;
+  }
+
+  const link = await ensureAssociateReferralLink(req, adminAssoc);
+  return {
+    user_id: adminAssoc.user_id,
+    full_name: adminAssoc.full_name,
+    member_id: adminAssoc.member_id || 'MMR-ASC-0001',
+    invite_code: link.invite_code,
+    referral_url: link.referral_url,
+    total_clicks: Number(link.total_clicks || 0),
+    total_registrations: Number(link.total_registrations || 0),
+  };
+};
+
+app.get("/api/admin/referral-link", verifyAdminToken, async (req, res) => {
+  try {
+    const adminLink = await ensureAdminReferralLink(req);
+    return ok(res, adminLink);
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+app.post("/api/admin/referral-link/regenerate", verifyAdminToken, async (req, res) => {
+  try {
+    const adminLink = await ensureAdminReferralLink(req);
+    const inviteCode = `MMR0001`;
+    await sql`UPDATE users SET invitation_code = ${inviteCode}, updated_at = NOW() WHERE user_id = ${adminLink.user_id}`;
+    const updatedLink = await ensureAssociateReferralLink(req, { ...adminLink, user_id: adminLink.user_id, invitation_code: inviteCode });
+    return ok(res, { ...adminLink, ...updatedLink }, "Admin referral link refreshed");
   } catch (e) {
     return err(res, e.message);
   }
