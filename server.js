@@ -24,7 +24,11 @@ import databaseBackupRoutes from './routes/database-backup.routes.js';
 import whatsappRoutes, { whatsappEvents } from './routes/whatsapp.routes.js';
 import investorRoutes from './routes/investor.routes.js';
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
+import { inject } from '@vercel/analytics';
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
+
+// Initialize Vercel Web Analytics
+inject()
 
 
 const app = express();
