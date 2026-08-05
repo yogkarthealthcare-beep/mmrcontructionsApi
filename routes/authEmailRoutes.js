@@ -155,7 +155,7 @@ async function findSponsorByCode(code) {
   await ensureReferralLinkTable();
 
   const [sponsor] = await sql`
-    SELECT DISTINCT u.user_id
+    SELECT DISTINCT u.user_id, u.full_name, u.member_id, u.invitation_code
     FROM users u
     LEFT JOIN associate_referral_links l
       ON l.associate_user_id = u.user_id
@@ -172,6 +172,52 @@ async function findSponsorByCode(code) {
 
   return sponsor || null;
 }
+
+router.get('/verify-sponsor/:code', async (req, res) => {
+  try {
+    const code = req.params.code;
+    const sponsor = await findSponsorByCode(code);
+    if (!sponsor) {
+      return res.status(404).json({
+        success: false,
+        message: 'Invalid sponsor code. No active associate found with this code.',
+      });
+    }
+    return ok(res, {
+      valid: true,
+      user_id: sponsor.user_id,
+      full_name: sponsor.full_name,
+      member_id: sponsor.member_id,
+      invitation_code: sponsor.invitation_code || sponsor.member_id,
+    }, 'Sponsor found');
+  } catch (e) {
+    console.error('[verify-sponsor]', e);
+    return err(res, e.message || 'Failed to verify sponsor code');
+  }
+});
+
+router.get('/referral/validate/:code', async (req, res) => {
+  try {
+    const code = req.params.code;
+    const sponsor = await findSponsorByCode(code);
+    if (!sponsor) {
+      return res.status(404).json({
+        success: false,
+        message: 'Invalid referral/sponsor code.',
+      });
+    }
+    return ok(res, {
+      valid: true,
+      user_id: sponsor.user_id,
+      full_name: sponsor.full_name,
+      member_id: sponsor.member_id,
+      invitation_code: sponsor.invitation_code || sponsor.member_id,
+    }, 'Referral code valid');
+  } catch (e) {
+    console.error('[referral/validate]', e);
+    return err(res, e.message || 'Failed to validate referral code');
+  }
+});
 
 async function canResend(email) {
   await ensurePendingRegistrationTable();
@@ -215,7 +261,8 @@ async function validateSignupInput(body) {
   const userType = body.user_type || 'Customer';
   const email = normalizeEmail(body.email);
   const mobileNo = normalizeMobileNo(body.mobile_no);
-  const sponsorInviteCode = normalizeSponsorCode(body.sponsor_invite_code);
+  const DEFAULT_SPONSOR_CODE = 'MMR0001';
+  const effectiveSponsorCode = normalizeSponsorCode(body.sponsor_invite_code) || DEFAULT_SPONSOR_CODE;
   const fullName = body.full_name?.trim();
   const validationErrors = [];
 
@@ -224,7 +271,7 @@ async function validateSignupInput(body) {
     email,
     mobile_no: mobileNo,
     full_name_present: Boolean(fullName),
-    sponsor_invite_code_present: Boolean(sponsorInviteCode),
+    sponsor_invite_code: effectiveSponsorCode,
   });
 
   if (!fullName) validationErrors.push('Full name is required');
@@ -264,19 +311,16 @@ async function validateSignupInput(body) {
     return { error: 'Mobile number already registered', status: 409 };
   }
 
-  let sponsorUserId = null;
-  if (sponsorInviteCode) {
-    console.log('[Associate Registration] Validating sponsor invite code...');
-    const sponsor = await findSponsorByCode(sponsorInviteCode);
-    if (!sponsor) {
-      console.error('[Associate Registration] Invalid sponsor invitation code:', {
-        sponsor_invite_code: sponsorInviteCode,
-      });
-      return { error: 'Invalid sponsor invitation code', status: 400 };
-    }
-    sponsorUserId = sponsor.user_id;
-    console.log('[Associate Registration] Sponsor found:', { sponsor_user_id: sponsorUserId });
+  console.log('[Associate Registration] Validating sponsor invite code...', { effectiveSponsorCode });
+  const sponsor = await findSponsorByCode(effectiveSponsorCode);
+  if (!sponsor) {
+    console.error('[Associate Registration] Invalid sponsor invitation code:', {
+      sponsor_invite_code: effectiveSponsorCode,
+    });
+    return { error: 'Invalid sponsor code. Associate sponsor not found or inactive.', status: 400 };
   }
+  const sponsorUserId = sponsor.user_id;
+  console.log('[Associate Registration] Sponsor found:', { sponsor_user_id: sponsorUserId, full_name: sponsor.full_name });
 
   console.log('[Associate Registration] Validation Passed');
 
@@ -288,7 +332,7 @@ async function validateSignupInput(body) {
       fullName,
       password: body.password,
       sponsorUserId,
-      sponsorInviteCode: sponsorInviteCode || null,
+      sponsorInviteCode: effectiveSponsorCode,
       optionalData: {},
     },
   };
@@ -542,13 +586,37 @@ router.post('/verify-email-otp', async (req, res) => {
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
         await tx`
-          INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, registration_source, status)
-          VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, ${pending.sponsor_invite_code}, 'Signup', 'Pending')
-          ON CONFLICT (referred_user_id) DO NOTHING`;
+          INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, registration_source, status, approved_at)
+          VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, ${pending.sponsor_invite_code}, 'Signup', 'Approved', NOW())
+          ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
         await tx`
           UPDATE associate_referral_links
           SET total_registrations = total_registrations + 1, updated_at = NOW()
           WHERE associate_user_id = ${pending.sponsor_user_id}`;
+        await tx`
+          INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
+          VALUES (${createdUser.user_id}, ${pending.sponsor_user_id},
+            COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${pending.sponsor_user_id}), 0) + 1)
+          ON CONFLICT (associate_user_id) DO NOTHING`;
+        await tx`
+          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+          VALUES (${createdUser.user_id}, ${createdUser.user_id}, 0)
+          ON CONFLICT DO NOTHING`;
+        await tx`
+          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+          SELECT ancestor_user_id, ${createdUser.user_id}, depth + 1
+          FROM mlm_tree_closure
+          WHERE descendant_user_id = ${pending.sponsor_user_id}
+          ON CONFLICT DO NOTHING`;
+        await tx`
+          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+          VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, 1)
+          ON CONFLICT DO NOTHING`;
+      } else {
+        await tx`
+          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+          VALUES (${createdUser.user_id}, ${createdUser.user_id}, 0)
+          ON CONFLICT DO NOTHING`;
       }
 
       await tx`DELETE FROM pending_registrations WHERE email = ${email}`;

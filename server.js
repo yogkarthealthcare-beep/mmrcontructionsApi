@@ -26,7 +26,9 @@ import investorRoutes from './routes/investor.routes.js';
 import invoiceModuleRoutes from './routes/invoice-module.routes.js';
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
+import { inject } from "@vercel/analytics";
 
+inject();
 
 const app = express();
 app.set("trust proxy", 1);
@@ -1389,13 +1391,58 @@ const ensureAssociateReferralLink = async (req, associate) => {
   return link;
 };
 
+const syncMlmTreeAndReferrals = async () => {
+  try {
+    await sql`
+      INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+      SELECT user_id, user_id, 0 FROM users
+      ON CONFLICT DO NOTHING`;
+
+    const sponsoredUsers = await sql`
+      SELECT user_id, sponsor_user_id, invitation_code FROM users WHERE sponsor_user_id IS NOT NULL`;
+
+    for (const u of sponsoredUsers) {
+      await sql`
+        INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
+        VALUES (${u.sponsor_user_id}, ${u.user_id}, 'Approved', NOW())
+        ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
+
+      await sql`
+        INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
+        VALUES (${u.user_id}, ${u.sponsor_user_id},
+          COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${u.sponsor_user_id}), 0) + 1)
+        ON CONFLICT (associate_user_id) DO NOTHING`;
+
+      await sql`
+        INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+        VALUES (${u.sponsor_user_id}, ${u.user_id}, 1)
+        ON CONFLICT DO NOTHING`;
+
+      await sql`
+        INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+        SELECT ancestor_user_id, ${u.user_id}, depth + 1
+        FROM mlm_tree_closure
+        WHERE descendant_user_id = ${u.sponsor_user_id}
+        ON CONFLICT DO NOTHING`;
+    }
+  } catch (err) {
+    console.error('[syncMlmTreeAndReferrals] Error syncing tree closure:', err);
+  }
+};
+
 const linkApprovedReferral = async (userId) => {
   await requireMlmSchema();
   const [user] = await sql`SELECT user_id, sponsor_user_id, invitation_code FROM users WHERE user_id = ${userId}`;
-  if (!user?.sponsor_user_id) return;
+  if (!user?.sponsor_user_id) {
+    await sql`
+      INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+      VALUES (${userId}, ${userId}, 0)
+      ON CONFLICT DO NOTHING`;
+    return;
+  }
   await sql`
     INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, status, approved_at)
-    VALUES (${user.sponsor_user_id}, ${user.user_id}, ${null}, 'Approved', NOW())
+    VALUES (${user.sponsor_user_id}, ${user.user_id}, ${user.invitation_code || null}, 'Approved', NOW())
     ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
   await sql`
     INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
@@ -5397,6 +5444,7 @@ app.get("/api/dashboard", verifyUserToken, async (req, res) => {
 
 app.get("/api/associate/network", verifyUserToken, requireAssociate, async (req, res) => {
   try {
+    await syncMlmTreeAndReferrals();
     const network = await sql`
       SELECT u.user_id, u.member_id, u.full_name, u.mobile_no,
              u.email, u.sponsor_user_id, u.account_status, u.registered_at,
@@ -5615,6 +5663,7 @@ app.get("/api/associate/referrals", verifyUserToken, requireAssociate, async (re
 app.get("/api/associate/network/tree", verifyUserToken, requireAssociate, async (req, res) => {
   try {
     await requireMlmSchema();
+    await syncMlmTreeAndReferrals();
     const rows = await sql`
       SELECT u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id,
              u.account_status AS status, COALESCE(r.rank_name, 'Associate') AS rank,
@@ -8677,6 +8726,7 @@ app.get("/api/admin/associates/:id/network-tree",
   async (req, res) => {
     try {
       await requireMlmSchema();
+      await syncMlmTreeAndReferrals();
       const rows = await sql`
         SELECT u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id,
                u.account_status AS status, COALESCE(r.rank_name, 'Associate') AS rank,
