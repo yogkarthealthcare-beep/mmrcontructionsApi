@@ -9702,16 +9702,16 @@ app.get("/api/admin/dashboard/turnover",
       `.catch(() => []);
 
       const customerWallet = await sql`
-        SELECT w.transaction_id AS id, w.amount, w.created_at AS tx_date,
+        SELECT w.id AS id, w.amount, w.created_at AS tx_date,
                '' AS booking_serial, u.full_name AS payer_name, u.email AS payer_email,
-               'Customer' AS category, 'Wallet Topup' AS tx_type, COALESCE(w.payment_method, 'Wallet/Gateway') AS payment_mode
+               'Customer' AS category, 'Wallet Topup' AS tx_type, COALESCE(w.payment_gateway, 'Wallet/Gateway') AS payment_mode
         FROM wallet_transactions w
         JOIN users u ON w.user_id = u.user_id
-        WHERE w.type = 'CREDIT' AND w.category IN ('ADD_FUND', 'DEPOSIT') AND u.user_type = 'Customer'
+        WHERE w.transaction_type = 'credit' AND w.source IN ('Add Fund', 'Deposit') AND w.status = 'success' AND u.user_type = 'Customer'
         ${period === 'monthly' ? sql`AND w.created_at >= date_trunc('month', CURRENT_DATE)` :
           period === 'quarterly' ? sql`AND w.created_at >= date_trunc('quarter', CURRENT_DATE)` :
           period === 'yearly' ? sql`AND w.created_at >= date_trunc('year', CURRENT_DATE)` : sql``}
-      `.catch(() => []);
+      `.catch((e) => { console.error("[customerWallet error]", e); return []; });
 
       // 2. Associate Collections
       const associateBookingAdvances = await sql`
@@ -9740,16 +9740,16 @@ app.get("/api/admin/dashboard/turnover",
       `.catch(() => []);
 
       const associateWallet = await sql`
-        SELECT w.transaction_id AS id, w.amount, w.created_at AS tx_date,
+        SELECT w.id AS id, w.amount, w.created_at AS tx_date,
                '' AS booking_serial, u.full_name AS payer_name, u.email AS payer_email,
-               'Associate' AS category, 'Wallet Topup' AS tx_type, COALESCE(w.payment_method, 'Wallet/Gateway') AS payment_mode
+               'Associate' AS category, 'Wallet Topup' AS tx_type, COALESCE(w.payment_gateway, 'Wallet/Gateway') AS payment_mode
         FROM wallet_transactions w
         JOIN users u ON w.user_id = u.user_id
-        WHERE w.type = 'CREDIT' AND w.category IN ('ADD_FUND', 'DEPOSIT') AND u.user_type = 'Associate'
+        WHERE w.transaction_type = 'credit' AND w.source IN ('Add Fund', 'Deposit') AND w.status = 'success' AND u.user_type = 'Associate'
         ${period === 'monthly' ? sql`AND w.created_at >= date_trunc('month', CURRENT_DATE)` :
           period === 'quarterly' ? sql`AND w.created_at >= date_trunc('quarter', CURRENT_DATE)` :
           period === 'yearly' ? sql`AND w.created_at >= date_trunc('year', CURRENT_DATE)` : sql``}
-      `.catch(() => []);
+      `.catch((e) => { console.error("[associateWallet error]", e); return []; });
 
       // 3. Investor Collections
       const investorDeposits = await sql`

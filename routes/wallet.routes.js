@@ -336,9 +336,18 @@ router.post("/wallet/add-fund/verify", authUser, validateBody(verifyFundSchema),
       });
 
       const updatedWallet = finalWallet || await getOrCreateWallet(userId, txRecord.user_role);
-      return ok(res, { balance: updatedWallet.available_balance }, "Wallet fund added successfully!");
+      console.log(`[POST /wallet/add-fund/verify] Wallet updated successfully. UserId: ${userId}, New Balance: INR ${updatedWallet.available_balance}`);
+
+      return ok(res, {
+        balance: updatedWallet.available_balance,
+        order_id: txRecord.payment_order_id,
+        transaction_id: txRecord.id,
+        amount: Number(txRecord.amount),
+        gateway: gateway_name
+      }, "Wallet fund added successfully!");
     } else {
       // Payment verification failed
+      console.warn(`[POST /wallet/add-fund/verify] Payment verification returned failed status for order_id: ${order_id}`);
       await sql`
         UPDATE wallet_transactions SET
           status = 'failed',
@@ -346,7 +355,7 @@ router.post("/wallet/add-fund/verify", authUser, validateBody(verifyFundSchema),
           updated_at = NOW()
         WHERE id = ${txRecord.id}
       `;
-      return res.status(400).json({ success: false, message: "Payment verification failed." });
+      return res.status(400).json({ success: false, message: verificationResult.message || "Payment verification failed." });
     }
   } catch (e) {
     console.error("[POST /wallet/add-fund/verify Error]", e);
@@ -607,6 +616,54 @@ router.get("/wallet/withdraw-requests", authUser, async (req, res) => {
 });
 
 // ─── ADMIN APIS ───────────────────────────────────────────────
+
+// GET /api/admin/wallet/transactions - Return all wallet transactions (Add Fund, Withdrawals, etc) with filters
+router.get("/admin/wallet/transactions", authAdmin, async (req, res) => {
+  try {
+    const { status, transaction_type, source, user_role, search, start_date, end_date } = req.query;
+
+    console.log("[GET /admin/wallet/transactions] Query parameters:", req.query);
+
+    let query = sql`
+      SELECT wt.*, u.full_name as user_name, u.email as user_email, u.mobile_no as user_mobile
+      FROM wallet_transactions wt
+      JOIN users u ON wt.user_id = u.user_id
+      WHERE 1=1
+    `;
+
+    if (status) {
+      query = sql`${query} AND wt.status = ${status}`;
+    }
+    if (transaction_type) {
+      query = sql`${query} AND wt.transaction_type = ${transaction_type}`;
+    }
+    if (source) {
+      query = sql`${query} AND wt.source = ${source}`;
+    }
+    if (user_role) {
+      query = sql`${query} AND wt.user_role = ${user_role}`;
+    }
+    if (search) {
+      const searchWild = `%${search}%`;
+      query = sql`${query} AND (u.full_name ILIKE ${searchWild} OR u.email ILIKE ${searchWild} OR u.mobile_no ILIKE ${searchWild} OR wt.payment_order_id ILIKE ${searchWild} OR wt.payment_transaction_id ILIKE ${searchWild} OR wt.id::text ILIKE ${searchWild})`;
+    }
+    if (start_date) {
+      query = sql`${query} AND wt.created_at >= ${start_date}`;
+    }
+    if (end_date) {
+      query = sql`${query} AND wt.created_at <= ${end_date}`;
+    }
+
+    query = sql`${query} ORDER BY wt.created_at DESC`;
+
+    const transactions = await query;
+    console.log(`[GET /admin/wallet/transactions] Loaded ${transactions.length} transaction records.`);
+    return ok(res, transactions, "Admin wallet transactions loaded successfully.");
+  } catch (e) {
+    console.error("[GET /admin/wallet/transactions Error]", e);
+    return err(res, "Failed to load wallet transactions for admin.");
+  }
+});
 
 // GET /api/admin/withdrawal-requests - Return all withdrawal requests with filters
 router.get("/admin/withdrawal-requests", authAdmin, async (req, res) => {
