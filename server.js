@@ -10079,6 +10079,401 @@ app.get("/health", async (req, res) => {
   }
 });
 
+/* ==========================================================================
+   ANALYTICS & REPORTING SYSTEM
+   ========================================================================== */
+let analyticsSchemaReady;
+const ensureAnalyticsSchema = () => {
+  if (!analyticsSchemaReady) {
+    analyticsSchemaReady = (async () => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS analytics_events (
+          event_id BIGSERIAL PRIMARY KEY,
+          event_name VARCHAR(60) NOT NULL,
+          page_url TEXT,
+          page_title VARCHAR(255),
+          site_id INTEGER,
+          plot_id INTEGER,
+          user_id INTEGER,
+          visitor_id VARCHAR(100),
+          session_id VARCHAR(100),
+          device_type VARCHAR(30),
+          browser VARCHAR(60),
+          os VARCHAR(60),
+          city VARCHAR(100),
+          state VARCHAR(100),
+          country VARCHAR(100),
+          referrer TEXT,
+          utm_source VARCHAR(100),
+          search_term VARCHAR(255),
+          response_time_ms INTEGER,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_analytics_events_created ON analytics_events (created_at DESC)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_analytics_events_name ON analytics_events (event_name)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_analytics_events_site ON analytics_events (site_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor ON analytics_events (visitor_id)`;
+    })();
+  }
+  return analyticsSchemaReady;
+};
+
+// Public tracking API endpoint
+app.post("/api/analytics/track", async (req, res) => {
+  try {
+    await ensureAnalyticsSchema();
+    const eventName = safeNullableText(req.body?.event_name || 'page_view', 60);
+    const pageUrl = safeNullableText(req.body?.page_url, 1000);
+    const pageTitle = safeNullableText(req.body?.page_title, 255);
+    const siteId = req.body?.site_id ? Number(req.body.site_id) : null;
+    const plotId = req.body?.plot_id ? Number(req.body.plot_id) : null;
+    const userId = req.body?.user_id ? Number(req.body.user_id) : null;
+    const visitorId = safeNullableText(req.body?.visitor_id, 100) || 'anon';
+    const sessionId = safeNullableText(req.body?.session_id, 100);
+    const deviceType = safeNullableText(req.body?.device_type, 30) || 'Desktop';
+    const browser = safeNullableText(req.body?.browser, 60);
+    const os = safeNullableText(req.body?.os, 60);
+    const city = safeNullableText(req.body?.city, 100);
+    const state = safeNullableText(req.body?.state, 100);
+    const country = safeNullableText(req.body?.country, 100) || 'India';
+    const referrer = safeNullableText(req.body?.referrer, 1000);
+    const utmSource = safeNullableText(req.body?.utm_source, 100) || (referrer ? (referrer.includes('google') ? 'Google Search' : referrer.includes('facebook') ? 'Facebook' : referrer.includes('instagram') ? 'Instagram' : 'Direct/Referral') : 'Direct');
+    const searchTerm = safeNullableText(req.body?.search_term, 255);
+
+    await sql`
+      INSERT INTO analytics_events (
+        event_name, page_url, page_title, site_id, plot_id, user_id, visitor_id, session_id,
+        device_type, browser, os, city, state, country, referrer, utm_source, search_term
+      ) VALUES (
+        ${eventName}, ${pageUrl}, ${pageTitle}, ${siteId}, ${plotId}, ${userId}, ${visitorId}, ${sessionId},
+        ${deviceType}, ${browser}, ${os}, ${city}, ${state}, ${country}, ${referrer}, ${utmSource}, ${searchTerm}
+      )`;
+
+    return ok(res, {}, "Tracked");
+  } catch (e) {
+    return res.status(200).json({ success: true, tracked: false });
+  }
+});
+
+// Admin Analytics Multi-Dimensional Data API
+app.get("/api/admin/analytics",
+  verifyAdminToken,
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
+  async (req, res) => {
+    try {
+      await ensureAnalyticsSchema();
+      await ensureInquirySchema();
+
+      const preset = req.query.preset || '30d';
+      const siteIdFilter = req.query.site_id ? Number(req.query.site_id) : null;
+      let startDateStr, endDateStr, prevStartDateStr, prevEndDateStr;
+
+      const now = new Date();
+      if (preset === 'today') {
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+        startDateStr = today.toISOString();
+        endDateStr = now.toISOString();
+        prevStartDateStr = yesterday.toISOString();
+        prevEndDateStr = today.toISOString();
+      } else if (preset === 'yesterday') {
+        const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const dayBefore = new Date(yesterday); dayBefore.setDate(yesterday.getDate() - 1);
+        startDateStr = yesterday.toISOString();
+        endDateStr = today.toISOString();
+        prevStartDateStr = dayBefore.toISOString();
+        prevEndDateStr = yesterday.toISOString();
+      } else if (preset === '7d') {
+        const d7 = new Date(now.getTime() - 7 * 86400000);
+        const d14 = new Date(now.getTime() - 14 * 86400000);
+        startDateStr = d7.toISOString();
+        endDateStr = now.toISOString();
+        prevStartDateStr = d14.toISOString();
+        prevEndDateStr = d7.toISOString();
+      } else if (preset === 'this_month') {
+        const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+        const prevMonthFirst = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        startDateStr = firstDay.toISOString();
+        endDateStr = now.toISOString();
+        prevStartDateStr = prevMonthFirst.toISOString();
+        prevEndDateStr = firstDay.toISOString();
+      } else if (preset === 'last_month') {
+        const firstDay = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const lastDay = new Date(now.getFullYear(), now.getMonth(), 1);
+        const prevMonthFirst = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+        startDateStr = firstDay.toISOString();
+        endDateStr = lastDay.toISOString();
+        prevStartDateStr = prevMonthFirst.toISOString();
+        prevEndDateStr = firstDay.toISOString();
+      } else if (preset === 'this_year') {
+        const firstDay = new Date(now.getFullYear(), 0, 1);
+        const prevYearFirst = new Date(now.getFullYear() - 1, 0, 1);
+        startDateStr = firstDay.toISOString();
+        endDateStr = now.toISOString();
+        prevStartDateStr = prevYearFirst.toISOString();
+        prevEndDateStr = firstDay.toISOString();
+      } else if (preset === 'custom' && req.query.startDate && req.query.endDate) {
+        startDateStr = new Date(req.query.startDate).toISOString();
+        endDateStr = new Date(req.query.endDate).toISOString();
+        const diff = new Date(endDateStr).getTime() - new Date(startDateStr).getTime();
+        prevStartDateStr = new Date(new Date(startDateStr).getTime() - diff).toISOString();
+        prevEndDateStr = startDateStr;
+      } else { // default 30d
+        const d30 = new Date(now.getTime() - 30 * 86400000);
+        const d60 = new Date(now.getTime() - 60 * 86400000);
+        startDateStr = d30.toISOString();
+        endDateStr = now.toISOString();
+        prevStartDateStr = d60.toISOString();
+        prevEndDateStr = d30.toISOString();
+      }
+
+      // Overview KPIs
+      const [
+        totalUsersRow, newUsersRow, prevNewUsersRow,
+        totalInvestorsRow, newInvestorsRow, prevNewInvestorsRow,
+        enquiriesRow, prevEnquiriesRow, newEnquiriesRow,
+        bookingsRow, prevBookingsRow, pendingBookingsRow, confirmedBookingsRow, cancelledBookingsRow,
+        revenueRow, prevRevenueRow, pendingPaymentsRow, successfulPaymentsRow,
+        visitorsRow, prevVisitorsRow, uniqueVisitorsRow,
+        liveVisitorsRow
+      ] = await Promise.all([
+        sql`SELECT COUNT(*)::int AS count FROM users WHERE account_status = 'Active'`,
+        sql`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= ${prevStartDateStr} AND created_at < ${startDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM investors WHERE is_deleted = FALSE`,
+        sql`SELECT COUNT(*)::int AS count FROM investors WHERE is_deleted = FALSE AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM investors WHERE is_deleted = FALSE AND created_at >= ${prevStartDateStr} AND created_at < ${startDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM inquiries WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr} ${siteIdFilter ? sql`AND site_id = ${siteIdFilter}` : sql``}`,
+        sql`SELECT COUNT(*)::int AS count FROM inquiries WHERE created_at >= ${prevStartDateStr} AND created_at < ${startDateStr} ${siteIdFilter ? sql`AND site_id = ${siteIdFilter}` : sql``}`,
+        sql`SELECT COUNT(*)::int AS count FROM inquiries WHERE status = 'New' AND created_at >= ${startDateStr} AND created_at <= ${endDateStr} ${siteIdFilter ? sql`AND site_id = ${siteIdFilter}` : sql``}`,
+        sql`SELECT COUNT(*)::int AS count FROM bookings WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM bookings WHERE created_at >= ${prevStartDateStr} AND created_at < ${startDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM bookings WHERE booking_status IN ('Pending', 'PaymentPending', 'InProcess') AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM bookings WHERE booking_status = 'Confirmed' AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM bookings WHERE booking_status = 'Cancelled' AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
+        sql`SELECT COALESCE(SUM(COALESCE(advance_amount, 0)), 0)::numeric AS sum FROM bookings WHERE booking_status = 'Confirmed' AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
+        sql`SELECT COALESCE(SUM(COALESCE(advance_amount, 0)), 0)::numeric AS sum FROM bookings WHERE booking_status = 'Confirmed' AND created_at >= ${prevStartDateStr} AND created_at < ${startDateStr}`,
+        sql`SELECT COALESCE(SUM(COALESCE(total_due, emi_amount, 0)), 0)::numeric AS sum FROM emi_schedules WHERE emi_status IN ('Pending', 'Overdue', 'ProofSubmitted') AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
+        sql`SELECT COUNT(*)::int AS count, COALESCE(SUM(COALESCE(paid_amount, 0)), 0)::numeric AS sum FROM emi_schedules WHERE emi_status = 'Paid' AND paid_at >= ${startDateStr} AND paid_at <= ${endDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM analytics_events WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM analytics_events WHERE created_at >= ${prevStartDateStr} AND created_at < ${startDateStr}`,
+        sql`SELECT COUNT(DISTINCT visitor_id)::int AS count FROM analytics_events WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
+        sql`SELECT COUNT(DISTINCT visitor_id)::int AS count FROM analytics_events WHERE created_at >= NOW() - INTERVAL '5 minutes'`
+      ]);
+
+      // Traffic Trends
+      const trafficTrend = await sql`
+        SELECT
+          to_char(created_at, 'YYYY-MM-DD') AS date,
+          COUNT(*)::int AS page_views,
+          COUNT(DISTINCT visitor_id)::int AS visitors,
+          COUNT(DISTINCT session_id)::int AS sessions
+        FROM analytics_events
+        WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}
+        GROUP BY 1
+        ORDER BY 1 ASC
+        LIMIT 90`;
+
+      // Top Pages
+      const topPages = await sql`
+        SELECT
+          page_url,
+          COALESCE(page_title, page_url) AS page_title,
+          COUNT(*)::int AS page_views,
+          COUNT(DISTINCT visitor_id)::int AS unique_visitors
+        FROM analytics_events
+        WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr} AND page_url IS NOT NULL
+        GROUP BY page_url, page_title
+        ORDER BY page_views DESC
+        LIMIT 15`;
+
+      // Property Performance
+      const projectPerformance = await sql`
+        SELECT
+          s.site_id,
+          s.site_name,
+          s.location,
+          COUNT(DISTINCT p.plot_id)::int AS total_plots,
+          COUNT(DISTINCT p.plot_id) FILTER (WHERE b.booking_id IS NULL OR b.booking_status = 'Cancelled')::int AS available_plots,
+          COUNT(DISTINCT p.plot_id) FILTER (WHERE b.booking_status IN ('Pending', 'PaymentPending', 'InProcess'))::int AS in_process_plots,
+          COUNT(DISTINCT p.plot_id) FILTER (WHERE b.booking_status = 'Confirmed')::int AS sold_plots,
+          COALESCE(inq.enquiry_count, 0)::int AS enquiries,
+          COALESCE(ae.view_count, 0)::int AS views,
+          COALESCE(SUM(b.advance_amount) FILTER (WHERE b.booking_status = 'Confirmed'), 0)::numeric AS revenue
+        FROM sites s
+        LEFT JOIN plots p ON p.site_id = s.site_id AND p.is_active = TRUE
+        LEFT JOIN bookings b ON b.plot_id = p.plot_id
+        LEFT JOIN (
+          SELECT site_id, COUNT(*)::int AS enquiry_count
+          FROM inquiries
+          WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}
+          GROUP BY site_id
+        ) inq ON inq.site_id = s.site_id
+        LEFT JOIN (
+          SELECT site_id, COUNT(*)::int AS view_count
+          FROM analytics_events
+          WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr} AND site_id IS NOT NULL
+          GROUP BY site_id
+        ) ae ON ae.site_id = s.site_id
+        WHERE s.is_active = TRUE ${siteIdFilter ? sql`AND s.site_id = ${siteIdFilter}` : sql``}
+        GROUP BY s.site_id, s.site_name, s.location, inq.enquiry_count, ae.view_count
+        ORDER BY sold_plots DESC, revenue DESC`;
+
+      // Top Viewed Plots
+      const topPlots = await sql`
+        SELECT
+          p.plot_id,
+          p.plot_number,
+          s.site_name,
+          p.plot_status,
+          p.base_price,
+          COALESCE(ae.views, 0)::int AS views,
+          COALESCE(b.booking_count, 0)::int AS bookings
+        FROM plots p
+        JOIN sites s ON s.site_id = p.site_id
+        LEFT JOIN (
+          SELECT plot_id, COUNT(*)::int AS views
+          FROM analytics_events
+          WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr} AND plot_id IS NOT NULL
+          GROUP BY plot_id
+        ) ae ON ae.plot_id = p.plot_id
+        LEFT JOIN (
+          SELECT plot_id, COUNT(*)::int AS booking_count
+          FROM bookings
+          WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}
+          GROUP BY plot_id
+        ) b ON b.plot_id = p.plot_id
+        WHERE p.is_active = TRUE ${siteIdFilter ? sql`AND p.site_id = ${siteIdFilter}` : sql``}
+        ORDER BY views DESC, bookings DESC
+        LIMIT 20`;
+
+      // Enquiry Sources & Status Breakdown
+      const enquiryStatusList = await sql`
+        SELECT status, COUNT(*)::int AS count
+        FROM inquiries
+        WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr} ${siteIdFilter ? sql`AND site_id = ${siteIdFilter}` : sql``}
+        GROUP BY status`;
+
+      const enquirySources = await sql`
+        SELECT COALESCE(utm_source, 'Direct') AS source, COUNT(*)::int AS count
+        FROM analytics_events
+        WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}
+        GROUP BY 1
+        ORDER BY count DESC
+        LIMIT 10`;
+
+      // Device & Location Analytics
+      const devicesList = await sql`
+        SELECT COALESCE(device_type, 'Desktop') AS device, COUNT(*)::int AS count
+        FROM analytics_events
+        WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}
+        GROUP BY 1`;
+
+      const topLocations = await sql`
+        SELECT COALESCE(city, 'Lucknow') AS city, COALESCE(state, 'Uttar Pradesh') AS state, COUNT(*)::int AS count
+        FROM analytics_events
+        WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}
+        GROUP BY 1, 2
+        ORDER BY count DESC
+        LIMIT 10`;
+
+      // Document & KYC Counts Summary
+      const kycSummary = await sql`
+        SELECT
+          COUNT(*)::int AS total_documents,
+          COUNT(*) FILTER (WHERE verification_status = 'Pending')::int AS pending_kyc,
+          COUNT(*) FILTER (WHERE verification_status = 'Approved')::int AS approved_kyc,
+          COUNT(*) FILTER (WHERE verification_status = 'Rejected')::int AS rejected_kyc
+        FROM user_documents`;
+
+      const pctChange = (cur, prev) => {
+        const c = Number(cur || 0);
+        const p = Number(prev || 0);
+        if (p === 0) return c > 0 ? 100 : 0;
+        return Number((((c - p) / p) * 100).toFixed(1));
+      };
+
+      const overview = {
+        totalVisitors: { current: Number(visitorsRow[0]?.count || 0), change: pctChange(visitorsRow[0]?.count, prevVisitorsRow[0]?.count) },
+        uniqueVisitors: { current: Number(uniqueVisitorsRow[0]?.count || 0), change: 0 },
+        newUsers: { current: Number(newUsersRow[0]?.count || 0), change: pctChange(newUsersRow[0]?.count, prevNewUsersRow[0]?.count) },
+        totalRegisteredUsers: { current: Number(totalUsersRow[0]?.count || 0), change: 0 },
+        totalInvestors: { current: Number(totalInvestorsRow[0]?.count || 0), change: 0 },
+        newInvestors: { current: Number(newInvestorsRow[0]?.count || 0), change: pctChange(newInvestorsRow[0]?.count, prevNewInvestorsRow[0]?.count) },
+        totalEnquiries: { current: Number(enquiriesRow[0]?.count || 0), change: pctChange(enquiriesRow[0]?.count, prevEnquiriesRow[0]?.count) },
+        newEnquiries: { current: Number(newEnquiriesRow[0]?.count || 0), change: 0 },
+        totalBookings: { current: Number(bookingsRow[0]?.count || 0), change: pctChange(bookingsRow[0]?.count, prevBookingsRow[0]?.count) },
+        pendingBookings: { current: Number(pendingBookingsRow[0]?.count || 0), change: 0 },
+        confirmedBookings: { current: Number(confirmedBookingsRow[0]?.count || 0), change: 0 },
+        cancelledBookings: { current: Number(cancelledBookingsRow[0]?.count || 0), change: 0 },
+        totalRevenue: { current: Number(revenueRow[0]?.sum || 0), change: pctChange(revenueRow[0]?.sum, prevRevenueRow[0]?.sum) },
+        pendingPayments: { current: Number(pendingPaymentsRow[0]?.sum || 0), change: 0 },
+        successfulPayments: { current: Number(successfulPaymentsRow[0]?.sum || 0), count: Number(successfulPaymentsRow[0]?.count || 0), change: 0 }
+      };
+
+      return ok(res, {
+        preset,
+        startDate: startDateStr,
+        endDate: endDateStr,
+        lastUpdated: new Date().toISOString(),
+        liveVisitors: Number(liveVisitorsRow[0]?.count || 0),
+        overview,
+        trafficTrend,
+        topPages,
+        projectPerformance,
+        topPlots,
+        enquiryStatusList,
+        enquirySources,
+        devicesList,
+        topLocations,
+        kycSummary: kycSummary[0] || {},
+        seoStatus: {
+          integrated: false,
+          message: "Google Search Console integration required to display search rankings, impressions, and CTR."
+        }
+      }, "Analytics loaded successfully.");
+
+    } catch (e) {
+      console.error("[Admin Analytics Error]", e);
+      return err(res, "Failed to load analytics data", 500);
+    }
+  }
+);
+
+// Export Analytics CSV
+app.get("/api/admin/analytics/export",
+  verifyAdminToken,
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
+  async (req, res) => {
+    try {
+      const preset = req.query.preset || '30d';
+      const sites = await sql`
+        SELECT s.site_name, COUNT(DISTINCT p.plot_id)::int AS plots,
+               COUNT(DISTINCT b.booking_id) FILTER (WHERE b.booking_status = 'Confirmed')::int AS confirmed_bookings,
+               COALESCE(SUM(b.advance_amount) FILTER (WHERE b.booking_status = 'Confirmed'), 0)::numeric AS revenue
+        FROM sites s
+        LEFT JOIN plots p ON p.site_id = s.site_id
+        LEFT JOIN bookings b ON b.plot_id = p.plot_id
+        WHERE s.is_active = TRUE
+        GROUP BY s.site_name
+        ORDER BY revenue DESC`;
+
+      let csv = "Site Name,Total Plots,Confirmed Bookings,Revenue (INR)\n";
+      sites.forEach(s => {
+        csv += `"${s.site_name}",${s.plots},${s.confirmed_bookings},${s.revenue}\n`;
+      });
+
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", `attachment; filename="mmr-analytics-${preset}-${new Date().toISOString().slice(0,10)}.csv"`);
+      return res.status(200).send(csv);
+    } catch (e) {
+      console.error("[Admin Analytics Export Error]", e);
+      return err(res, "Failed to export analytics CSV", 500);
+    }
+  }
+);
+
 /* ==========================
    404 + Error Handler
 ========================== */
@@ -10128,6 +10523,7 @@ if (shouldStartServer) {
         ensureHomeExperienceSchema().catch(() => {}),
         ensureHomeSlidersSchema().catch(() => {}),
         ensureSiteHtmlMapSchema().catch(() => {}),
+        ensureAnalyticsSchema().catch(() => {}),
       ]);
     } catch (error) {
       console.error("[MMR API] Plot management schema initialization failed", {
