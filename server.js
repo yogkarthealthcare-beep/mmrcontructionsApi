@@ -4,7 +4,7 @@ import cors from "cors";
 import compression from "compression";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-import sql from "./db.js";
+import sql, { getDatabaseConfig, supabaseSql } from "./db.js";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import multer from "multer";
@@ -10517,6 +10517,24 @@ startBackupScheduler({
 
 if (shouldStartServer) {
   const server = app.listen(PORT, "0.0.0.0", async () => {
+    try {
+      await sql`SELECT 1`;
+      const dbConfig = getDatabaseConfig();
+      console.log("PostgreSQL connection successful (Primary VPS)");
+      console.log(`Database: ${dbConfig.database}`);
+      console.log(`Host: ${dbConfig.host}`);
+      console.log(`Port: ${dbConfig.port}`);
+    } catch (dbErr) {
+      console.error("[MMR API] VPS Database connection test failed:", dbErr.message);
+    }
+
+    try {
+      await supabaseSql`SELECT 1`;
+      console.log("Supabase PostgreSQL connection successful (Secondary Active Backup)");
+    } catch (sbErr) {
+      console.warn("[MMR API] Supabase Database connection check failed:", sbErr.message);
+    }
+
     try {
       await requirePlotManagementSchema();
       await Promise.all([
