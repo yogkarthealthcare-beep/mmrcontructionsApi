@@ -56,36 +56,6 @@ app.use(helmet({
 }));
 app.use(compression());
 
-const rateLimitResponse = { success: false, message: "Too many requests. Please try again shortly." };
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 450,
-  standardHeaders: "draft-7",
-  legacyHeaders: false,
-  message: rateLimitResponse,
-});
-const authLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  limit: 25,
-  standardHeaders: "draft-7",
-  legacyHeaders: false,
-  message: rateLimitResponse,
-});
-const publicFormLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  limit: 12,
-  standardHeaders: "draft-7",
-  legacyHeaders: false,
-  message: rateLimitResponse,
-});
-const uploadLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  limit: 35,
-  standardHeaders: "draft-7",
-  legacyHeaders: false,
-  message: rateLimitResponse,
-});
-
 const containsSuspiciousMarkup = (value) =>
   typeof value === "string" && /<\s*script|javascript\s*:|on\w+\s*=|data\s*:\s*text\/html/i.test(value);
 
@@ -117,11 +87,43 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization", "X-API-Key", "X-Requested-With", "Accept"],
   optionsSuccessStatus: 204,
 }));
+
+const rateLimitResponse = { success: false, message: "Too many requests. Please try again shortly." };
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5000,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: rateLimitResponse,
+  skip: (req) => Boolean(req.headers.authorization),
+});
+const authLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 60,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: rateLimitResponse,
+});
+const publicFormLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 100,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: rateLimitResponse,
+});
+const uploadLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 150,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: rateLimitResponse,
+});
+
 app.use("/api", apiLimiter);
 app.use("/api/auth", authLimiter);
 app.use("/api/admin/auth", authLimiter);
 app.use(["/api/book-plot/leads", "/api/inquiries"], publicFormLimiter);
-app.use(["/api/profile/upload-doc", "/api/bookings", "/api/emi", "/api/admin"], uploadLimiter);
+app.use(["/api/profile/upload-doc"], uploadLimiter);
 
 app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) {
