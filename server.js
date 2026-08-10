@@ -299,7 +299,7 @@ function uploadToCloudinary(buffer, folder, filename) {
 // ─── Multer — memory storage (disk nahi, seedha buffer mein) ──
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
   fileFilter: (req, file, cb) => {
     if (file.fieldname === "html_map") {
       const allowedHtml = path.extname(file.originalname || "").toLowerCase() === ".html";
@@ -308,7 +308,7 @@ const upload = multer({
     const isSiteMap = file.fieldname === "site_map";
     const isSiteImage = ["site_map", "property_image", "slider_image"].includes(file.fieldname);
     const isCompanyDocument = file.fieldname === "company_document";
-    const allowed = isSiteMap ? /jpeg|jpg|png|pdf|svg/ : isSiteImage ? /jpeg|jpg|png/ : /jpeg|jpg|png|webp|pdf/;
+    const allowed = isSiteMap ? /jpeg|jpg|png|pdf|svg/ : isSiteImage ? /jpeg|jpg|png|webp/ : /jpeg|jpg|png|webp|pdf/;
     allowed.test(path.extname(file.originalname).toLowerCase())
       ? cb(null, true)
       : cb(new Error(
