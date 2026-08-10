@@ -10420,9 +10420,9 @@ app.get("/api/admin/analytics",
       const kycSummary = await sql`
         SELECT
           COUNT(*)::int AS total_documents,
-          COUNT(*) FILTER (WHERE verification_status = 'Pending')::int AS pending_kyc,
-          COUNT(*) FILTER (WHERE verification_status = 'Approved')::int AS approved_kyc,
-          COUNT(*) FILTER (WHERE verification_status = 'Rejected')::int AS rejected_kyc
+          COUNT(*) FILTER (WHERE COALESCE(review_status, 'Pending') = 'Pending')::int AS pending_kyc,
+          COUNT(*) FILTER (WHERE COALESCE(review_status, 'Pending') = 'Approved' OR is_verified = TRUE)::int AS approved_kyc,
+          COUNT(*) FILTER (WHERE COALESCE(review_status, 'Pending') = 'Rejected')::int AS rejected_kyc
         FROM user_documents`;
 
       const pctChange = (cur, prev) => {
