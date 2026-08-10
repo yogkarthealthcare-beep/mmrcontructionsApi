@@ -247,7 +247,6 @@ async function createJavaScriptSqlBackup(filePath, dbInfo) {
   await appendBackupSql(filePath, "BEGIN;\n\n");
   const pageSize = Math.min(Math.max(Number(process.env.DB_BACKUP_EXPORT_PAGE_SIZE || 500), 50), 5000);
   for (const table of tables) {
-    const isBackupFilesTable = table.table_name === "database_backup_files";
     const columns = await sql`
       SELECT a.attname AS column_name
       FROM pg_attribute a
@@ -258,7 +257,7 @@ async function createJavaScriptSqlBackup(filePath, dbInfo) {
         AND a.attnum > 0
         AND NOT a.attisdropped
         AND a.attgenerated = ''
-        ${isBackupFilesTable ? sql`AND a.attname <> 'file_data'` : sql``}
+        AND format_type(a.atttypid, a.atttypmod) <> 'bytea'
       ORDER BY a.attnum`;
     if (!columns.length) continue;
 
