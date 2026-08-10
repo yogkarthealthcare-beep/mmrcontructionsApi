@@ -4,7 +4,9 @@ import path from "path";
 import crypto from "crypto";
 import { v2 as cloudinary } from "cloudinary";
 
-// Determine Storage Root Path cleanly with safe fallback for dev/testing
+/**
+ * Determine Storage Root Path cleanly with safe fallback for dev/testing
+ */
 export function getStorageRoot() {
   const envRoot = process.env.FILE_STORAGE_ROOT?.trim();
   if (envRoot) {
@@ -13,7 +15,7 @@ export function getStorageRoot() {
 
   // Production VPS preferred default path
   const vpsPreferred = "/var/www/mmrconstructions-storage";
-  
+
   // On Linux/VPS check if /var/www is accessible or writable
   if (process.platform === "linux") {
     try {
@@ -26,30 +28,30 @@ export function getStorageRoot() {
     }
   }
 
-  // Local development / fallback storage root inside current workspace directory
+  // Local development / fallback storage root inside workspace directory
   return path.resolve(process.cwd(), "uploads");
 }
 
-// Module Folder Mapping
-export const MODULE_FOLDERS = {
-  investor: "investors",
-  associate: "associates",
-  customer: "customers",
-  user: "users",
-  profile: "users",
-  site: "sites",
-  plot: "plots",
-  slider: "sliders",
-  background: "sliders",
-  proof: "proofs",
-  payment: "proofs",
-  company: "company",
-  document: "documents",
-  mobile_app: "mobile-app",
-  other: "other",
-};
+/**
+ * Convert string to safe SEO slug
+ * Handles Hindi/Unicode, special characters, spaces, duplicate hyphens.
+ */
+export function toSeoSlug(str = "") {
+  if (!str) return "";
+  return String(str)
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // Remove accents
+    .replace(/[^a-z0-9\u0900-\u097F_-]+/g, "-") // Allow alphanumeric & Hindi chars, convert rest to hyphen
+    .replace(/-+/g, "-") // Collapse consecutive hyphens
+    .replace(/^-+|-+$/g, "") // Trim leading/trailing hyphens
+    .substring(0, 80);
+}
 
-// Ensure Storage Directory Exists (Race-condition safe)
+/**
+ * Ensure Storage Directory Exists (Race-condition safe)
+ */
 export async function ensureDirExists(targetDir) {
   try {
     await fs.mkdir(targetDir, { recursive: true, mode: 0o755 });
@@ -60,28 +62,46 @@ export async function ensureDirExists(targetDir) {
   }
 }
 
-// Sanitize name for filenames
-export function sanitizeName(str = "unnamed") {
-  return String(str)
-    .trim()
-    .replace(/[^a-zA-Z0-9_-]/g, "-")
-    .replace(/-+/g, "-")
-    .substring(0, 50) || "unnamed";
-}
-
-// Format Server-side Unique Filename
-export function generateFilename({ entityType = "File", entityId = "GEN", name = "upload", extension = "bin" }) {
+/**
+ * Generate SEO-Friendly, Collision-Free Filename
+ * Example: MMR-Constructions-green-valley-phase-1-site-map-a83f21.jpg
+ */
+export function generateSeoFilename({
+  brand = "MMR-Constructions",
+  entityName = "",
+  entityId = "",
+  purpose = "",
+  originalName = "image.png",
+  extension = "",
+}) {
+  const ext = extension || path.extname(originalName).replace(".", "").toLowerCase() || "png";
   const dateStr = new Date().toISOString().replace(/[-T:.Z]/g, "").substring(0, 8); // YYYYMMDD
   const uniqueHash = crypto.randomBytes(3).toString("hex"); // 6 hex chars
-  const cleanType = sanitizeName(entityType);
-  const cleanId = sanitizeName(entityId);
-  const cleanName = sanitizeName(name);
-  const cleanExt = extension.replace(/^\.+/, "").toLowerCase() || "bin";
 
-  return `MMR-Constructions_${cleanType}_${cleanId}_${cleanName}_${dateStr}_${uniqueHash}.${cleanExt}`;
+  const cleanBrand = toSeoSlug(brand) || "mmr-constructions";
+  const cleanEntityName = toSeoSlug(entityName);
+  const cleanEntityId = toSeoSlug(entityId);
+  const cleanPurpose = toSeoSlug(purpose);
+  const cleanOrigBase = toSeoSlug(path.basename(originalName, path.extname(originalName)));
+
+  // Combine meaningful SEO parts
+  const parts = [cleanBrand];
+
+  if (cleanEntityName) parts.push(cleanEntityName);
+  if (cleanEntityId && !cleanEntityName.includes(cleanEntityId)) parts.push(cleanEntityId);
+  if (cleanPurpose && !cleanEntityName.includes(cleanPurpose)) parts.push(cleanPurpose);
+  if (!cleanEntityName && !cleanPurpose && cleanOrigBase) parts.push(cleanOrigBase);
+
+  parts.push(dateStr);
+  parts.push(uniqueHash);
+
+  const baseFilename = parts.join("-");
+  return `${baseFilename}.${ext.toLowerCase()}`;
 }
 
-// Detect image compression support via optional Sharp
+/**
+ * Image compression / optimization module using Sharp
+ */
 let sharpModule = null;
 try {
   sharpModule = (await import("sharp")).default;
@@ -89,9 +109,6 @@ try {
   // Sharp optional fallback
 }
 
-/**
- * Optimize image buffer if image format is JPEG/PNG/WebP
- */
 export async function optimizeBuffer(buffer, ext) {
   const cleanExt = ext.toLowerCase().replace(".", "");
   if (!sharpModule || !["jpg", "jpeg", "png", "webp"].includes(cleanExt)) {
@@ -105,7 +122,7 @@ export async function optimizeBuffer(buffer, ext) {
     // Auto-rotate based on EXIF
     sharpInstance.rotate();
 
-    // Resize if ridiculously large (> 2500px)
+    // Resize if larger than 2500px width
     if (metadata.width && metadata.width > 2500) {
       sharpInstance.resize({ width: 2500, withoutEnlargement: true });
     }
@@ -130,43 +147,98 @@ export async function optimizeBuffer(buffer, ext) {
 }
 
 /**
+ * Resolve Module & Subfolder Directory Structure
+ */
+export function resolveModuleDirectory(moduleKey = "other", options = {}) {
+  const { entityId = "common", entityName = "", subCategory = "" } = options;
+  const slugEntityName = toSeoSlug(entityName) || toSeoSlug(entityId) || "common";
+  const cleanEntityId = toSeoSlug(entityId) || "common";
+
+  switch (moduleKey.toLowerCase()) {
+    case "site":
+    case "project": {
+      const cat = toSeoSlug(subCategory) || "images";
+      return path.join("projects", slugEntityName, cat);
+    }
+    case "plot": {
+      const siteSlug = toSeoSlug(options.siteName) || "project";
+      return path.join("projects", siteSlug, "plots", cleanEntityId);
+    }
+    case "investor": {
+      const cat = toSeoSlug(subCategory) || "profile";
+      return path.join("investors", cleanEntityId, cat);
+    }
+    case "associate": {
+      const cat = toSeoSlug(subCategory) || "profile";
+      return path.join("associates", cleanEntityId, cat);
+    }
+    case "customer":
+    case "user":
+    case "profile": {
+      const cat = toSeoSlug(subCategory) || "profile";
+      return path.join("customers", cleanEntityId, cat);
+    }
+    case "slider":
+    case "background":
+    case "homepage": {
+      const cat = toSeoSlug(subCategory) || "sliders";
+      return path.join("homepage", cat);
+    }
+    case "proof":
+    case "payment": {
+      return path.join("payments", "proofs", cleanEntityId);
+    }
+    case "company": {
+      const cat = toSeoSlug(subCategory) || "documents";
+      return path.join("company", cat);
+    }
+    case "mobile_app": {
+      const cat = toSeoSlug(subCategory) || "logo";
+      return path.join("mobile-app", cat);
+    }
+    default: {
+      return path.join("other", cleanEntityId);
+    }
+  }
+}
+
+/**
+ * Server-Side Safe Audit Logging for File Operations
+ */
+export function logStorageOperation({ action, module, entityId, originalName, finalFilename, fullPath, size }) {
+  console.log(`[VPS Storage] ${action || "Upload"} | Module: ${module} | ID: ${entityId} | File: ${finalFilename} | Size: ${Math.round(size / 1024)} KB | Path: ${fullPath}`);
+}
+
+/**
  * Save file to VPS Storage
- * @param {Buffer} buffer - File buffer
- * @param {Object} options
- * @param {string} options.module - Module name (investor, site, plot, etc.)
- * @param {string} options.entityId - Entity or User ID (e.g. INV-1001, 25, etc.)
- * @param {string} options.entityType - Entity type descriptor (e.g. Investor, Site)
- * @param {string} options.originalName - Original uploaded filename
- * @param {string} [options.customName] - Optional custom file description
- * @returns {Promise<{ url: string, relativePath: string, fullPath: string, filename: string }>}
  */
 export async function saveFileToVPS(buffer, options = {}) {
   const {
     module: modKey = "other",
     entityId = "common",
+    entityName = "",
     entityType = "Doc",
+    purpose = "",
     originalName = "file.bin",
-    customName = "",
+    subCategory = "",
+    siteName = "",
   } = options;
 
   const rootDir = getStorageRoot();
-  const subFolder = MODULE_FOLDERS[modKey] || MODULE_FOLDERS.other;
-  const entitySubDir = sanitizeName(entityId);
+  const relativeSubDir = resolveModuleDirectory(modKey, { entityId, entityName, subCategory, siteName });
+  const targetDir = path.join(rootDir, relativeSubDir);
 
-  // Storage directory: /var/www/mmrconstructions-storage/{subFolder}/{entitySubDir}
-  const targetDir = path.join(rootDir, subFolder, entitySubDir);
   await ensureDirExists(targetDir);
 
   const rawExt = path.extname(originalName).replace(".", "") || "bin";
-  const nameBase = customName || path.basename(originalName, path.extname(originalName));
-
-  // Image optimization
   const { buffer: finalBuffer, format: finalExt } = await optimizeBuffer(buffer, rawExt);
 
-  const filename = generateFilename({
-    entityType,
-    entityId,
-    name: nameBase,
+  const filename = generateSeoFilename({
+    brand: "MMR-Constructions",
+    entityName: entityName || siteName || modKey,
+    entityId: entityId !== "common" ? entityId : "",
+    purpose: purpose || entityType,
+    originalName,
     extension: finalExt,
   });
 
@@ -175,9 +247,20 @@ export async function saveFileToVPS(buffer, options = {}) {
   // Write file to disk
   await fs.writeFile(fullPath, finalBuffer);
 
-  // Compute public relative URL & full URL
+  // Log operation safely
+  logStorageOperation({
+    action: "FileSaved",
+    module: modKey,
+    entityId,
+    originalName,
+    finalFilename: filename,
+    fullPath,
+    size: finalBuffer.length,
+  });
+
   const publicBase = (process.env.PUBLIC_API_URL || process.env.API_BASE_URL || "https://api.mmrconstructions.in").replace(/\/$/, "");
-  const relativePath = `/uploads/${subFolder}/${entitySubDir}/${filename}`;
+  const normalizedRelPath = relativeSubDir.replace(/\\/g, "/");
+  const relativePath = `/uploads/${normalizedRelPath}/${filename}`;
   const fullUrl = `${publicBase}${relativePath}`;
 
   return {
@@ -204,9 +287,7 @@ export function isVpsStorageUrl(url = "") {
 }
 
 /**
- * Safely delete file (supports hybrid Cloudinary vs VPS Storage files)
- * @param {string} fileUrl - Stored file URL
- * @param {string} [publicId] - Optional Cloudinary public_id
+ * Safely delete file from Storage (supports Cloudinary vs VPS Storage)
  */
 export async function deleteFileFromStorage(fileUrl = "", publicId = "") {
   if (!fileUrl && !publicId) return false;
@@ -216,6 +297,7 @@ export async function deleteFileFromStorage(fileUrl = "", publicId = "") {
     if (publicId) {
       try {
         await cloudinary.uploader.destroy(publicId);
+        logStorageOperation({ action: "CloudinaryDestroyed", publicId });
         return true;
       } catch (err) {
         console.warn("[FileStorageService] Cloudinary delete warning:", err.message);
@@ -228,8 +310,6 @@ export async function deleteFileFromStorage(fileUrl = "", publicId = "") {
   if (isVpsStorageUrl(fileUrl)) {
     try {
       const rootDir = getStorageRoot();
-      
-      // Extract path after /uploads/
       const match = fileUrl.match(/\/uploads\/(.+)$/);
       if (!match) return false;
 
@@ -244,6 +324,7 @@ export async function deleteFileFromStorage(fileUrl = "", publicId = "") {
 
       if (fsSync.existsSync(targetFilePath)) {
         await fs.unlink(targetFilePath);
+        logStorageOperation({ action: "VPSFileUnlinked", fullPath: targetFilePath });
         return true;
       }
     } catch (err) {
@@ -256,10 +337,11 @@ export async function deleteFileFromStorage(fileUrl = "", publicId = "") {
 
 export default {
   getStorageRoot,
+  toSeoSlug,
+  generateSeoFilename,
+  resolveModuleDirectory,
   saveFileToVPS,
   deleteFileFromStorage,
   isCloudinaryUrl,
   isVpsStorageUrl,
-  generateFilename,
-  sanitizeName,
 };
