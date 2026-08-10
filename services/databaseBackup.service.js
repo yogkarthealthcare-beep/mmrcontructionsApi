@@ -247,6 +247,7 @@ async function createJavaScriptSqlBackup(filePath, dbInfo) {
   await appendBackupSql(filePath, "BEGIN;\n\n");
   const pageSize = Math.min(Math.max(Number(process.env.DB_BACKUP_EXPORT_PAGE_SIZE || 500), 50), 5000);
   for (const table of tables) {
+    const isBackupFilesTable = table.table_name === "database_backup_files";
     const columns = await sql`
       SELECT a.attname AS column_name
       FROM pg_attribute a
@@ -257,24 +258,30 @@ async function createJavaScriptSqlBackup(filePath, dbInfo) {
         AND a.attnum > 0
         AND NOT a.attisdropped
         AND a.attgenerated = ''
+        ${isBackupFilesTable ? sql`AND a.attname <> 'file_data'` : sql``}
       ORDER BY a.attnum`;
     if (!columns.length) continue;
 
     const columnList = columns.map((column) => quoteIdent(column.column_name)).join(", ");
     const selectList = columns.map((column) => quoteIdent(column.column_name)).join(", ");
     let offset = 0;
+    const batchSize = 100;
     for (;;) {
       const rows = await sql.unsafe(
-        `SELECT ${selectList} FROM ${qualifiedName(table.schema_name, table.table_name)} LIMIT ${pageSize} OFFSET ${offset}`
+        `SELECT ${selectList} FROM ${qualifiedName(table.schema_name, table.table_name)} LIMIT ${batchSize} OFFSET ${offset}`
       );
       if (!rows.length) break;
-      const values = rows.map((row) => `(${columns.map((column) => sqlLiteral(row[column.column_name])).join(", ")})`);
-      await appendBackupSql(
-        filePath,
-        `INSERT INTO ${qualifiedName(table.schema_name, table.table_name)} (${columnList}) VALUES\n${values.join(",\n")}\nON CONFLICT DO NOTHING;\n\n`
-      );
+
+      await appendBackupSql(filePath, `INSERT INTO ${qualifiedName(table.schema_name, table.table_name)} (${columnList}) VALUES\n`);
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const rowValues = columns.map((col) => sqlLiteral(row[col.column_name])).join(", ");
+        const isLast = i === rows.length - 1;
+        await appendBackupSql(filePath, `(${rowValues})${isLast ? '\nON CONFLICT DO NOTHING;\n\n' : ',\n'}`);
+      }
+
       offset += rows.length;
-      if (rows.length < pageSize) break;
+      if (rows.length < batchSize) break;
     }
   }
   await appendBackupSql(filePath, "COMMIT;\n\n");
