@@ -407,6 +407,12 @@ export async function ensureBackupSchema() {
           error_details TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`;
+      await sql`CREATE SEQUENCE IF NOT EXISTS database_backup_files_id_seq`;
+      await sql`ALTER TABLE database_backup_files ALTER COLUMN id SET DEFAULT nextval('database_backup_files_id_seq')`;
+      await sql`CREATE SEQUENCE IF NOT EXISTS database_restore_uploads_id_seq`;
+      await sql`ALTER TABLE database_restore_uploads ALTER COLUMN id SET DEFAULT nextval('database_restore_uploads_id_seq')`;
+      await sql`CREATE SEQUENCE IF NOT EXISTS database_restore_history_id_seq`;
+      await sql`ALTER TABLE database_restore_history ALTER COLUMN id SET DEFAULT nextval('database_restore_history_id_seq')`;
       await sql`
         CREATE INDEX IF NOT EXISTS idx_database_restore_history_created_at
         ON database_restore_history (created_at DESC)`;
