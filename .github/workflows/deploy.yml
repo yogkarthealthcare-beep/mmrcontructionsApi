@@ -1,0 +1,124 @@
+name: Deploy MMR Constructions API to BigRock VPS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy to Production VPS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Execute Remote SSH Commands on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script_stop: true
+          script: |
+            echo "=========================================================================="
+            echo "             STARTING AUTOMATIC DEPLOYMENT FOR MMR API                    "
+            echo "=========================================================================="
+            
+            PROJECT_DIR="/var/www/mmrcontructionsApi"
+            STORAGE_DIR="/var/www/mmrconstructions-storage"
+
+            # 1. Verify VPS Project Directory
+            if [ ! -d "$PROJECT_DIR" ]; then
+              echo "❌ Error: Project directory $PROJECT_DIR does not exist on VPS!"
+              exit 1
+            fi
+
+            cd "$PROJECT_DIR" || exit 1
+
+            # 2. Verify git repository remote match
+            GIT_REMOTE=$(git config --get remote.origin.url || true)
+            echo "Current Git Remote: $GIT_REMOTE"
+
+            # 3. Verify .env file preservation
+            if [ ! -f "$PROJECT_DIR/.env" ]; then
+              echo "⚠️ Warning: Production .env file missing in $PROJECT_DIR!"
+            else
+              echo "✅ Production .env file verified and preserved."
+            fi
+
+            # 4. Safe Git Fetch & Reset to origin/main
+            echo "Fetching latest main branch from GitHub..."
+            git fetch origin main
+
+            PREV_COMMIT=$(git rev-parse HEAD || echo "none")
+            
+            # Check package-lock.json diff before pulling
+            PACKAGE_CHANGED=$(git diff HEAD origin/main -- package-lock.json || true)
+
+            echo "Updating workspace code to latest main branch..."
+            git checkout main
+            git reset --hard origin/main
+
+            NEW_COMMIT=$(git rev-parse HEAD)
+            echo "Successfully updated code: $PREV_COMMIT -> $NEW_COMMIT"
+
+            # 5. Smart Node.js Dependency Management (npm ci only if lockfile changed)
+            if [ -n "$PACKAGE_CHANGED" ]; then
+              echo "📦 package-lock.json changed. Installing production dependencies..."
+              npm ci --omit=dev || npm install --omit=dev
+            else
+              echo "⚡ package-lock.json unchanged. Skipping dependency installation."
+            fi
+
+            # 6. PM2 Process Reload / Restart
+            echo "🔄 Restarting PM2 process 'mmr-api'..."
+            if pm2 describe mmr-api > /dev/null 2>&1; then
+              pm2 restart mmr-api --update-env
+            else
+              echo "Starting mmr-api for the first time on PM2..."
+              pm2 start server.js --name mmr-api
+            fi
+
+            # 7. PM2 Status & Log Verification
+            echo "📊 PM2 Application Status:"
+            pm2 status mmr-api
+            echo "--------------------------------------------------------------------------"
+            echo "📜 Recent PM2 Logs (Last 15 lines):"
+            pm2 logs mmr-api --lines 15 --raw | tail -n 15
+
+            # 8. Local API Health Verification
+            echo "--------------------------------------------------------------------------"
+            echo "🔍 Testing API Health Check locally (http://127.0.0.1:5000/api/health)..."
+            sleep 2
+            
+            HEALTH_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/api/health || true)
+            echo "Local API Health HTTP Code: $HEALTH_HTTP_CODE"
+
+            if [ "$HEALTH_HTTP_CODE" -eq 200 ]; then
+              echo "✅ API Health Check PASSED (HTTP 200 OK)."
+            else
+              echo "⚠️ Warning: Health endpoint returned HTTP $HEALTH_HTTP_CODE. Testing root route..."
+              ROOT_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/ || true)
+              echo "Root HTTP Response Code: $ROOT_CODE"
+              if [ "$ROOT_CODE" -eq 200 ] || [ "$ROOT_CODE" -eq 404 ]; then
+                echo "✅ Server process listening and responding cleanly on port 5000."
+              else
+                echo "❌ Error: API server is not responding cleanly on port 5000!"
+                exit 1
+              fi
+            fi
+
+            # 9. Verify External File Storage Directory Un-touched
+            if [ -d "$STORAGE_DIR" ]; then
+              echo "✅ External File Storage ($STORAGE_DIR) exists and was preserved untouched."
+            else
+              echo "📁 Creating external file storage directory: $STORAGE_DIR..."
+              mkdir -p "$STORAGE_DIR"
+              chmod -R 755 "$STORAGE_DIR"
+            fi
+
+            echo "=========================================================================="
+            echo "🎉 AUTOMATIC DEPLOYMENT COMPLETED SUCCESSFULLY FOR COMMIT $NEW_COMMIT!    "
+            echo "=========================================================================="

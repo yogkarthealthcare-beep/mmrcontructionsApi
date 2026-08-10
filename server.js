@@ -157,8 +157,17 @@ app.use("/uploads", (req, res) => {
     if (err && !res.headersSent) {
       res.status(404).send("File not found");
     }
+});
+
+app.get("/api/health", (_req, res) => {
+  return res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    service: "MMR Constructions API",
+    storage_root: getStorageRoot(),
   });
 });
+
 app.use('/api/auth', authEmailRoutes);
 app.use('/api', newRoutes);
 app.use('/api', paymentRoutes);
