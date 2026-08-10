@@ -516,6 +516,8 @@ const ensureHomeSlidersSchema = () => {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`;
+      await sql`CREATE SEQUENCE IF NOT EXISTS home_sliders_id_seq`;
+      await sql`ALTER TABLE home_sliders ALTER COLUMN id SET DEFAULT nextval('home_sliders_id_seq')`;
       await sql`ALTER TABLE home_sliders ADD COLUMN IF NOT EXISTS button_icon TEXT`;
       await sql`ALTER TABLE home_sliders ADD COLUMN IF NOT EXISTS button2_text TEXT`;
       await sql`ALTER TABLE home_sliders ADD COLUMN IF NOT EXISTS button2_link TEXT`;
