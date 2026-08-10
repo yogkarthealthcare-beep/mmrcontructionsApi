@@ -16,14 +16,13 @@ export const getDatabaseUrl = () => {
   }
 
   if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
-  if (process.env.SUPABASE_DATABASE_URL) return process.env.SUPABASE_DATABASE_URL;
 
   throw new Error("Database configuration missing. Set DATABASE_HOST/DATABASE_NAME/DATABASE_USER/DATABASE_PASSWORD or DATABASE_URL.");
 };
 
-// Supabase Backup/Secondary Database URL builder
+// Secondary Database URL builder (Alias to VPS DB)
 export const getSupabaseDatabaseUrl = () => {
-  return process.env.SUPABASE_DATABASE_URL || process.env.DATABASE_URL || getDatabaseUrl();
+  return getDatabaseUrl();
 };
 
 export const getDatabaseConfig = () => {
@@ -39,7 +38,7 @@ const resolveSsl = (url) => {
   if (["require", "true", "1", "yes"].includes(value)) return "require";
 
   if (/localhost|127\.0\.0\.1/i.test(url)) return false;
-  return /supabase\.(co|com)|pooler\.supabase\.com/i.test(url) ? "require" : false;
+  return false;
 };
 
 const maxConnections = Number(process.env.DB_MAX_CONNECTIONS) || 20;

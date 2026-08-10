@@ -66,15 +66,12 @@ const formatBytes = (bytes = 0) => {
 const readDatabaseInfo = () => {
   const databaseUrl = getDatabaseUrl();
   const parsed = new URL(databaseUrl);
-  const explicitProvider = String(process.env.DB_PROVIDER || process.env.DATABASE_PROVIDER || "").toLowerCase();
   const host = parsed.hostname;
   const databaseName = parsed.pathname.replace(/^\//, "") || process.env.PGDATABASE || process.env.DB_NAME || "";
-  const supabaseHost = /supabase\.(co|com)|pooler\.supabase\.com/i.test(host);
-  const type = explicitProvider.includes("supabase") || supabaseHost ? "Supabase" : "VPS";
 
   return {
-    type,
-    label: type === "Supabase" ? "Supabase PostgreSQL" : "VPS PostgreSQL",
+    type: "VPS",
+    label: "BigRock VPS Primary PostgreSQL",
     host,
     port: parsed.port || "5432",
     databaseName,
