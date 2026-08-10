@@ -19,9 +19,6 @@ const parseBool = (value, fallback = false) => {
 
 const defaultBackupRoot = () => {
   if (process.env.DB_BACKUP_DIR) return process.env.DB_BACKUP_DIR;
-  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
-    return path.join("/tmp", "backups", "postgresql");
-  }
   return path.join(process.cwd(), "backups", "postgresql");
 };
 

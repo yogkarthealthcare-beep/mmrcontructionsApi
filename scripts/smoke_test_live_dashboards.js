@@ -2,7 +2,7 @@ import "../config/loadEnv.js";
 import jwt from "jsonwebtoken";
 import sql from "../db.js";
 
-const baseUrl = process.env.PRODUCTION_API_URL || "https://mmrcontructions-api-self.vercel.app";
+const baseUrl = process.env.PRODUCTION_API_URL || "https://api.mmrconstructions.in";
 
 const requestDashboard = async (path, token) => {
   const response = await fetch(`${baseUrl}${path}`, {

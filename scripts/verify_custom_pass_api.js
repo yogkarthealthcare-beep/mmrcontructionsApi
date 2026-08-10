@@ -1,5 +1,5 @@
 async function verifyLogin() {
-  const url = "https://mmrcontructions-api-self.vercel.app/api/admin/auth/login";
+  const url = "https://api.mmrconstructions.in/api/admin/auth/login";
   const body = {
     email: "admin@mmrconstructions.in",
     password: "MMR@Admin123"

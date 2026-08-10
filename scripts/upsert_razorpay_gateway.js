@@ -3,8 +3,8 @@ import { encrypt } from "../utils/encryption.js";
 
 const keyId = process.env.RAZORPAY_KEY_ID;
 const keySecret = process.env.RAZORPAY_KEY_SECRET;
-const callbackUrl = process.env.RAZORPAY_CALLBACK_URL || "https://mmrcontructions-api-self.vercel.app/api/payment/razorpay/verify";
-const webhookUrl = process.env.RAZORPAY_WEBHOOK_URL || "https://mmrcontructions-api-self.vercel.app/api/payment/razorpay/webhook";
+const callbackUrl = process.env.RAZORPAY_CALLBACK_URL || "https://api.mmrconstructions.in/api/payment/razorpay/verify";
+const webhookUrl = process.env.RAZORPAY_WEBHOOK_URL || "https://api.mmrconstructions.in/api/payment/razorpay/webhook";
 
 if (!keyId || !keySecret) {
   console.error("RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are required.");

@@ -34,7 +34,7 @@ async function testImpersonation() {
 
     if (customer) {
       console.log(`\n2. Testing Customer Impersonation for: ${customer.full_name} (ID: ${customer.user_id})`);
-      const res = await fetch("https://mmrcontructions-api-self.vercel.app/api/admin/login-as-user", {
+      const res = await fetch("https://api.mmrconstructions.in/api/admin/login-as-user", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -53,7 +53,7 @@ async function testImpersonation() {
 
     if (associate) {
       console.log(`\n3. Testing Associate Impersonation for: ${associate.full_name} (ID: ${associate.user_id})`);
-      const res = await fetch("https://mmrcontructions-api-self.vercel.app/api/admin/login-as-user", {
+      const res = await fetch("https://api.mmrconstructions.in/api/admin/login-as-user", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -72,7 +72,7 @@ async function testImpersonation() {
 
     if (investor) {
       console.log(`\n4. Testing Investor Impersonation for: ${investor.full_name} (ID: ${investor.id})`);
-      const res = await fetch("https://mmrcontructions-api-self.vercel.app/api/admin/login-as-user", {
+      const res = await fetch("https://api.mmrconstructions.in/api/admin/login-as-user", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

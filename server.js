@@ -27,9 +27,6 @@ import invoiceModuleRoutes from './routes/invoice-module.routes.js';
 import fileStorageService, { saveFileToVPS, deleteFileFromStorage, getStorageRoot } from "./services/fileStorage.service.js";
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
-import { inject } from "@vercel/analytics";
-
-inject();
 
 const app = express();
 app.set("trust proxy", 1);

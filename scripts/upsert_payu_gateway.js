@@ -3,7 +3,7 @@ import { encrypt } from "../utils/encryption.js";
 
 const key = process.env.PAYU_MERCHANT_KEY;
 const salt = process.env.PAYU_SALT;
-const callbackUrl = process.env.PAYU_CALLBACK_URL || "https://mmrcontructions-api-self.vercel.app/api/payment/payu/verify";
+const callbackUrl = process.env.PAYU_CALLBACK_URL || "https://api.mmrconstructions.in/api/payment/payu/verify";
 
 if (!key || !salt) {
   console.error("PAYU_MERCHANT_KEY and PAYU_SALT are required.");
