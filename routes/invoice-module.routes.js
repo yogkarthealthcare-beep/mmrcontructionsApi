@@ -37,14 +37,25 @@ router.get("/orders", userAuth, async (req, res) => {
     const limitNum = Math.max(1, Math.min(100, parseInt(limit, 10) || 10));
     const offset = (pageNum - 1) * limitNum;
 
-    const userRole = req.user.role || (req.user.is_admin ? "admin" : "user");
-    const userId = req.user.user_id;
+    const isAdmin = Boolean(
+      req.user.is_admin ||
+      req.user.admin_id ||
+      ["admin", "superadmin", "sitemanager", "accountant", "supportstaff"].includes(String(req.user.role || "").toLowerCase())
+    );
+
+    const isAssociate = Boolean(
+      req.user.is_associate ||
+      String(req.user.role || "").toLowerCase() === "associate" ||
+      String(req.user.user_type || "").toLowerCase() === "associate"
+    );
+
+    const userId = req.user.user_id || req.user.admin_id || req.user.id || 0;
 
     // Role-based visibility condition
     let roleCondition = sql`TRUE`;
-    if (userRole === "admin" || req.user.is_admin) {
+    if (isAdmin) {
       roleCondition = sql`TRUE`;
-    } else if (userRole === "associate" || req.user.is_associate) {
+    } else if (isAssociate) {
       roleCondition = sql`(inv.associate_id = ${userId} OR inv.user_id = ${userId})`;
     } else {
       roleCondition = sql`inv.user_id = ${userId}`;
@@ -144,15 +155,29 @@ router.get("/orders", userAuth, async (req, res) => {
 });
 
 // Helper: Check invoice authorization
-async function canAccessInvoice(reqUser, invoice) {
-  if (reqUser.is_admin || reqUser.role === "admin") return true;
-  if (invoice.user_id === reqUser.user_id) return true;
-  if (invoice.associate_id && invoice.associate_id === reqUser.user_id) return true;
-  if (reqUser.is_associate || reqUser.role === "associate") {
+async function canAccessInvoice(reqUser = {}, invoice = {}) {
+  const isAdmin = Boolean(
+    reqUser.is_admin ||
+    reqUser.admin_id ||
+    ["admin", "superadmin", "sitemanager", "accountant", "supportstaff"].includes(String(reqUser.role || "").toLowerCase())
+  );
+  if (isAdmin) return true;
+
+  const currentUserId = reqUser.user_id || reqUser.id || 0;
+  if (invoice.user_id && invoice.user_id === currentUserId) return true;
+  if (invoice.associate_id && invoice.associate_id === currentUserId) return true;
+
+  const isAssociate = Boolean(
+    reqUser.is_associate ||
+    String(reqUser.role || "").toLowerCase() === "associate" ||
+    String(reqUser.user_type || "").toLowerCase() === "associate"
+  );
+
+  if (isAssociate && currentUserId) {
     // Check if customer was referred by this associate
     const [ref] = await sql`
       SELECT 1 FROM referral_registrations
-      WHERE sponsor_user_id = ${reqUser.user_id} AND referred_user_id = ${invoice.user_id}`;
+      WHERE sponsor_user_id = ${currentUserId} AND referred_user_id = ${invoice.user_id}`;
     if (ref) return true;
   }
   return false;
@@ -201,9 +226,11 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
     }
 
     // Audit Log Entry
+    const actorId = req.user.user_id || req.user.admin_id || req.user.id || 0;
+    const actorRole = req.user.role || (req.user.admin_id ? 'Admin' : 'USER');
     await sql`
       INSERT INTO invoice_audit_log (invoice_id, invoice_number, action, performed_by_id, performed_by_role, ip_address)
-      VALUES (${invoice.invoice_id}, ${invoice.invoice_number}, 'VIEWED', ${req.user.user_id}, ${req.user.role || 'USER'}, ${req.ip || ''})`;
+      VALUES (${invoice.invoice_id}, ${invoice.invoice_number}, 'VIEWED', ${actorId}, ${actorRole}, ${req.ip || ''})`;
 
     return ok(res, {
       invoice,
@@ -240,9 +267,11 @@ router.get("/invoice/:invoiceNumber/pdf", userAuth, async (req, res) => {
     const data = invoice.invoice_data || {};
 
     // Audit Log Entry
+    const actorId = req.user.user_id || req.user.admin_id || req.user.id || 0;
+    const actorRole = req.user.role || (req.user.admin_id ? 'Admin' : 'USER');
     await sql`
       INSERT INTO invoice_audit_log (invoice_id, invoice_number, action, performed_by_id, performed_by_role, ip_address)
-      VALUES (${invoice.invoice_id}, ${invoice.invoice_number}, 'DOWNLOADED', ${req.user.user_id}, ${req.user.role || 'USER'}, ${req.ip || ''})`;
+      VALUES (${invoice.invoice_id}, ${invoice.invoice_number}, 'DOWNLOADED', ${actorId}, ${actorRole}, ${req.ip || ''})`;
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${invoice.invoice_number}.pdf"`);
@@ -543,9 +572,10 @@ router.delete("/admin/orders/:id", adminAuth, async (req, res) => {
 
     // 4. Audit Log
     try {
+      const actorId = req.user?.user_id || req.user?.admin_id || req.user?.id || 0;
       await sql`
         INSERT INTO invoice_audit_log (invoice_id, action, performed_by, notes)
-        VALUES (${inv?.invoice_id || 0}, 'DELETED', ${req.user.user_id}, ${'Admin deleted order #' + targetId + '. Plot #' + (plotId || '') + ' reset to Available.'})`;
+        VALUES (${inv?.invoice_id || 0}, 'DELETED', ${actorId}, ${'Admin deleted order #' + targetId + '. Plot #' + (plotId || '') + ' reset to Available.'})`;
     } catch (_) {}
 
     return ok(res, {}, `Order #${targetId} deleted successfully. Associated plot status reset to Available.`);
