@@ -20,8 +20,8 @@ const getWalletRole = (user = {}) => {
 };
 
 const isAdminPrincipal = (principal = {}) => {
-  const adminRoles = new Set(["SuperAdmin", "FinanceManager", "SiteManager", "SupportStaff", "Admin", "admin", "super_admin"]);
-  return Boolean(principal.admin_id || adminRoles.has(principal.role));
+  const adminRoles = new Set(["SuperAdmin", "FinanceManager", "SiteManager", "SupportStaff", "Admin", "admin", "super_admin", "SuperAdmin"]);
+  return Boolean(principal.admin_id || principal.is_admin || adminRoles.has(principal.role) || adminRoles.has(principal.user_type));
 };
 
 // ─── AUTH MIDDLEWARES ──────────────────────────────────────────
@@ -627,7 +627,7 @@ router.get("/admin/wallet/transactions", authAdmin, async (req, res) => {
     let query = sql`
       SELECT wt.*, u.full_name as user_name, u.email as user_email, u.mobile_no as user_mobile
       FROM wallet_transactions wt
-      JOIN users u ON wt.user_id = u.user_id
+      LEFT JOIN users u ON wt.user_id = u.user_id
       WHERE 1=1
     `;
 
