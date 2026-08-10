@@ -5525,14 +5525,14 @@ app.get("/api/associate/commissions", verifyUserToken, requireAssociate, async (
       LEFT JOIN plots    p ON b.plot_id = p.plot_id
       LEFT JOIN sites    s ON p.site_id = s.site_id
       WHERE c.associate_user_id = ${req.user.user_id}
-        AND (${statusFilter} IS NULL OR c.commission_status = ${statusFilter})
+        AND (${statusFilter}::text IS NULL OR c.commission_status = ${statusFilter})
       ORDER BY c.created_at DESC
       LIMIT ${limit} OFFSET ${offset}`;
 
     const [total] = await sql`
       SELECT COUNT(*) AS count FROM commission_transactions
       WHERE associate_user_id = ${req.user.user_id}
-        AND (${statusFilter} IS NULL OR commission_status = ${statusFilter})`;
+        AND (${statusFilter}::text IS NULL OR commission_status = ${statusFilter})`;
 
     return ok(res, { commissions, total: total.count, page: +page, limit: +limit });
   } catch (e) {
@@ -6566,7 +6566,7 @@ app.post("/api/admin/users/:id/approve",
         await sql`
           INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
           VALUES (${uid}, ${sponsorId},
-                  CASE WHEN ${sponsorId} IS NULL THEN 1
+                  CASE WHEN ${sponsorId}::int IS NULL THEN 1
                        ELSE COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${sponsorId}), 0) + 1
                   END) ON CONFLICT (associate_user_id) DO NOTHING`;
         await linkApprovedReferral(uid);
@@ -9437,7 +9437,7 @@ app.post("/api/admin/notifications/bulk",
       const users = await sql`
         SELECT user_id FROM users
         WHERE account_status = 'Active'
-          AND (${targetFilter} IS NULL OR ${targetFilter} = 'All' OR user_type = ${targetFilter})`;
+          AND (${targetFilter}::text IS NULL OR ${targetFilter}::text = 'All' OR user_type = ${targetFilter})`;
 
       for (const u of users) {
         await sql`
@@ -9842,7 +9842,7 @@ app.get("/api/admin/audit-log",
       const moduleFilter = module ? String(module) : null;
       const logs = await sql`
         SELECT * FROM audit_log
-        WHERE (${moduleFilter} IS NULL OR module = ${moduleFilter})
+        WHERE (${moduleFilter}::text IS NULL OR module = ${moduleFilter})
         ORDER BY created_at DESC
         LIMIT ${limit} OFFSET ${offset}`;
       return ok(res, logs);
