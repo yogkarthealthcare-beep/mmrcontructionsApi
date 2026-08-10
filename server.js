@@ -7963,7 +7963,11 @@ app.get("/api/admin/sites",
                COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Sold')::int AS sold
         FROM sites s
         LEFT JOIN plots p ON p.site_id = s.site_id AND p.is_active = TRUE
-        GROUP BY s.site_id
+        GROUP BY s.site_id, s.site_name, s.site_prefix, s.city, s.state, s.full_address,
+                 s.description, s.starting_price, s.total_area, s.highlights,
+                 s.property_image_url, s.map_image_url, s.display_on_home_page,
+                 s.html_map_code, s.html_map_file_url, s.html_map_updated_at,
+                 s.site_status, s.has_govt_approval, s.total_plots, s.created_at, s.updated_at
         ORDER BY s.site_id`;
       return ok(res, sites);
     } catch (e) {
