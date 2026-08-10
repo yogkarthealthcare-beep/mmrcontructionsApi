@@ -41,11 +41,17 @@ jobs:
             GIT_REMOTE=$(git config --get remote.origin.url || true)
             echo "Current Git Remote: $GIT_REMOTE"
 
-            # 3. Verify .env file preservation
+            # 3. Verify .env file preservation & Git untracked status
             if [ ! -f "$PROJECT_DIR/.env" ]; then
               echo "⚠️ Warning: Production .env file missing in $PROJECT_DIR!"
             else
-              echo "✅ Production .env file verified and preserved."
+              echo "✅ Production .env file verified on VPS."
+            fi
+
+            IS_ENV_TRACKED=$(git ls-files .env || true)
+            if [ -n "$IS_ENV_TRACKED" ]; then
+              echo "❌ CRITICAL SECURITY ALERT: .env file is tracked by Git! Stopping deployment."
+              exit 1
             fi
 
             # 4. Safe Git Fetch & Reset to origin/main
@@ -56,6 +62,7 @@ jobs:
             
             # Check package-lock.json diff before pulling
             PACKAGE_CHANGED=$(git diff HEAD origin/main -- package-lock.json || true)
+            NODE_MODULES_EXIST=$( [ -d "node_modules" ] && echo "yes" || echo "no" )
 
             echo "Updating workspace code to latest main branch..."
             git checkout main
@@ -64,9 +71,9 @@ jobs:
             NEW_COMMIT=$(git rev-parse HEAD)
             echo "Successfully updated code: $PREV_COMMIT -> $NEW_COMMIT"
 
-            # 5. Smart Node.js Dependency Management (npm ci only if lockfile changed)
-            if [ -n "$PACKAGE_CHANGED" ]; then
-              echo "📦 package-lock.json changed. Installing production dependencies..."
+            # 5. Smart Node.js Dependency Management (npm ci only if lockfile changed or node_modules missing)
+            if [ -n "$PACKAGE_CHANGED" ] || [ "$NODE_MODULES_EXIST" = "no" ]; then
+              echo "📦 package-lock.json changed or node_modules missing. Installing production dependencies..."
               npm ci --omit=dev || npm install --omit=dev
             else
               echo "⚡ package-lock.json unchanged. Skipping dependency installation."
@@ -81,33 +88,33 @@ jobs:
               pm2 start server.js --name mmr-api
             fi
 
+            pm2 save
+
             # 7. PM2 Status & Log Verification
             echo "📊 PM2 Application Status:"
             pm2 status mmr-api
             echo "--------------------------------------------------------------------------"
-            echo "📜 Recent PM2 Logs (Last 15 lines):"
-            pm2 logs mmr-api --lines 15 --raw | tail -n 15
+            echo "📜 Recent PM2 Logs (Last 20 lines):"
+            pm2 logs mmr-api --lines 20 --raw | tail -n 20
 
             # 8. Local API Health Verification
             echo "--------------------------------------------------------------------------"
             echo "🔍 Testing API Health Check locally (http://127.0.0.1:5000/api/health)..."
-            sleep 2
+            sleep 3
             
+            HEALTH_RESPONSE=$(curl -s http://127.0.0.1:5000/api/health || true)
             HEALTH_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/api/health || true)
             echo "Local API Health HTTP Code: $HEALTH_HTTP_CODE"
+            echo "Health Endpoint Response: $HEALTH_RESPONSE"
 
             if [ "$HEALTH_HTTP_CODE" -eq 200 ]; then
               echo "✅ API Health Check PASSED (HTTP 200 OK)."
             else
-              echo "⚠️ Warning: Health endpoint returned HTTP $HEALTH_HTTP_CODE. Testing root route..."
-              ROOT_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/ || true)
-              echo "Root HTTP Response Code: $ROOT_CODE"
-              if [ "$ROOT_CODE" -eq 200 ] || [ "$ROOT_CODE" -eq 404 ]; then
-                echo "✅ Server process listening and responding cleanly on port 5000."
-              else
-                echo "❌ Error: API server is not responding cleanly on port 5000!"
-                exit 1
-              fi
+              echo "❌ Error: API Health check failed with HTTP code $HEALTH_HTTP_CODE!"
+              echo "Rolling back to previous commit $PREV_COMMIT..."
+              git reset --hard "$PREV_COMMIT"
+              pm2 restart mmr-api --update-env
+              exit 1
             fi
 
             # 9. Verify External File Storage Directory Un-touched

@@ -161,9 +161,10 @@ app.use("/uploads", (req, res) => {
 
 app.get("/api/health", (_req, res) => {
   return res.json({
-    status: "ok",
-    timestamp: new Date().toISOString(),
+    success: true,
+    status: "healthy",
     service: "MMR Constructions API",
+    timestamp: new Date().toISOString(),
     storage_root: getStorageRoot(),
   });
 });
