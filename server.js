@@ -156,6 +156,7 @@ app.use("/uploads", (req, res) => {
     if (err && !res.headersSent) {
       res.status(404).send("File not found");
     }
+  });
 });
 
 app.get("/api/health", (_req, res) => {
