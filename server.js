@@ -10261,8 +10261,8 @@ app.get("/api/admin/analytics",
         liveVisitorsRow
       ] = await Promise.all([
         sql`SELECT COUNT(*)::int AS count FROM users WHERE account_status = 'Active'`,
-        sql`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
-        sql`SELECT COUNT(*)::int AS count FROM users WHERE created_at >= ${prevStartDateStr} AND created_at < ${startDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM users WHERE COALESCE(registered_at, updated_at) >= ${startDateStr} AND COALESCE(registered_at, updated_at) <= ${endDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM users WHERE COALESCE(registered_at, updated_at) >= ${prevStartDateStr} AND COALESCE(registered_at, updated_at) < ${startDateStr}`,
         sql`SELECT COUNT(*)::int AS count FROM investors WHERE is_deleted = FALSE`,
         sql`SELECT COUNT(*)::int AS count FROM investors WHERE is_deleted = FALSE AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
         sql`SELECT COUNT(*)::int AS count FROM investors WHERE is_deleted = FALSE AND created_at >= ${prevStartDateStr} AND created_at < ${startDateStr}`,
@@ -10271,13 +10271,13 @@ app.get("/api/admin/analytics",
         sql`SELECT COUNT(*)::int AS count FROM inquiries WHERE status = 'New' AND created_at >= ${startDateStr} AND created_at <= ${endDateStr} ${siteIdFilter ? sql`AND site_id = ${siteIdFilter}` : sql``}`,
         sql`SELECT COUNT(*)::int AS count FROM bookings WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
         sql`SELECT COUNT(*)::int AS count FROM bookings WHERE created_at >= ${prevStartDateStr} AND created_at < ${startDateStr}`,
-        sql`SELECT COUNT(*)::int AS count FROM bookings WHERE booking_status IN ('Pending', 'PaymentPending', 'InProcess') AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
+        sql`SELECT COUNT(*)::int AS count FROM bookings WHERE booking_status::text IN ('Submitted', 'Pending', 'PaymentPending', 'InProcess') AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
         sql`SELECT COUNT(*)::int AS count FROM bookings WHERE booking_status = 'Confirmed' AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
         sql`SELECT COUNT(*)::int AS count FROM bookings WHERE booking_status = 'Cancelled' AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
         sql`SELECT COALESCE(SUM(COALESCE(advance_amount, 0)), 0)::numeric AS sum FROM bookings WHERE booking_status = 'Confirmed' AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
         sql`SELECT COALESCE(SUM(COALESCE(advance_amount, 0)), 0)::numeric AS sum FROM bookings WHERE booking_status = 'Confirmed' AND created_at >= ${prevStartDateStr} AND created_at < ${startDateStr}`,
         sql`SELECT COALESCE(SUM(COALESCE(total_due, emi_amount, 0)), 0)::numeric AS sum FROM emi_schedules WHERE emi_status IN ('Pending', 'Overdue', 'ProofSubmitted') AND created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
-        sql`SELECT COUNT(*)::int AS count, COALESCE(SUM(COALESCE(paid_amount, 0)), 0)::numeric AS sum FROM emi_schedules WHERE emi_status = 'Paid' AND paid_at >= ${startDateStr} AND paid_at <= ${endDateStr}`,
+        sql`SELECT COUNT(*)::int AS count, COALESCE(SUM(COALESCE(paid_amount, 0)), 0)::numeric AS sum FROM emi_schedules WHERE emi_status = 'Paid' AND COALESCE(paid_date, confirmed_at, updated_at) >= ${startDateStr} AND COALESCE(paid_date, confirmed_at, updated_at) <= ${endDateStr}`,
         sql`SELECT COUNT(*)::int AS count FROM analytics_events WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
         sql`SELECT COUNT(*)::int AS count FROM analytics_events WHERE created_at >= ${prevStartDateStr} AND created_at < ${startDateStr}`,
         sql`SELECT COUNT(DISTINCT visitor_id)::int AS count FROM analytics_events WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr}`,
@@ -10315,10 +10315,10 @@ app.get("/api/admin/analytics",
         SELECT
           s.site_id,
           s.site_name,
-          s.location,
+          COALESCE(s.city, s.full_address) AS location,
           COUNT(DISTINCT p.plot_id)::int AS total_plots,
           COUNT(DISTINCT p.plot_id) FILTER (WHERE b.booking_id IS NULL OR b.booking_status = 'Cancelled')::int AS available_plots,
-          COUNT(DISTINCT p.plot_id) FILTER (WHERE b.booking_status IN ('Pending', 'PaymentPending', 'InProcess'))::int AS in_process_plots,
+          COUNT(DISTINCT p.plot_id) FILTER (WHERE b.booking_status::text IN ('Submitted', 'Pending', 'PaymentPending', 'InProcess'))::int AS in_process_plots,
           COUNT(DISTINCT p.plot_id) FILTER (WHERE b.booking_status = 'Confirmed')::int AS sold_plots,
           COALESCE(inq.enquiry_count, 0)::int AS enquiries,
           COALESCE(ae.view_count, 0)::int AS views,
@@ -10338,8 +10338,8 @@ app.get("/api/admin/analytics",
           WHERE created_at >= ${startDateStr} AND created_at <= ${endDateStr} AND site_id IS NOT NULL
           GROUP BY site_id
         ) ae ON ae.site_id = s.site_id
-        WHERE s.is_active = TRUE ${siteIdFilter ? sql`AND s.site_id = ${siteIdFilter}` : sql``}
-        GROUP BY s.site_id, s.site_name, s.location, inq.enquiry_count, ae.view_count
+        WHERE 1=1 ${siteIdFilter ? sql`AND s.site_id = ${siteIdFilter}` : sql``}
+        GROUP BY s.site_id, s.site_name, s.city, s.full_address, inq.enquiry_count, ae.view_count
         ORDER BY sold_plots DESC, revenue DESC`;
 
       // Top Viewed Plots
