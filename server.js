@@ -6678,7 +6678,34 @@ app.get("/api/admin/bookings",
       const fromDateFilter = from_date ? String(from_date) : null;
       const toDateFilter = to_date ? String(to_date) : null;
       const searchFilter = search ? String(search) : null;
-      const searchLike = `%${searchFilter || ""}%`;
+
+      const conds = [];
+      if (statusFilter) conds.push(sql`b.booking_status = ${statusFilter}`);
+      if (siteIdFilter) conds.push(sql`s.site_id = ${siteIdFilter}`);
+      if (fromDateFilter) conds.push(sql`b.booking_date::date >= ${fromDateFilter}::date`);
+      if (toDateFilter) conds.push(sql`b.booking_date::date <= ${toDateFilter}::date`);
+      if (paymentStatusFilter) {
+        conds.push(sql`(
+          CASE
+            WHEN b.booking_status = 'Confirmed' THEN 'Paid'
+            WHEN b.advance_amount > 0 THEN 'Partial'
+            ELSE 'Unpaid'
+          END
+        ) = ${paymentStatusFilter}`);
+      }
+      if (searchFilter) {
+        const q = `%${searchFilter}%`;
+        conds.push(sql`(
+          b.booking_serial ILIKE ${q} OR
+          u.full_name ILIKE ${q} OR
+          u.mobile_no ILIKE ${q}
+        )`);
+      }
+
+      let whereSql = sql`TRUE`;
+      if (conds.length > 0) {
+        whereSql = conds.reduce((acc, curr) => sql`${acc} AND ${curr}`);
+      }
 
       const bookings = await sql`
         SELECT b.booking_id, b.booking_serial, b.booking_date, b.booking_status,
@@ -6704,22 +6731,7 @@ app.get("/api/admin/bookings",
           LIMIT 1
         ) proof ON TRUE
         LEFT JOIN booking_appointments ap ON ap.booking_id = b.booking_id
-        WHERE (${statusFilter} IS NULL OR b.booking_status = ${statusFilter})
-          AND (${siteIdFilter} IS NULL OR s.site_id = ${siteIdFilter})
-          AND (${fromDateFilter} IS NULL OR b.booking_date::date >= ${fromDateFilter})
-          AND (${toDateFilter} IS NULL OR b.booking_date::date <= ${toDateFilter})
-          AND (${paymentStatusFilter} IS NULL OR (
-            CASE
-              WHEN b.booking_status = 'Confirmed' THEN 'Paid'
-              WHEN b.advance_amount > 0 THEN 'Partial'
-              ELSE 'Unpaid'
-            END
-          ) = ${paymentStatusFilter})
-          AND (${searchFilter} IS NULL OR (
-            b.booking_serial ILIKE ${searchLike} OR
-            u.full_name ILIKE ${searchLike} OR
-            u.mobile_no ILIKE ${searchLike}
-          ))
+        WHERE ${whereSql}
         ORDER BY b.created_at DESC
         LIMIT ${safeLimit} OFFSET ${offset}`;
 
