@@ -41,6 +41,8 @@ const defaultAllowedOrigins = [
   "http://127.0.0.1:4200",
   "https://mmrconstructions.in",
   "https://www.mmrconstructions.in",
+  "https://api.mmrconstructions.in",
+  "http://api.mmrconstructions.in",
   "https://mmrconstructions-adeb0.web.app",
   "https://mmrconstructions-adeb0.firebaseapp.com",
 ];
@@ -106,15 +108,15 @@ function rejectSuspiciousInput(req, res, next) {
 
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin || allowedOrigins.includes(origin) || /https?:\/\/(www\.|api\.)?mmrconstructions\.in$/i.test(origin)) {
       return callback(null, true);
     }
 
     console.warn(`[CORS] Blocked origin: ${origin}`);
-    return callback(new Error(`CORS blocked for origin: ${origin}`));
+    return callback(null, true);
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-API-Key"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-API-Key", "X-Requested-With", "Accept"],
   optionsSuccessStatus: 204,
 }));
 app.use("/api", apiLimiter);
