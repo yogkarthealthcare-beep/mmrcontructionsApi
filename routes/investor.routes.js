@@ -5,6 +5,7 @@ import crypto from "crypto";
 import multer from "multer";
 import sql from "../db.js";
 import { sendEmail } from "../emailService.js";
+import { saveFileToVPS, deleteFileFromStorage } from "../services/fileStorage.service.js";
 
 const router = express.Router();
 const upload = multer({
@@ -696,10 +697,10 @@ router.put("/investor/profile", authInvestor, async (req, res) => {
 router.post("/investor/profile/photo", authInvestor, upload.single("profile_photo"), async (req, res) => {
   try {
     if (!req.file) return err(res, "Profile photo is required.", 400);
-    const dataUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+    const saved = await saveFileToVPS(req.file.buffer, { module: "investor", entityId: req.investor.id, entityType: "InvestorPhoto", originalName: req.file.originalname });
     const [updated] = await sql`
       UPDATE investor_users
-      SET profile_picture_url = ${dataUrl}, updated_at = NOW()
+      SET profile_picture_url = ${saved.url}, updated_at = NOW()
       WHERE id = ${req.investor.id}
       RETURNING id, profile_picture_url`;
     return ok(res, updated, "Profile photo updated successfully.");
@@ -746,12 +747,14 @@ router.post("/investor/documents", authInvestor, upload.single("document"), asyn
         AND status <> 'approved'
         AND deleted_at IS NULL`;
 
+    const saved = await saveFileToVPS(req.file.buffer, { module: "investor", entityId: req.investor.id, entityType: documentType, originalName: req.file.originalname });
+
     const [created] = await sql`
       INSERT INTO investor_documents (
-        investor_id, document_type, original_file_name, mime_type, file_size_bytes, file_data, status
+        investor_id, document_type, original_file_name, mime_type, file_size_bytes, file_url, file_data, status
       ) VALUES (
         ${req.investor.id}, ${documentType}, ${req.file.originalname}, ${req.file.mimetype},
-        ${req.file.size}, ${req.file.buffer}, 'pending'
+        ${req.file.size}, ${saved.url}, ${req.file.buffer}, 'pending'
       )
       RETURNING id, document_type, original_file_name, mime_type, file_size_bytes, status, created_at`;
     await notifyInvestor(req.investor.id, "Document Submitted", "Your document was uploaded and is pending admin review.", "document");

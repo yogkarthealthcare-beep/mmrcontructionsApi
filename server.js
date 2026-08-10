@@ -24,6 +24,7 @@ import databaseBackupRoutes from './routes/database-backup.routes.js';
 import whatsappRoutes, { whatsappEvents } from './routes/whatsapp.routes.js';
 import investorRoutes from './routes/investor.routes.js';
 import invoiceModuleRoutes from './routes/invoice-module.routes.js';
+import fileStorageService, { saveFileToVPS, deleteFileFromStorage, getStorageRoot } from "./services/fileStorage.service.js";
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
 import { inject } from "@vercel/analytics";
@@ -143,7 +144,21 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: false, limit: "1mb" }));
 app.use(["/api/book-plot/leads", "/api/inquiries"], rejectSuspiciousInput);
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+app.use("/uploads", (req, res) => {
+  const rootDir = getStorageRoot();
+  const safePath = path.normalize(req.path || "").replace(/^(\.\.[\/\\])+/, "").replace(/^\/+/, "");
+  const targetPath = path.join(rootDir, safePath);
+
+  if (!targetPath.startsWith(rootDir)) {
+    return res.status(403).send("Forbidden");
+  }
+
+  res.sendFile(targetPath, (err) => {
+    if (err && !res.headersSent) {
+      res.status(404).send("File not found");
+    }
+  });
+});
 app.use('/api/auth', authEmailRoutes);
 app.use('/api', newRoutes);
 app.use('/api', paymentRoutes);
@@ -2448,9 +2463,9 @@ app.post("/api/admin/investors", verifyAdminToken, role("SuperAdmin", "SiteManag
     await ensureHomeExperienceSchema(); const name = String(req.body.name || "").trim();
     if (!name) return err(res, "Investor name is required", 400);
     if (!req.file || !/^image\/(jpeg|png|webp)$/.test(req.file.mimetype)) return err(res, "Profile image is required (JPG, PNG or WEBP)", 400);
-    const image = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.investor_profile, req.file.originalname);
+    const { url } = await saveFileToVPS(req.file.buffer, { module: "investor", entityId: name, entityType: "Investor", originalName: req.file.originalname });
     const [created] = await sql`INSERT INTO investors(name, profile_image_url, profile_image_public_id, display_order, is_active)
-      VALUES(${name}, ${image.url}, ${image.public_id}, ${Number(req.body.display_order)||0}, ${parseBool(req.body.is_active,true)}) RETURNING *`;
+      VALUES(${name}, ${url}, ${null}, ${Number(req.body.display_order)||0}, ${parseBool(req.body.is_active,true)}) RETURNING *`;
     return ok(res, created, "Investor added.", 201);
   } catch (e) { return err(res, e.message); }
 });
@@ -2462,8 +2477,9 @@ app.put("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "SiteMa
     const name = String(req.body.name || "").trim(); if (!name) return err(res, "Investor name is required", 400);
     let url=current.profile_image_url, publicId=current.profile_image_public_id;
     if(req.file){ if(!/^image\/(jpeg|png|webp)$/.test(req.file.mimetype)) return err(res,"Profile image must be JPG, PNG or WEBP",400);
-      const image=await uploadToCloudinary(req.file.buffer,CLOUDINARY_FOLDER.investor_profile,req.file.originalname);url=image.url;publicId=image.public_id;
-      if(current.profile_image_public_id) cloudinary.uploader.destroy(current.profile_image_public_id).catch(()=>{}); }
+      const saved = await saveFileToVPS(req.file.buffer, { module: "investor", entityId: req.params.id, entityType: "Investor", originalName: req.file.originalname });
+      url = saved.url; publicId = null;
+      await deleteFileFromStorage(current.profile_image_url, current.profile_image_public_id); }
     const [updated]=await sql`UPDATE investors SET name=${name},profile_image_url=${url},profile_image_public_id=${publicId},display_order=${Number(req.body.display_order)||0},is_active=${parseBool(req.body.is_active,true)},updated_at=NOW() WHERE id=${req.params.id} RETURNING *`;
     return ok(res,updated,"Investor updated.");
   } catch(e){return err(res,e.message);}
@@ -2474,7 +2490,7 @@ app.patch("/api/admin/investors/:id/status", verifyAdminToken, role("SuperAdmin"
 });
 
 app.delete("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "SiteManager"), async(req,res)=>{
-  try{await ensureHomeExperienceSchema();const [row]=await sql`UPDATE investors SET is_deleted=TRUE,is_active=FALSE,updated_at=NOW() WHERE id=${req.params.id} AND is_deleted=FALSE RETURNING id,profile_image_public_id`;if(!row)return err(res,"Investor not found",404);if(row.profile_image_public_id)cloudinary.uploader.destroy(row.profile_image_public_id).catch(()=>{});return ok(res,{},"Investor deleted.");}catch(e){return err(res,e.message);}
+  try{await ensureHomeExperienceSchema();const [row]=await sql`UPDATE investors SET is_deleted=TRUE,is_active=FALSE,updated_at=NOW() WHERE id=${req.params.id} AND is_deleted=FALSE RETURNING id,profile_image_url,profile_image_public_id`;if(!row)return err(res,"Investor not found",404);await deleteFileFromStorage(row.profile_image_url, row.profile_image_public_id);return ok(res,{},"Investor deleted.");}catch(e){return err(res,e.message);}
 });
 
 app.get("/api/book-plot/backgrounds", async (_req, res) => {
@@ -2504,8 +2520,8 @@ app.post("/api/admin/book-plot/backgrounds", verifyAdminToken, role("SuperAdmin"
     let imageUrl = String(req.body.image_url || "").trim();
     let publicId = null;
     if (req.file) {
-      const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.book_plot_background, req.file.originalname);
-      imageUrl = uploaded.url; publicId = uploaded.public_id;
+      const saved = await saveFileToVPS(req.file.buffer, { module: "background", entityId: "bg", entityType: "Background", originalName: req.file.originalname });
+      imageUrl = saved.url; publicId = null;
     }
     if (!imageUrl) return err(res, "Background image is required", 400);
     const [image] = await sql`
@@ -2533,9 +2549,9 @@ app.delete("/api/admin/book-plot/backgrounds/:id", verifyAdminToken, role("Super
     await ensureHomeExperienceSchema();
     const [image] = await sql`
       UPDATE book_plot_background_images SET is_deleted = TRUE, is_active = FALSE, updated_at = NOW()
-      WHERE id = ${req.params.id} AND is_deleted = FALSE RETURNING id, image_public_id`;
+      WHERE id = ${req.params.id} AND is_deleted = FALSE RETURNING id, image_url, image_public_id`;
     if (!image) return err(res, "Background image not found", 404);
-    if (image.image_public_id) cloudinary.uploader.destroy(image.image_public_id).catch(() => {});
+    await deleteFileFromStorage(image.image_url, image.image_public_id);
     return ok(res, {}, "Background image deleted.");
   } catch (e) { return err(res, e.message); }
 });
@@ -2699,13 +2715,9 @@ app.post("/api/admin/home-sliders",
       let imageUrl = String(req.body.image_url || "").trim();
       let imagePublicId = null;
       if (req.file) {
-        const uploaded = await uploadToCloudinary(
-          req.file.buffer,
-          CLOUDINARY_FOLDER.slider_image,
-          req.file.originalname,
-        );
-        imageUrl = uploaded.url;
-        imagePublicId = uploaded.public_id;
+        const saved = await saveFileToVPS(req.file.buffer, { module: "slider", entityId: title, entityType: "HomeSlider", originalName: req.file.originalname });
+        imageUrl = saved.url;
+        imagePublicId = null;
       }
       if (!imageUrl) return err(res, "Slider image is required", 400);
 
@@ -2779,11 +2791,7 @@ app.post("/api/admin/home-sliders/bulk",
       const created = [];
 
       for (const [index, file] of files.entries()) {
-        const uploaded = await uploadToCloudinary(
-          file.buffer,
-          CLOUDINARY_FOLDER.slider_image,
-          file.originalname,
-        );
+        const saved = await saveFileToVPS(file.buffer, { module: "slider", entityId: `bulk_${index+1}`, entityType: "HomeSlider", originalName: file.originalname });
         const originalName = path.basename(file.originalname || `Slider ${index + 1}`, path.extname(file.originalname || ""));
         const title = originalName.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim() || `Slider ${index + 1}`;
         const [slider] = await sql`
@@ -2792,9 +2800,9 @@ app.post("/api/admin/home-sliders/bulk",
             display_order, is_active, created_by_admin_id, updated_by_admin_id
           ) VALUES (
             ${title},
-            ${uploaded.url},
-            ${uploaded.public_id},
-            ${uploaded.url},
+            ${saved.url},
+            ${null},
+            ${saved.url},
             ${title},
             ${Number(next_order) + index},
             TRUE,
@@ -2829,16 +2837,10 @@ app.put("/api/admin/home-sliders/:id",
       let imageUrl = String(req.body.image_url || "").trim() || existing.image_url;
       let imagePublicId = existing.image_public_id;
       if (req.file) {
-        const uploaded = await uploadToCloudinary(
-          req.file.buffer,
-          CLOUDINARY_FOLDER.slider_image,
-          req.file.originalname,
-        );
-        imageUrl = uploaded.url;
-        imagePublicId = uploaded.public_id;
-        if (existing.image_public_id) {
-          cloudinary.uploader.destroy(existing.image_public_id).catch(() => {});
-        }
+        const saved = await saveFileToVPS(req.file.buffer, { module: "slider", entityId: req.params.id, entityType: "HomeSlider", originalName: req.file.originalname });
+        imageUrl = saved.url;
+        imagePublicId = null;
+        await deleteFileFromStorage(existing.image_url, existing.image_public_id);
       }
 
       const title = String(req.body.title || "").trim();
@@ -3108,7 +3110,7 @@ const uploadCompanyAsset = (field) => [
       if (!req.file) return err(res, "File is required.", 400);
       await ensureCompanySettingsSchema();
       const current = await getCompanySettingsRow();
-      const uploaded = await uploadToCloudinary(req.file.buffer, "mmr/company", req.file.originalname);
+      const uploaded = await saveFileToVPS(req.file.buffer, { module: "company", entityId: "settings", entityType: "CompanyAsset", originalName: req.file.originalname });
       const [updated] = field === "favicon_url"
         ? await sql`
             UPDATE company_settings
@@ -3310,21 +3312,17 @@ app.post("/api/admin/mobile-app/logo",
     try {
       if (!req.file) return err(res, "App logo file is required.", 400);
       const current = await getMobileAppSettingsRow();
-      const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.mobile_app_logo, req.file.originalname);
+      const saved = await saveFileToVPS(req.file.buffer, { module: "mobile_app", entityId: "logo", entityType: "AppLogo", originalName: req.file.originalname });
       const [updated] = await sql`
         UPDATE mobile_app_settings SET
-          app_logo_url = ${uploaded.url},
-          app_logo_public_id = ${uploaded.public_id},
+          app_logo_url = ${saved.url},
+          app_logo_public_id = ${null},
           updated_by_admin_id = ${req.admin.admin_id || null},
           updated_at = NOW()
         WHERE id = ${current.id}
         RETURNING *`;
-      if (current.app_logo_public_id) {
-        cloudinary.uploader.destroy(current.app_logo_public_id).catch((error) =>
-          console.warn("[Mobile App Old Logo Delete Warning]", error?.message || error)
-        );
-      }
-      await logAdminAudit(req, "MobileApp", "UploadLogo", "mobile_app_settings", updated.id, sql.json({ app_logo_url: uploaded.url }));
+      await deleteFileFromStorage(current.app_logo_url, current.app_logo_public_id);
+      await logAdminAudit(req, "MobileApp", "UploadLogo", "mobile_app_settings", updated.id, sql.json({ app_logo_url: saved.url }));
       return ok(res, updated, "App logo uploaded.");
     } catch (e) {
       console.error("[Admin Mobile App Logo Upload Error]", e);
@@ -3772,11 +3770,10 @@ app.post("/api/auth/register", upload.fields([
     for (const { field, type } of fileFields) {
       const f = req.files?.[field]?.[0];
       if (!f) continue;
-      const folder = CLOUDINARY_FOLDER[field] || "mmr/documents";
-      const { url, public_id } = await uploadToCloudinary(f.buffer, folder, f.originalname);
+      const { url } = await saveFileToVPS(f.buffer, { module: "user", entityId: userId, entityType: type, originalName: f.originalname });
       await sql`
         INSERT INTO user_documents (user_id, document_type, file_path, cloudinary_public_id)
-        VALUES (${userId}, ${type}, ${url}, ${public_id})`;
+        VALUES (${userId}, ${type}, ${url}, ${null})`;
     }
 
     // ── Mark OTP used ──
@@ -4604,11 +4601,13 @@ app.post("/api/profile/upload-doc",
       if (!["PANCard","AadharCard","Passport","DrivingLicense","AddressProof","IdentityProof","ProfilePhoto","Other"].includes(document_type))
         return err(res, "Invalid document_type", 400);
 
-      // Cloudinary par upload karo
-      const folder = CLOUDINARY_FOLDER.document;
-      const { url, public_id } = await uploadToCloudinary(
-        req.file.buffer, folder, req.file.originalname
-      );
+      // Save to VPS Storage
+      const { url } = await saveFileToVPS(req.file.buffer, {
+        module: "user",
+        entityId: req.user.user_id,
+        entityType: document_type,
+        originalName: req.file.originalname,
+      });
 
       // Purana doc deactivate karo
       await sql`
@@ -4621,7 +4620,7 @@ app.post("/api/profile/upload-doc",
           review_status, is_verified, rejection_note, admin_remarks, reupload_requested
         )
         VALUES (${req.user.user_id}, ${document_type}, ${url},
-                ${public_id}, ${req.file.originalname}, ${Math.round(req.file.size / 1024)},
+                ${null}, ${req.file.originalname}, ${Math.round(req.file.size / 1024)},
                 'Submitted', FALSE, NULL, NULL, FALSE)
         RETURNING document_id`;
 
@@ -5106,14 +5105,15 @@ app.post("/api/bookings/:id/upload-proof",
         WHERE booking_id = ${req.params.id} AND user_id = ${req.user.user_id}`;
       if (!booking) return err(res, "Booking not found", 404);
 
-      // Cloudinary upload
-      const { url, public_id } = await uploadToCloudinary(
-        req.file.buffer, CLOUDINARY_FOLDER.payment_proof, req.file.originalname
+      // Save to VPS Storage
+      const { url } = await saveFileToVPS(
+        req.file.buffer,
+        { module: "proof", entityId: booking.booking_id, entityType: "BookingProof", originalName: req.file.originalname }
       );
 
       await sql`
         INSERT INTO booking_payment_proofs (booking_id, file_path, cloudinary_public_id)
-        VALUES (${booking.booking_id}, ${url}, ${public_id})`;
+        VALUES (${booking.booking_id}, ${url}, ${null})`;
 
       await sql`
         UPDATE bookings SET booking_status = 'PaymentPending', updated_at = NOW()
@@ -5198,14 +5198,15 @@ app.post("/api/emi/:emiId/upload-proof",
         WHERE e.emi_id = ${req.params.emiId} AND b.user_id = ${req.user.user_id}`;
       if (!emi) return err(res, "EMI not found", 404);
 
-      // Cloudinary upload
-      const { url, public_id } = await uploadToCloudinary(
-        req.file.buffer, CLOUDINARY_FOLDER.payment_proof, req.file.originalname
+      // Save to VPS Storage
+      const { url } = await saveFileToVPS(
+        req.file.buffer,
+        { module: "proof", entityId: emi.emi_id, entityType: "EmiProof", originalName: req.file.originalname }
       );
 
       await sql`
         INSERT INTO emi_payment_proofs (emi_id, file_path, cloudinary_public_id, payment_mode, reference_no)
-        VALUES (${emi.emi_id}, ${url}, ${public_id}, ${payment_mode || null}, ${reference_no || null})`;
+        VALUES (${emi.emi_id}, ${url}, ${null}, ${payment_mode || null}, ${reference_no || null})`;
 
       await sql`
         UPDATE emi_schedules SET emi_status = 'ProofSubmitted', updated_at = NOW()
@@ -7824,10 +7825,9 @@ app.post("/api/admin/sites/:id/documents",
       const [site] = await sql`SELECT site_id FROM sites WHERE site_id = ${req.params.id}`;
       if (!site) return err(res, "Site not found", 404);
 
-      const uploaded = await uploadToCloudinary(
+      const saved = await saveFileToVPS(
         req.file.buffer,
-        CLOUDINARY_FOLDER.site_document,
-        req.file.originalname,
+        { module: "site", entityId: req.params.id, entityType: "SiteDoc", originalName: req.file.originalname }
       );
       const [document] = await sql`
         INSERT INTO site_documents (
@@ -7836,7 +7836,7 @@ app.post("/api/admin/sites/:id/documents",
         )
         VALUES (
           ${req.params.id}, ${documentName}, ${String(req.body.document_type || "").trim() || null},
-          ${String(req.body.description || "").trim() || null}, ${uploaded.url}, ${uploaded.public_id},
+          ${String(req.body.description || "").trim() || null}, ${saved.url}, ${null},
           ${req.file.originalname}, ${req.file.mimetype}, ${req.file.size}, ${req.admin.admin_id}
         )
         RETURNING *`;
@@ -7875,18 +7875,18 @@ app.put("/api/admin/sites/:siteId/documents/:documentId",
       };
 
       if (req.file) {
-        const uploaded = await uploadToCloudinary(
+        const saved = await saveFileToVPS(
           req.file.buffer,
-          CLOUDINARY_FOLDER.site_document,
-          req.file.originalname,
+          { module: "site", entityId: req.params.siteId, entityType: "SiteDoc", originalName: req.file.originalname }
         );
         file = {
-          url: uploaded.url,
-          publicId: uploaded.public_id,
+          url: saved.url,
+          publicId: null,
           name: req.file.originalname,
           mime: req.file.mimetype,
           size: req.file.size,
         };
+        await deleteFileFromStorage(existing.file_url, existing.file_public_id);
       }
 
       const [document] = await sql`
@@ -7903,10 +7903,6 @@ app.put("/api/admin/sites/:siteId/documents/:documentId",
         WHERE document_id = ${req.params.documentId} AND site_id = ${req.params.siteId}
         RETURNING *`;
 
-      if (req.file && existing.file_public_id) {
-        const resourceType = existing.file_mime_type === "application/pdf" ? "raw" : "image";
-        cloudinary.uploader.destroy(existing.file_public_id, { resource_type: resourceType }).catch(() => {});
-      }
       await logAdminAudit(req, "SiteManagement", "UpdateSiteDocument", "site_documents", document.document_id, sql.json({
         site_id: Number(req.params.siteId),
         file_replaced: Boolean(req.file),
@@ -7927,10 +7923,9 @@ app.delete("/api/admin/sites/:siteId/documents/:documentId",
       const [document] = await sql`
         DELETE FROM site_documents
         WHERE document_id = ${req.params.documentId} AND site_id = ${req.params.siteId}
-        RETURNING document_id, file_public_id, file_mime_type`;
+        RETURNING document_id, file_url, file_public_id, file_mime_type`;
       if (!document) return err(res, "Site document not found", 404);
-      const resourceType = document.file_mime_type === "application/pdf" ? "raw" : "image";
-      cloudinary.uploader.destroy(document.file_public_id, { resource_type: resourceType }).catch(() => {});
+      await deleteFileFromStorage(document.file_url, document.file_public_id);
       await logAdminAudit(req, "SiteManagement", "DeleteSiteDocument", "site_documents", document.document_id, sql.json({
         site_id: Number(req.params.siteId),
       }));
@@ -7994,14 +7989,14 @@ app.post("/api/admin/sites",
       const propertyFile = req.files?.property_image?.[0];
       const mapFile = req.files?.site_map?.[0];
       if (propertyFile) {
-        const uploaded = await uploadToCloudinary(propertyFile.buffer, CLOUDINARY_FOLDER.property_image, propertyFile.originalname);
-        propertyImageUrl = uploaded.url;
-        propertyImagePublicId = uploaded.public_id;
+        const saved = await saveFileToVPS(propertyFile.buffer, { module: "site", entityId: site_name || "site", entityType: "SiteProperty", originalName: propertyFile.originalname });
+        propertyImageUrl = saved.url;
+        propertyImagePublicId = null;
       }
       if (mapFile) {
-        const uploaded = await uploadToCloudinary(mapFile.buffer, CLOUDINARY_FOLDER.site_map, mapFile.originalname);
-        mapUrl = uploaded.url;
-        mapPublicId = uploaded.public_id;
+        const saved = await saveFileToVPS(mapFile.buffer, { module: "site", entityId: site_name || "site", entityType: "SiteMap", originalName: mapFile.originalname });
+        mapUrl = saved.url;
+        mapPublicId = null;
       }
       mapUrl = mapUrl || req.body.layout_map_url || null;
       const htmlMapCode = htmlMapFromRequest(req);
@@ -8058,23 +8053,23 @@ app.put("/api/admin/sites/:id",
       let mapUrl = null;
       let mapPublicId = null;
       const [oldSite] = await sql`
-        SELECT map_public_id, property_image_public_id FROM sites WHERE site_id = ${req.params.id}`;
+        SELECT map_image_url, map_public_id, property_image_url, property_image_public_id FROM sites WHERE site_id = ${req.params.id}`;
       const propertyFile = req.files?.property_image?.[0];
       const mapFile = req.files?.site_map?.[0];
       if (propertyFile) {
-        const uploaded = await uploadToCloudinary(propertyFile.buffer, CLOUDINARY_FOLDER.property_image, propertyFile.originalname);
-        propertyImageUrl = uploaded.url;
-        propertyImagePublicId = uploaded.public_id;
-        if (oldSite?.property_image_public_id) {
-          cloudinary.uploader.destroy(oldSite.property_image_public_id).catch(() => {});
+        const saved = await saveFileToVPS(propertyFile.buffer, { module: "site", entityId: req.params.id, entityType: "SiteProperty", originalName: propertyFile.originalname });
+        propertyImageUrl = saved.url;
+        propertyImagePublicId = null;
+        if (oldSite) {
+          await deleteFileFromStorage(oldSite.property_image_url, oldSite.property_image_public_id);
         }
       }
       if (mapFile) {
-        const uploaded = await uploadToCloudinary(mapFile.buffer, CLOUDINARY_FOLDER.site_map, mapFile.originalname);
-        mapUrl = uploaded.url;
-        mapPublicId = uploaded.public_id;
-        if (oldSite?.map_public_id) {
-          cloudinary.uploader.destroy(oldSite.map_public_id).catch(() => {});
+        const saved = await saveFileToVPS(mapFile.buffer, { module: "site", entityId: req.params.id, entityType: "SiteMap", originalName: mapFile.originalname });
+        mapUrl = saved.url;
+        mapPublicId = null;
+        if (oldSite) {
+          await deleteFileFromStorage(oldSite.map_image_url, oldSite.map_public_id);
         }
       }
       mapUrl = mapUrl || req.body.layout_map_url || null;
@@ -8182,14 +8177,14 @@ app.post("/api/admin/sites/:id/map",
   async (req, res) => {
     try {
       if (!req.file) return err(res, "site_map image is required", 400);
-      const [oldSite] = await sql`SELECT map_public_id FROM sites WHERE site_id = ${req.params.id}`;
+      const [oldSite] = await sql`SELECT map_image_url, map_public_id FROM sites WHERE site_id = ${req.params.id}`;
       if (!oldSite) return err(res, "Site not found", 404);
-      const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.site_map, req.file.originalname);
+      const saved = await saveFileToVPS(req.file.buffer, { module: "site", entityId: req.params.id, entityType: "SiteMap", originalName: req.file.originalname });
       await sql`
-        UPDATE sites SET map_image_url = ${uploaded.url}, map_public_id = ${uploaded.public_id}, updated_at = NOW()
+        UPDATE sites SET map_image_url = ${saved.url}, map_public_id = ${null}, updated_at = NOW()
         WHERE site_id = ${req.params.id}`;
-      if (oldSite.map_public_id) cloudinary.uploader.destroy(oldSite.map_public_id).catch(() => {});
-      return ok(res, { map_image_url: uploaded.url }, "Map uploaded successfully");
+      await deleteFileFromStorage(oldSite.map_image_url, oldSite.map_public_id);
+      return ok(res, { map_image_url: saved.url }, "Map uploaded successfully");
     } catch (e) {
       return err(res, e.message);
     }
@@ -8203,14 +8198,14 @@ app.post("/api/admin/sites/:id/map-image",
   async (req, res) => {
     try {
       if (!req.file) return err(res, "site_map image is required", 400);
-      const [oldSite] = await sql`SELECT map_public_id FROM sites WHERE site_id = ${req.params.id}`;
+      const [oldSite] = await sql`SELECT map_image_url, map_public_id FROM sites WHERE site_id = ${req.params.id}`;
       if (!oldSite) return err(res, "Site not found", 404);
-      const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.site_map, req.file.originalname);
+      const saved = await saveFileToVPS(req.file.buffer, { module: "site", entityId: req.params.id, entityType: "SiteMap", originalName: req.file.originalname });
       await sql`
-        UPDATE sites SET map_image_url = ${uploaded.url}, map_public_id = ${uploaded.public_id}, updated_at = NOW()
+        UPDATE sites SET map_image_url = ${saved.url}, map_public_id = ${null}, updated_at = NOW()
         WHERE site_id = ${req.params.id}`;
-      if (oldSite.map_public_id) cloudinary.uploader.destroy(oldSite.map_public_id).catch(() => {});
-      return ok(res, { map_image_url: uploaded.url }, "Map uploaded successfully");
+      await deleteFileFromStorage(oldSite.map_image_url, oldSite.map_public_id);
+      return ok(res, { map_image_url: saved.url }, "Map uploaded successfully");
     } catch (e) {
       return err(res, e.message);
     }
@@ -8224,14 +8219,14 @@ app.post("/api/admin/sites/:id/property-image",
   async (req, res) => {
     try {
       if (!req.file) return err(res, "property_image is required", 400);
-      const [oldSite] = await sql`SELECT property_image_public_id FROM sites WHERE site_id = ${req.params.id}`;
+      const [oldSite] = await sql`SELECT property_image_url, property_image_public_id FROM sites WHERE site_id = ${req.params.id}`;
       if (!oldSite) return err(res, "Site not found", 404);
-      const uploaded = await uploadToCloudinary(req.file.buffer, CLOUDINARY_FOLDER.property_image, req.file.originalname);
+      const saved = await saveFileToVPS(req.file.buffer, { module: "site", entityId: req.params.id, entityType: "SiteProperty", originalName: req.file.originalname });
       await sql`
-        UPDATE sites SET property_image_url = ${uploaded.url}, property_image_public_id = ${uploaded.public_id}, updated_at = NOW()
+        UPDATE sites SET property_image_url = ${saved.url}, property_image_public_id = ${null}, updated_at = NOW()
         WHERE site_id = ${req.params.id}`;
-      if (oldSite.property_image_public_id) cloudinary.uploader.destroy(oldSite.property_image_public_id).catch(() => {});
-      return ok(res, { property_image_url: uploaded.url }, "Property image uploaded successfully");
+      await deleteFileFromStorage(oldSite.property_image_url, oldSite.property_image_public_id);
+      return ok(res, { property_image_url: saved.url }, "Property image uploaded successfully");
     } catch (e) {
       return err(res, e.message);
     }
