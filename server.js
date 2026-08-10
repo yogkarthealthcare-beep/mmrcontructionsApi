@@ -10533,13 +10533,6 @@ if (shouldStartServer) {
     }
 
     try {
-      await supabaseSql`SELECT 1`;
-      console.log("Supabase PostgreSQL connection successful (Secondary Active Backup)");
-    } catch (sbErr) {
-      console.warn("[MMR API] Supabase Database connection check failed:", sbErr.message);
-    }
-
-    try {
       await requirePlotManagementSchema();
       await Promise.all([
         ensureHomeExperienceSchema().catch(() => {}),

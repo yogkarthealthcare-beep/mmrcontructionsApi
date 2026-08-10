@@ -53,14 +53,8 @@ const sql = postgres(getDatabaseUrl(), {
   onnotice: () => {},
 });
 
-// Secondary Connection Pool (Supabase PostgreSQL - keeping old database active)
-export const supabaseSql = postgres(getSupabaseDatabaseUrl(), {
-  max: 5,
-  idle_timeout: 30,
-  connect_timeout: 10,
-  ssl: resolveSsl(getSupabaseDatabaseUrl()),
-  onnotice: () => {},
-});
+// Secondary Connection Alias (Points to Primary VPS DB)
+export const supabaseSql = sql;
 
 export default sql;
 
