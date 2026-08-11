@@ -300,12 +300,16 @@ async function handleInvestorRegistration(req, res) {
 
     const cleanEmail = String(email).trim().toLowerCase();
     const cleanMobile = String(rawMobile).replace(/\D/g, "");
+    const cleanMobile10 = cleanMobile.length >= 10 ? cleanMobile.slice(-10) : cleanMobile;
 
-    const [existing] = await sql`
-      SELECT id FROM investor_users WHERE deleted_at IS NULL AND (LOWER(email) = ${cleanEmail} OR mobile_number = ${cleanMobile}) LIMIT 1
+    const [dupInvestor] = await sql`
+      SELECT id FROM investor_users WHERE deleted_at IS NULL AND (LOWER(email) = ${cleanEmail} OR RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile10}) LIMIT 1
     `;
-    if (existing) {
-      return err(res, "An investor account with this Email or Mobile Number already exists.", 409);
+    const [dupUser] = await sql`
+      SELECT user_id FROM users WHERE LOWER(email) = ${cleanEmail} OR RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile10} LIMIT 1
+    `;
+    if (dupInvestor || dupUser) {
+      return err(res, "An account (Customer, Associate, or Investor) with this Email or Mobile Number already exists.", 409);
     }
 
     const salt = await bcrypt.genSalt(10);
@@ -662,13 +666,21 @@ router.put("/investor/profile", authInvestor, async (req, res) => {
       return err(res, "Please enter a valid 10 digit mobile number.", 400);
     }
     if (mobile_number) {
-      const [existingMobile] = await sql`
+      const cleanMob = String(mobile_number).replace(/\D/g, "");
+      const cleanMob10 = cleanMob.length >= 10 ? cleanMob.slice(-10) : cleanMob;
+      const [existingMobileInvestor] = await sql`
         SELECT id FROM investor_users
-        WHERE mobile_number = ${String(mobile_number).replace(/\D/g, "")}
+        WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMob10}
           AND id <> ${req.investor.id}
           AND deleted_at IS NULL
         LIMIT 1`;
-      if (existingMobile) return err(res, "Mobile number is already used by another investor.", 409);
+      const [existingMobileUser] = await sql`
+        SELECT user_id FROM users
+        WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMob10}
+        LIMIT 1`;
+      if (existingMobileInvestor || existingMobileUser) {
+        return err(res, "Mobile number is already registered to another account (Customer, Associate, or Investor).", 409);
+      }
     }
 
     const [updated] = await sql`

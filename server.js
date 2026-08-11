@@ -4600,6 +4600,15 @@ app.put("/api/profile", verifyUserToken, async (req, res) => {
             nominee_name, nominee_relationship } = req.body;
     const uid = req.user.user_id;
 
+    if (email) {
+      const cleanEm = String(email).trim().toLowerCase();
+      const [dupEmailUser] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${cleanEm} AND user_id <> ${uid}`;
+      const [dupEmailInvestor] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${cleanEm} AND deleted_at IS NULL LIMIT 1`;
+      if (dupEmailUser || dupEmailInvestor) {
+        return err(res, "Email address is already registered to another account (Customer, Associate, or Investor).", 409);
+      }
+    }
+
     await sql`
       UPDATE users SET
         alternate_mobile = COALESCE(${alternate_mobile || null}, alternate_mobile),
@@ -6417,10 +6426,15 @@ app.post("/api/admin/customers",
         return err(res, "Invalid status", 400);
       }
 
+      const cleanMobile10 = String(mobileNo).replace(/\D/g, "").slice(-10);
+
       const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${email}`;
-      if (dupEmail) return err(res, "Email already exists", 409);
-      const [dupMobile] = await sql`SELECT user_id FROM users WHERE mobile_no = ${mobileNo}`;
-      if (dupMobile) return err(res, "Phone number already exists", 409);
+      const [dupInvestorEmail] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`;
+      if (dupEmail || dupInvestorEmail) return err(res, "Email already exists in another Customer, Associate, or Investor account", 409);
+
+      const [dupMobile] = await sql`SELECT user_id FROM users WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile10}`;
+      const [dupInvestorMobile] = await sql`SELECT id FROM investor_users WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile10} AND deleted_at IS NULL LIMIT 1`;
+      if (dupMobile || dupInvestorMobile) return err(res, "Phone number already exists in another Customer, Associate, or Investor account", 409);
 
       const passwordHash = await bcrypt.hash(password, 12);
       const memberId = await genMemberID("Customer");
@@ -6491,10 +6505,15 @@ app.put("/api/admin/customers/:id",
         WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'`;
       if (!existing) return err(res, "Customer not found", 404);
 
+      const cleanMobile10 = String(mobileNo).replace(/\D/g, "").slice(-10);
+
       const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${email} AND user_id <> ${uid}`;
-      if (dupEmail) return err(res, "Email already exists", 409);
-      const [dupMobile] = await sql`SELECT user_id FROM users WHERE mobile_no = ${mobileNo} AND user_id <> ${uid}`;
-      if (dupMobile) return err(res, "Phone number already exists", 409);
+      const [dupInvestorEmail] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`;
+      if (dupEmail || dupInvestorEmail) return err(res, "Email already exists in another Customer, Associate, or Investor account", 409);
+
+      const [dupMobile] = await sql`SELECT user_id FROM users WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile10} AND user_id <> ${uid}`;
+      const [dupInvestorMobile] = await sql`SELECT id FROM investor_users WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile10} AND deleted_at IS NULL LIMIT 1`;
+      if (dupMobile || dupInvestorMobile) return err(res, "Phone number already exists in another Customer, Associate, or Investor account", 409);
 
       const [customer] = await sql`
         UPDATE users SET

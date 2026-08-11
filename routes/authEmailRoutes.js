@@ -535,15 +535,20 @@ router.post('/verify-email-otp', async (req, res) => {
     }
 
     const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${email}`;
-    if (dupEmail) {
+    const [dupInvestorEmail] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`;
+    if (dupEmail || dupInvestorEmail) {
       await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
       return err(res, 'Email already registered', 409);
     }
 
+    const cleanPendingMobile10 = String(pending.mobile_no).replace(/\D/g, "").slice(-10);
     const [dupMobile] = await sql`
       SELECT user_id FROM users
-      WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${pending.mobile_no}`;
-    if (dupMobile) {
+      WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanPendingMobile10}`;
+    const [dupInvestorMobile] = await sql`
+      SELECT id FROM investor_users
+      WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanPendingMobile10} AND deleted_at IS NULL LIMIT 1`;
+    if (dupMobile || dupInvestorMobile) {
       await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
       return err(res, 'Mobile number already registered', 409);
     }
