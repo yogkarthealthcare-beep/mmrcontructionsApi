@@ -2470,9 +2470,31 @@ app.get("/api/investors", async (_req, res) => {
   try {
     await ensureHomeExperienceSchema();
     const investors = await getCachedOrFetch("investors", 15000, async () => {
-      return await sql`
-        SELECT id, name, profile_image_url, display_order FROM investors
-        WHERE is_active = TRUE AND is_deleted = FALSE ORDER BY display_order ASC, created_at ASC`;
+      const showcase = await sql`
+        SELECT id::text as id, name, profile_image_url, display_order, created_at
+        FROM investors
+        WHERE is_active = TRUE AND is_deleted = FALSE`;
+
+      const portalInvestors = await sql`
+        SELECT ('portal_' || id::text) as id,
+               full_name as name,
+               COALESCE(profile_picture_url, '') as profile_image_url,
+               0 as display_order,
+               created_at
+        FROM investor_users
+        WHERE (status = 'active' OR status = 'approved')
+          AND (deleted_at IS NULL)
+          AND (is_verified = TRUE OR status = 'approved' OR status = 'active')`;
+
+      const combined = [...showcase, ...portalInvestors];
+      combined.sort((a, b) => (a.display_order - b.display_order) || (new Date(a.created_at) - new Date(b.created_at)));
+
+      return combined.map(item => ({
+        id: item.id,
+        name: item.name,
+        profile_image_url: item.profile_image_url,
+        display_order: item.display_order
+      }));
     });
     return ok(res, investors);
   } catch (e) { return err(res, "Failed to load investors"); }
@@ -2491,6 +2513,7 @@ app.post("/api/admin/investors", verifyAdminToken, role("SuperAdmin", "SiteManag
     const { url } = await saveFileToVPS(req.file.buffer, { module: "investor", entityId: name, entityType: "Investor", originalName: req.file.originalname });
     const [created] = await sql`INSERT INTO investors(name, profile_image_url, profile_image_public_id, display_order, is_active)
       VALUES(${name}, ${url}, ${null}, ${Number(req.body.display_order)||0}, ${parseBool(req.body.is_active,true)}) RETURNING *`;
+    invalidateApiCache("investors");
     return ok(res, created, "Investor added.", 201);
   } catch (e) { return err(res, e.message); }
 });
@@ -2506,16 +2529,17 @@ app.put("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "SiteMa
       url = saved.url; publicId = null;
       await deleteFileFromStorage(current.profile_image_url, current.profile_image_public_id); }
     const [updated]=await sql`UPDATE investors SET name=${name},profile_image_url=${url},profile_image_public_id=${publicId},display_order=${Number(req.body.display_order)||0},is_active=${parseBool(req.body.is_active,true)},updated_at=NOW() WHERE id=${req.params.id} RETURNING *`;
+    invalidateApiCache("investors");
     return ok(res,updated,"Investor updated.");
   } catch(e){return err(res,e.message);}
 });
 
 app.patch("/api/admin/investors/:id/status", verifyAdminToken, role("SuperAdmin", "SiteManager"), async(req,res)=>{
-  try{await ensureHomeExperienceSchema();const [row]=await sql`UPDATE investors SET is_active=${parseBool(req.body.is_active,false)},updated_at=NOW() WHERE id=${req.params.id} AND is_deleted=FALSE RETURNING *`;if(!row)return err(res,"Investor not found",404);return ok(res,row,"Investor status updated.");}catch(e){return err(res,e.message);}
+  try{await ensureHomeExperienceSchema();const [row]=await sql`UPDATE investors SET is_active=${parseBool(req.body.is_active,false)},updated_at=NOW() WHERE id=${req.params.id} AND is_deleted=FALSE RETURNING *`;if(!row)return err(res,"Investor not found",404);invalidateApiCache("investors");return ok(res,row,"Investor status updated.");}catch(e){return err(res,e.message);}
 });
 
 app.delete("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "SiteManager"), async(req,res)=>{
-  try{await ensureHomeExperienceSchema();const [row]=await sql`UPDATE investors SET is_deleted=TRUE,is_active=FALSE,updated_at=NOW() WHERE id=${req.params.id} AND is_deleted=FALSE RETURNING id,profile_image_url,profile_image_public_id`;if(!row)return err(res,"Investor not found",404);await deleteFileFromStorage(row.profile_image_url, row.profile_image_public_id);return ok(res,{},"Investor deleted.");}catch(e){return err(res,e.message);}
+  try{await ensureHomeExperienceSchema();const [row]=await sql`UPDATE investors SET is_deleted=TRUE,is_active=FALSE,updated_at=NOW() WHERE id=${req.params.id} AND is_deleted=FALSE RETURNING id,profile_image_url,profile_image_public_id`;if(!row)return err(res,"Investor not found",404);await deleteFileFromStorage(row.profile_image_url, row.profile_image_public_id);invalidateApiCache("investors");return ok(res,{},"Investor deleted.");}catch(e){return err(res,e.message);}
 });
 
 app.get("/api/book-plot/backgrounds", async (_req, res) => {
