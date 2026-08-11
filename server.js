@@ -597,6 +597,9 @@ const ensureHomeExperienceSchema = () => {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`;
+      await sql`CREATE SEQUENCE IF NOT EXISTS investors_id_seq`;
+      await sql`ALTER TABLE investors ALTER COLUMN id SET DEFAULT nextval('investors_id_seq')`;
+      await sql`ALTER SEQUENCE investors_id_seq OWNED BY investors.id`;
       await sql`CREATE INDEX IF NOT EXISTS idx_investors_public_order ON investors(display_order, created_at) WHERE is_active = TRUE AND is_deleted = FALSE`;
       await sql`
         CREATE TABLE IF NOT EXISTS book_plot_background_images (
