@@ -12,8 +12,8 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    const okMime = ["application/pdf", "image/jpeg", "image/png"].includes(file.mimetype);
-    okMime ? cb(null, true) : cb(new Error("Only PDF, JPG, and PNG files are supported."));
+    const okMime = ["application/pdf", "image/jpeg", "image/png", "image/webp", "image/jpg"].includes(file.mimetype);
+    okMime ? cb(null, true) : cb(new Error("Only PDF, JPG, PNG, and WEBP files are supported."));
   },
 });
 

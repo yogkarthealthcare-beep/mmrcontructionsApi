@@ -584,8 +584,8 @@ export async function createBackup(adminId = null) {
       await createJavaScriptSqlBackup(filePath, dbInfo);
     }
 
-    const fileData = await fs.readFile(filePath);
     const stat = await fs.stat(filePath);
+    const fileData = stat.size <= 5 * 1024 * 1024 ? await fs.readFile(filePath) : null;
     const [updated] = await sql`
       UPDATE database_backup_files SET
         file_size_bytes = ${stat.size},
@@ -593,7 +593,7 @@ export async function createBackup(adminId = null) {
         status = 'Completed',
         error_message = NULL
       WHERE id = ${inserted.id}
-      RETURNING *`;
+      RETURNING id, file_name, file_path, database_type, database_host, database_name, file_size_bytes, status, error_message, created_by_admin_id, created_at, restored_at, restored_by_admin_id, deleted_at, deleted_by_admin_id`;
 
     await pruneOldBackups();
     return mapBackupRow(updated);
