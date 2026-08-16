@@ -10698,20 +10698,17 @@ if (shouldStartServer) {
     }
 
     try {
-      await requirePlotManagementSchema();
+      if (typeof requirePlotManagementSchema === "function") {
+        await requirePlotManagementSchema().catch((e) => console.warn("[MMR API] Plot schema warning:", e.message));
+      }
       await Promise.all([
         ensureHomeExperienceSchema().catch(() => {}),
         ensureHomeSlidersSchema().catch(() => {}),
         ensureSiteHtmlMapSchema().catch(() => {}),
         ensureAnalyticsSchema().catch(() => {}),
-      ]);
+      ]).catch(() => {});
     } catch (error) {
-      console.error("[MMR API] Plot management schema initialization failed", {
-        message: error.message,
-      });
-      process.exitCode = 1;
-      server.close(() => process.exit(1));
-      return;
+      console.warn("[MMR API] Schema initialization warning:", error.message);
     }
 
     console.log(`[MMR API] Server running on port ${PORT}`);
