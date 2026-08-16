@@ -350,41 +350,51 @@ router.post('/auth/login', async (req, res) => {
 router.post('/admin/change-password', authAdmin, async (req, res) => {
   try {
     const { current_password, new_password, confirm_password } = req.body;
+    const adminId = req.admin?.admin_id || req.admin?.id;
+
+    if (!adminId)
+      return res.status(401).json({ success: false, message: 'Unauthorized admin session' });
 
     if (!current_password || !new_password || !confirm_password)
-      return res.status(400).json({ success: false, message: 'Saare fields required hain' });
+      return res.status(400).json({ success: false, message: 'All password fields are required.' });
 
-    if (new_password.length < 8)
-      return res.status(400).json({ success: false, message: 'New password minimum 8 characters ka hona chahiye' });
+    if (new_password.length < 6)
+      return res.status(400).json({ success: false, message: 'New password must be at least 6 characters long.' });
 
     if (new_password !== confirm_password)
-      return res.status(400).json({ success: false, message: 'New password aur confirm password match nahi kar rahe' });
+      return res.status(400).json({ success: false, message: 'New password and confirm password do not match.' });
 
     const [admin] = await sql`
-      SELECT id, name, email, password_hash FROM admins WHERE id = ${req.admin.admin_id}`;
+      SELECT admin_id, full_name, email, password_hash FROM admin_users WHERE admin_id = ${adminId}`;
 
     if (!admin)
-      return res.status(404).json({ success: false, message: 'Admin not found' });
+      return res.status(404).json({ success: false, message: 'Admin account not found.' });
 
     const valid = await bcrypt.compare(current_password, admin.password_hash);
     if (!valid)
-      return res.status(400).json({ success: false, message: 'Current password galat hai' });
+      return res.status(400).json({ success: false, message: 'Incorrect current password.' });
 
-    if (await bcrypt.compare(new_password, admin.password_hash))
-      return res.status(400).json({ success: false, message: 'New password purane password se alag hona chahiye' });
+    const isSame = await bcrypt.compare(new_password, admin.password_hash);
+    if (isSame)
+      return res.status(400).json({ success: false, message: 'New password must be different from current password.' });
 
-    const newHash = await bcrypt.hash(new_password, 12);
-    await sql`UPDATE admins SET password_hash = ${newHash}, updated_at = NOW() WHERE id = ${admin.id}`;
+    const newHash = await bcrypt.hash(new_password, 10);
+    await sql`
+      UPDATE admin_users
+      SET password_hash = ${newHash}, failed_login_attempts = 0, is_locked = false, updated_at = NOW()
+      WHERE admin_id = ${admin.admin_id}`;
 
     // Confirmation email
     try {
-      await sendEmail(admin.email, 'MMR Admin — Password Changed', passwordChangedEmailHtml(admin.name));
+      if (admin.email) {
+        await sendEmail(admin.email, 'MMR Admin — Password Changed', passwordChangedEmailHtml(admin.full_name || 'Admin'));
+      }
     } catch (e) { console.warn('Password change email send failed:', e.message); }
 
-    res.json({ success: true, message: 'Password successfully change ho gaya' });
+    res.json({ success: true, message: 'Password changed successfully.' });
   } catch (e) {
     console.error('[change-password]', e);
-    res.status(500).json({ success: false, message: 'Password change failed' });
+    res.status(500).json({ success: false, message: 'Failed to change password.' });
   }
 });
 

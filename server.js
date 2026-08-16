@@ -4438,6 +4438,71 @@ app.post("/api/admin/auth/refresh", async (req, res) => {
   }
 });
 
+app.post("/api/admin/auth/change-password", verifyAdminToken, async (req, res) => {
+  try {
+    const { current_password, new_password, confirm_password } = req.body;
+    const adminId = req.admin?.admin_id;
+
+    if (!adminId) {
+      return res.status(401).json({ success: false, message: "Unauthorized admin session" });
+    }
+
+    if (!current_password || !new_password || !confirm_password) {
+      return res.status(400).json({ success: false, message: "All password fields are required." });
+    }
+
+    if (new_password.length < 6) {
+      return res.status(400).json({ success: false, message: "New password must be at least 6 characters long." });
+    }
+
+    if (new_password !== confirm_password) {
+      return res.status(400).json({ success: false, message: "New password and confirm password do not match." });
+    }
+
+    const [admin] = await sql`
+      SELECT admin_id, full_name, email, password_hash
+      FROM admin_users
+      WHERE admin_id = ${adminId}`;
+
+    if (!admin) {
+      return res.status(404).json({ success: false, message: "Admin account not found." });
+    }
+
+    const valid = await bcrypt.compare(current_password, admin.password_hash);
+    if (!valid) {
+      return res.status(400).json({ success: false, message: "Incorrect current password." });
+    }
+
+    const isSame = await bcrypt.compare(new_password, admin.password_hash);
+    if (isSame) {
+      return res.status(400).json({ success: false, message: "New password must be different from current password." });
+    }
+
+    const newHash = await bcrypt.hash(new_password, 10);
+    await sql`
+      UPDATE admin_users
+      SET password_hash = ${newHash},
+          failed_login_attempts = 0,
+          is_locked = false,
+          updated_at = NOW()
+      WHERE admin_id = ${admin.admin_id}`;
+
+    try {
+      if (admin.email) {
+        await sendEmail(admin.email, 'MMR Admin — Password Changed', passwordChangedEmailHtml(admin.full_name || 'Admin'));
+      }
+    } catch (mailErr) {
+      console.warn("[admin-change-password] Confirmation email failed:", mailErr.message);
+    }
+
+    return res.json({ success: true, message: "Password changed successfully." });
+  } catch (e) {
+    console.error("[Admin Change Password Error]", e);
+    return res.status(500).json({ success: false, message: "Failed to change password." });
+  }
+});
+
+
 /* ==========================
    ADMIN IMPERSONATION — LOGIN AS USER
    POST /api/admin/login-as-user

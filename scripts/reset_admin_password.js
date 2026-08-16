@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 
 async function resetAdminPass() {
   try {
-    const defaultPass = "admin123";
+    const defaultPass = "MMR@Admin123";
     const passHash = await bcrypt.hash(defaultPass, 10);
 
     // Update admin@mmrconstructions.in password to admin123
@@ -15,7 +15,7 @@ async function resetAdminPass() {
     console.log("-----------------------------------------------------");
     console.log("Admin Passwords Reset Successfully!");
     console.log("Email: admin@mmrconstructions.in");
-    console.log("Password: admin123");
+    console.log("Password: MMR@Admin123");
     console.log("-----------------------------------------------------");
     process.exit(0);
   } catch (e) {
