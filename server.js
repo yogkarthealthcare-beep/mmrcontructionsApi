@@ -111,14 +111,7 @@ app.use(cors({
   optionsSuccessStatus: 204,
 }));
 
-app.options("*", (req, res) => {
-  const origin = req.headers.origin || "*";
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Requested-With, Accept");
-  return res.status(204).end();
-});
+
 
 
 const rateLimitResponse = { success: false, message: "Too many requests. Please try again shortly." };

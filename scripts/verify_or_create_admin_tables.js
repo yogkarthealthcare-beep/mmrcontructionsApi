@@ -29,7 +29,7 @@ async function verifyOrCreateAdminTables() {
     await sql.unsafe(`
       INSERT INTO admin_roles (role_id, role_name)
       VALUES (1, 'SuperAdmin')
-      ON CONFLICT (role_name) DO NOTHING
+      ON CONFLICT (role_id) DO NOTHING
     `);
 
     // Ensure admin_users exists
