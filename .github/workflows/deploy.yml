@@ -32,6 +32,7 @@ jobs:
           host: ${{ secrets.VPS_HOST || '66.116.248.35' }}
           username: ${{ secrets.VPS_USERNAME || secrets.VPS_USER || 'root' }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY || secrets.VPS_SSH_KEY }}
+          password: ${{ secrets.VPS_PASSWORD || secrets.VPS_PASS }}
           port: ${{ secrets.VPS_PORT || 22 }}
           script: |
             set -e
@@ -39,12 +40,21 @@ jobs:
             echo "             STARTING AUTOMATIC CI/CD DEPLOYMENT FOR MMR API              "
             echo "=========================================================================="
             
-            PROJECT_DIR="/var/www/mmrcontructionsApi"
+            if [ -d "/var/www/mmrcontructionsApi" ]; then
+              PROJECT_DIR="/var/www/mmrcontructionsApi"
+            elif [ -d "/var/www/mmrconstructionsApi" ]; then
+              PROJECT_DIR="/var/www/mmrconstructionsApi"
+            elif [ -d "/var/www/html/mmrcontructionsApi" ]; then
+              PROJECT_DIR="/var/www/html/mmrcontructionsApi"
+            else
+              PROJECT_DIR=$(find /var/www -maxdepth 2 -name "*mmr*" -type d 2>/dev/null | head -n 1)
+            fi
 
-            if [ ! -d "$PROJECT_DIR" ]; then
-              echo "❌ Error: Project directory $PROJECT_DIR does not exist on VPS!"
+            if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR" ]; then
+              echo "❌ Error: Project directory not found under /var/www!"
               exit 1
             fi
+            echo "📂 Target Project Directory: $PROJECT_DIR"
 
             cd "$PROJECT_DIR"
 
