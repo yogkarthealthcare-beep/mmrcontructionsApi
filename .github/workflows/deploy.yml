@@ -69,9 +69,11 @@ jobs:
             echo "🔍 Running idempotent admin table & superadmin user check..."
             node scripts/verify_or_create_admin_tables.js || echo "⚠️ Non-critical admin table script output"
 
-            # 5. Reload PM2 process using ecosystem.config.js or existing process name
+            # 5. Reload PM2 process using ecosystem.config.cjs or existing process name
             echo "🔄 Reloading PM2 application..."
-            if [ -f "ecosystem.config.js" ]; then
+            if [ -f "ecosystem.config.cjs" ]; then
+              pm2 reload ecosystem.config.cjs --update-env || pm2 restart ecosystem.config.cjs --update-env || pm2 restart server.js --name mmr-api
+            elif [ -f "ecosystem.config.js" ]; then
               pm2 reload ecosystem.config.js --update-env || pm2 restart ecosystem.config.js --update-env || pm2 restart server.js --name mmr-api
             elif pm2 describe mmr-api > /dev/null 2>&1; then
               pm2 reload mmr-api --update-env || pm2 restart mmr-api --update-env
