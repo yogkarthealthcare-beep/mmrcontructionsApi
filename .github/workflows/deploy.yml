@@ -16,7 +16,7 @@ jobs:
       - name: Execute Remote SSH Deployment on VPS
         uses: appleboy/ssh-action@v1.2.2
         with:
-          host: ${{ secrets.VPS_HOST }}
+          host: ${{ secrets.VPS_HOST || '66.116.248.35' }}
           username: ${{ secrets.VPS_USERNAME || secrets.VPS_USER || 'root' }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY || secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || 22 }}
