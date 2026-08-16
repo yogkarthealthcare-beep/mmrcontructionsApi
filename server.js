@@ -27,6 +27,7 @@ import invoiceModuleRoutes from './routes/invoice-module.routes.js';
 import fileStorageService, { saveFileToVPS, deleteFileFromStorage, getStorageRoot } from "./services/fileStorage.service.js";
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
+import { getVersionInfo } from "./services/version.service.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -186,12 +187,30 @@ app.use("/uploads", (req, res) => {
 });
 
 app.get("/api/health", (_req, res) => {
+  const ver = getVersionInfo();
   return res.json({
+    status: "ok",
     success: true,
-    status: "healthy",
     service: "MMR Constructions API",
+    version: ver.version,
+    commit: ver.commit,
+    fullCommit: ver.fullCommit,
+    environment: ver.environment,
     timestamp: new Date().toISOString(),
     storage_root: getStorageRoot(),
+  });
+});
+
+app.get("/api/version", (_req, res) => {
+  const ver = getVersionInfo();
+  return res.json({
+    version: ver.version,
+    commit: ver.commit,
+    fullCommit: ver.fullCommit,
+    branch: ver.branch,
+    environment: ver.environment,
+    buildDate: ver.buildDate,
+    status: ver.status,
   });
 });
 

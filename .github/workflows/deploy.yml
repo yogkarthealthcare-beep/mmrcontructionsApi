@@ -6,12 +6,25 @@ on:
       - main
 
 jobs:
-  deploy:
-    name: Deploy to Production VPS
+  validate_and_deploy:
+    name: Build Validation & VPS Deployment
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Pre-deployment Build & Syntax Validation
+        run: |
+          echo "🔍 Running pre-deployment syntax & build validation..."
+          node --check server.js
+          node --check routes/authEmailRoutes.js
+          node --check services/version.service.js
+          echo "✅ Build & syntax validation passed successfully."
 
       - name: Execute Remote SSH Deployment on VPS
         uses: appleboy/ssh-action@v1.2.2
@@ -36,24 +49,37 @@ jobs:
 
             cd "$PROJECT_DIR"
 
-            # 1. Record current production commit
             PREV_COMMIT=$(git rev-parse HEAD || echo "none")
             echo "Current production commit: $PREV_COMMIT"
 
-            # 2. Fetch and pull latest code safely
             echo "Fetching latest changes from origin main..."
             git fetch origin main
 
             PACKAGE_CHANGED=$(git diff HEAD origin/main -- package-lock.json package.json || true)
             NODE_MODULES_EXIST=$( [ -d "node_modules" ] && echo "yes" || echo "no" )
 
-            echo "Updating code to latest main..."
+            echo "Updating code to exact target commit (${{ github.sha }})..."
             git reset --hard origin/main
 
             NEW_COMMIT=$(git rev-parse HEAD)
-            echo "Updated code: $PREV_COMMIT -> $NEW_COMMIT"
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            COMMIT_COUNT=$(git rev-list --count HEAD || echo "1")
+            BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            VERSION="1.0.${COMMIT_COUNT}"
 
-            # 3. Install production dependencies if changed or missing
+            echo "Generating version metadata on VPS (v${VERSION} • Build ${SHORT_SHA})..."
+            cat <<EOF > version.json
+            {
+              "version": "${VERSION}",
+              "commit": "${SHORT_SHA}",
+              "fullCommit": "${NEW_COMMIT}",
+              "branch": "main",
+              "environment": "production",
+              "buildDate": "${BUILD_DATE}",
+              "status": "running"
+            }
+            EOF
+
             if [ -n "$PACKAGE_CHANGED" ] || [ "$NODE_MODULES_EXIST" = "no" ]; then
               echo "📦 Installing production dependencies..."
               if [ -f "package-lock.json" ]; then
@@ -65,11 +91,9 @@ jobs:
               echo "⚡ Dependencies unchanged. Skipping npm install."
             fi
 
-            # 4. Idempotent Database Tables Verification
             echo "🔍 Running idempotent admin table & superadmin user check..."
             node scripts/verify_or_create_admin_tables.js || echo "⚠️ Non-critical admin table script output"
 
-            # 5. Reload PM2 process using ecosystem.config.cjs or existing process name
             echo "🔄 Reloading PM2 application..."
             if [ -f "ecosystem.config.cjs" ]; then
               pm2 reload ecosystem.config.cjs --update-env || pm2 restart ecosystem.config.cjs --update-env || pm2 restart server.js --name mmr-api
@@ -83,27 +107,28 @@ jobs:
 
             pm2 save
 
-            # 6. PM2 Status
-            echo "📊 PM2 Application Status:"
-            pm2 status
-
-            # 7. Local API Health Check
             echo "--------------------------------------------------------------------------"
-            echo "🔍 Testing Local API Health Check (http://127.0.0.1:5000/api/health)..."
+            echo "🔍 Running Production Health & Version Verification..."
             sleep 3
             
             HEALTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/api/health || echo "000")
-            echo "Local API Health HTTP Code: $HEALTH_CODE"
+            VERSION_RESPONSE=$(curl -s http://127.0.0.1:5000/api/version || echo "{}")
+            RUNNING_COMMIT=$(echo "$VERSION_RESPONSE" | grep -o '"commit":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
 
-            if [ "$HEALTH_CODE" -eq 200 ]; then
-              echo "✅ Local API Health Check PASSED (HTTP 200 OK)."
+            echo "Local API Health HTTP Code: $HEALTH_CODE"
+            echo "Running Commit SHA: $RUNNING_COMMIT (Expected: $SHORT_SHA)"
+
+            if [ "$HEALTH_CODE" -eq 200 ] && [ "$RUNNING_COMMIT" = "$SHORT_SHA" ]; then
+              echo "=========================================================================="
+              echo "🎉 DEPLOYMENT SUCCESSFUL & VERIFIED: v${VERSION} (${SHORT_SHA})"
+              echo "=========================================================================="
             else
-              echo "❌ Error: API Health check failed with HTTP code $HEALTH_CODE!"
+              echo "❌ Error: Production Verification Failed! Rolling back to $PREV_COMMIT..."
+              if [ "$PREV_COMMIT" != "none" ]; then
+                git reset --hard "$PREV_COMMIT"
+                pm2 reload mmr-api --update-env || pm2 restart mmr-api
+              fi
               echo "Recent PM2 Logs:"
               pm2 logs --lines 50 --raw | tail -n 50
               exit 1
             fi
-
-            echo "=========================================================================="
-            echo "🎉 AUTOMATIC DEPLOYMENT SUCCESSFUL FOR COMMIT $NEW_COMMIT!                "
-            echo "=========================================================================="
