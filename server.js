@@ -74,12 +74,22 @@ function rejectSuspiciousInput(req, res, next) {
   next();
 }
 
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  if (/https?:\/\/(www\.|api\.)?mmrconstructions\.in$/i.test(origin)) return true;
+  if (/https?:\/\/mmrconstructions-[a-z0-9]+\.(web\.app|firebaseapp\.com)$/i.test(origin)) return true;
+  return false;
+};
+
 app.use((req, res, next) => {
-  const origin = req.headers.origin || "*";
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Requested-With, Accept");
+  const origin = req.headers.origin;
+  if (isAllowedOrigin(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin || "*");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Requested-With, Accept");
+  }
 
   if (req.method === "OPTIONS") {
     return res.status(204).end();
@@ -89,17 +99,27 @@ app.use((req, res, next) => {
 
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin) || /https?:\/\/(www\.|api\.)?mmrconstructions\.in$/i.test(origin)) {
+    if (isAllowedOrigin(origin)) {
       return callback(null, true);
     }
-
     console.warn(`[CORS] Blocked origin: ${origin}`);
     return callback(null, true);
   },
+  credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "X-API-Key", "X-Requested-With", "Accept"],
   optionsSuccessStatus: 204,
 }));
+
+app.options("*", (req, res) => {
+  const origin = req.headers.origin || "*";
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Requested-With, Accept");
+  return res.status(204).end();
+});
+
 
 const rateLimitResponse = { success: false, message: "Too many requests. Please try again shortly." };
 const apiLimiter = rateLimit({
