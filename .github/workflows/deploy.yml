@@ -48,7 +48,7 @@ jobs:
             NODE_MODULES_EXIST=$( [ -d "node_modules" ] && echo "yes" || echo "no" )
 
             echo "Updating code to latest main..."
-            git pull origin main
+            git reset --hard origin/main
 
             NEW_COMMIT=$(git rev-parse HEAD)
             echo "Updated code: $PREV_COMMIT -> $NEW_COMMIT"
