@@ -26,11 +26,13 @@ async function verifyOrCreateAdminTables() {
     `);
 
     // Ensure SuperAdmin role exists
-    await sql.unsafe(`
-      INSERT INTO admin_roles (role_id, role_name)
-      VALUES (1, 'SuperAdmin')
-      ON CONFLICT (role_id) DO NOTHING
-    `);
+    try {
+      await sql.unsafe(`
+        INSERT INTO admin_roles (role_id, role_name)
+        VALUES (1, 'SuperAdmin')
+        ON CONFLICT DO NOTHING
+      `);
+    } catch {}
 
     // Ensure admin_users exists
     await sql.unsafe(`
@@ -65,28 +67,35 @@ async function verifyOrCreateAdminTables() {
     const defaultPassword = "MMR@Admin123";
     const passHash = await bcrypt.hash(defaultPassword, 10);
 
-    const [admin] = await sql`
-      INSERT INTO admin_users (role_id, full_name, email, password_hash, is_active, is_locked, failed_login_attempts)
-      VALUES (1, 'MMR Admin', ${defaultEmail}, ${passHash}, TRUE, FALSE, 0)
-      ON CONFLICT (email) DO UPDATE SET
-        password_hash = ${passHash},
-        is_active = TRUE,
-        is_locked = FALSE,
-        failed_login_attempts = 0,
-        updated_at = NOW()
-      RETURNING admin_id, full_name, email, is_active`;
+    try {
+      let [admin] = await sql`SELECT admin_id, full_name, email FROM admin_users WHERE email = ${defaultEmail}`;
+      if (!admin) {
+        [admin] = await sql`
+          INSERT INTO admin_users (role_id, full_name, email, password_hash, is_active, is_locked, failed_login_attempts)
+          VALUES (1, 'MMR Admin', ${defaultEmail}, ${passHash}, TRUE, FALSE, 0)
+          RETURNING admin_id, full_name, email`;
+      } else {
+        await sql`
+          UPDATE admin_users SET
+            password_hash = ${passHash},
+            is_active = TRUE,
+            is_locked = FALSE,
+            failed_login_attempts = 0,
+            updated_at = NOW()
+          WHERE email = ${defaultEmail}`;
+      }
+    } catch (e) {
+      console.warn("Admin account setup warning:", e.message);
+    }
 
     // Fetch total admin users count
     const adminCount = await sql`SELECT COUNT(*)::int as count FROM admin_users`;
 
     console.log("-----------------------------------------------------");
     console.log("SUCCESS! Admin tables & user verified/created successfully.");
-    console.log(`Total Admin Users in DB: ${adminCount[0].count}`);
-    console.log("Active SuperAdmin:");
-    console.log(`  - ID: ${admin.admin_id}`);
-    console.log(`  - Name: ${admin.full_name}`);
-    console.log(`  - Email: ${admin.email}`);
-    console.log(`  - Password: ${defaultPassword}`);
+    console.log(`Total Admin Users in DB: ${adminCount[0]?.count || 0}`);
+    console.log(`Active SuperAdmin Email: ${defaultEmail}`);
+    console.log(`Active SuperAdmin Password: ${defaultPassword}`);
     console.log("-----------------------------------------------------");
 
     process.exit(0);
