@@ -10672,19 +10672,30 @@ app.use((error, req, res, next) => {
 const PORT = Number(process.env.PORT) || 5000;
 const shouldStartServer =
   !process.env.FUNCTION_TARGET &&
-  !process.env.FUNCTION_SIGNATURE_TYPE &&
-  !process.env.K_SERVICE;
+process.on("uncaughtException", (err) => {
+  console.error("[MMR API Global Uncaught Exception]", err?.message || err);
+});
 
-startBackupScheduler({
-  logAudit: async (action, backup) => {
-    await sql`
-      INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
-      VALUES ('System', null, 'Automatic Backup Scheduler', 'DatabaseBackup', ${action},
-              'database_backup_files', ${backup?.id || null}, ${JSON.stringify(backup || {})})`;
-  },
+process.on("unhandledRejection", (reason) => {
+  console.error("[MMR API Global Unhandled Rejection]", reason?.message || reason);
 });
 
 if (shouldStartServer) {
+  try {
+    startBackupScheduler({
+      logAudit: async (action, backup) => {
+        try {
+          await sql`
+            INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+            VALUES ('System', null, 'Automatic Backup Scheduler', 'DatabaseBackup', ${action},
+                    'database_backup_files', ${backup?.id || null}, ${JSON.stringify(backup || {})})`;
+        } catch {}
+      },
+    });
+  } catch (schedErr) {
+    console.warn("[MMR API] Backup scheduler init warning:", schedErr.message);
+  }
+
   const server = app.listen(PORT, "0.0.0.0", async () => {
     try {
       await sql`SELECT 1`;
