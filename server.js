@@ -4438,7 +4438,7 @@ app.post("/api/admin/auth/refresh", async (req, res) => {
   }
 });
 
-app.post("/api/admin/auth/change-password", verifyAdminToken, async (req, res) => {
+app.post(["/api/admin/change-password", "/api/admin/auth/change-password"], verifyAdminToken, async (req, res) => {
   try {
     const { current_password, new_password, confirm_password } = req.body;
     const adminId = req.admin?.admin_id;
