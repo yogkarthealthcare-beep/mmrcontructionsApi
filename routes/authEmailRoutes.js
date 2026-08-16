@@ -243,17 +243,36 @@ async function createUserWithUniqueMemberId(db, pending) {
     ), 0) + 1 AS next_value
     FROM users`;
   const memberId = `MMR${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
-  const [created] = await db`
-    INSERT INTO users (
-      user_type, full_name, mobile_no, email,
-      password_hash, sponsor_user_id, member_id,
-      account_status, email_verified, email_verified_at, is_otp_verified
-    ) VALUES (
-      ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
-      ${pending.password_hash}, ${pending.sponsor_user_id}, ${memberId},
-      ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE
-    )
-    RETURNING user_id, full_name, email, user_type, member_id, invitation_code`;
+  let created;
+  try {
+    [created] = await db`
+      INSERT INTO users (
+        user_type, full_name, mobile_no, email,
+        password_hash, sponsor_user_id, member_id,
+        account_status, email_verified, email_verified_at, is_otp_verified
+      ) VALUES (
+        ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
+        ${pending.password_hash}, ${pending.sponsor_user_id}, ${memberId},
+        ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE
+      )
+      RETURNING user_id, full_name, email, user_type, member_id, invitation_code`;
+  } catch (err) {
+    if (String(err?.message || '').includes('invitation_code')) {
+      [created] = await db`
+        INSERT INTO users (
+          user_type, full_name, mobile_no, email,
+          password_hash, sponsor_user_id, member_id,
+          account_status, email_verified, email_verified_at, is_otp_verified
+        ) VALUES (
+          ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
+          ${pending.password_hash}, ${pending.sponsor_user_id}, ${memberId},
+          ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE
+        )
+        RETURNING user_id, full_name, email, user_type, member_id`;
+    } else {
+      throw err;
+    }
+  }
   return created;
 }
 
@@ -557,81 +576,157 @@ router.post('/verify-email-otp', async (req, res) => {
       const createdUser = await createUserWithUniqueMemberId(tx, pending);
 
       if (pending.optional_data?.address || pending.optional_data?.city || pending.optional_data?.state) {
-        await tx`
-          INSERT INTO user_addresses (user_id, address_type, address_line1, city, state)
-          VALUES (
-            ${createdUser.user_id}, 'Permanent', ${pending.optional_data.address || null},
-            ${pending.optional_data.city || null}, ${pending.optional_data.state || null}
-          )`;
+        try {
+          await tx`
+            CREATE TABLE IF NOT EXISTS user_addresses (
+              address_id SERIAL PRIMARY KEY,
+              user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+              address_type VARCHAR(50) DEFAULT 'Permanent',
+              address_line1 TEXT,
+              city VARCHAR(100),
+              state VARCHAR(100),
+              pin_code VARCHAR(20),
+              created_at TIMESTAMPTZ DEFAULT NOW()
+            )`;
+          await tx`
+            INSERT INTO user_addresses (user_id, address_type, address_line1, city, state)
+            VALUES (
+              ${createdUser.user_id}, 'Permanent', ${pending.optional_data.address || null},
+              ${pending.optional_data.city || null}, ${pending.optional_data.state || null}
+            )`;
+        } catch (addrErr) {
+          console.warn('[verify-email-otp] optional user_addresses insert warning:', addrErr.message);
+        }
       }
 
       if (pending.sponsor_user_id) {
-        await tx`
-          CREATE TABLE IF NOT EXISTS referral_registrations (
-            id SERIAL PRIMARY KEY,
-            sponsor_user_id INTEGER REFERENCES users(user_id),
-            referred_user_id INTEGER UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
-            sponsor_invite_code VARCHAR(80),
-            registration_source VARCHAR(80) DEFAULT 'ReferralLink',
-            referral_level INTEGER NOT NULL DEFAULT 1,
-            status VARCHAR(30) NOT NULL DEFAULT 'Pending',
-            approved_at TIMESTAMPTZ,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-          )`;
-        await tx`
-          CREATE TABLE IF NOT EXISTS associate_referral_links (
-            id SERIAL PRIMARY KEY,
-            associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-            invite_code VARCHAR(80) NOT NULL UNIQUE,
-            referral_url TEXT,
-            total_clicks INTEGER NOT NULL DEFAULT 0,
-            total_registrations INTEGER NOT NULL DEFAULT 0,
-            is_active BOOLEAN NOT NULL DEFAULT TRUE,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-          )`;
-        await tx`
-          INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, registration_source, status, approved_at)
-          VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, ${pending.sponsor_invite_code}, 'Signup', 'Approved', NOW())
-          ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
-        await tx`
-          UPDATE associate_referral_links
-          SET total_registrations = total_registrations + 1, updated_at = NOW()
-          WHERE associate_user_id = ${pending.sponsor_user_id}`;
-        await tx`
-          INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
-          VALUES (${createdUser.user_id}, ${pending.sponsor_user_id},
-            COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${pending.sponsor_user_id}), 0) + 1)
-          ON CONFLICT (associate_user_id) DO NOTHING`;
-        await tx`
-          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-          VALUES (${createdUser.user_id}, ${createdUser.user_id}, 0)
-          ON CONFLICT DO NOTHING`;
-        await tx`
-          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-          SELECT ancestor_user_id, ${createdUser.user_id}, depth + 1
-          FROM mlm_tree_closure
-          WHERE descendant_user_id = ${pending.sponsor_user_id}
-          ON CONFLICT DO NOTHING`;
-        await tx`
-          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-          VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, 1)
-          ON CONFLICT DO NOTHING`;
+        try {
+          await tx`
+            CREATE TABLE IF NOT EXISTS referral_registrations (
+              id SERIAL PRIMARY KEY,
+              sponsor_user_id INTEGER REFERENCES users(user_id),
+              referred_user_id INTEGER UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
+              sponsor_invite_code VARCHAR(80),
+              registration_source VARCHAR(80) DEFAULT 'ReferralLink',
+              referral_level INTEGER NOT NULL DEFAULT 1,
+              status VARCHAR(30) NOT NULL DEFAULT 'Pending',
+              approved_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )`;
+          await tx`
+            INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, registration_source, status, approved_at)
+            VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, ${pending.sponsor_invite_code}, 'Signup', 'Approved', NOW())
+            ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
+        } catch (refErr) {
+          console.warn('[verify-email-otp] referral_registrations warning:', refErr.message);
+        }
+
+        try {
+          await tx`
+            CREATE TABLE IF NOT EXISTS associate_referral_links (
+              id SERIAL PRIMARY KEY,
+              associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+              invite_code VARCHAR(80) NOT NULL UNIQUE,
+              referral_url TEXT,
+              total_clicks INTEGER NOT NULL DEFAULT 0,
+              total_registrations INTEGER NOT NULL DEFAULT 0,
+              is_active BOOLEAN NOT NULL DEFAULT TRUE,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )`;
+          await tx`
+            UPDATE associate_referral_links
+            SET total_registrations = total_registrations + 1, updated_at = NOW()
+            WHERE associate_user_id = ${pending.sponsor_user_id}`;
+        } catch (linkErr) {
+          console.warn('[verify-email-otp] associate_referral_links warning:', linkErr.message);
+        }
+
+        try {
+          await tx`
+            CREATE TABLE IF NOT EXISTS mlm_network (
+              id SERIAL PRIMARY KEY,
+              associate_user_id INTEGER UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
+              sponsor_user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+              level INTEGER NOT NULL DEFAULT 1,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )`;
+          await tx`
+            INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
+            VALUES (${createdUser.user_id}, ${pending.sponsor_user_id},
+              COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${pending.sponsor_user_id}), 0) + 1)
+            ON CONFLICT (associate_user_id) DO NOTHING`;
+        } catch (mlmErr) {
+          console.warn('[verify-email-otp] mlm_network warning:', mlmErr.message);
+        }
+
+        try {
+          await tx`
+            CREATE TABLE IF NOT EXISTS mlm_tree_closure (
+              ancestor_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+              descendant_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+              depth INTEGER NOT NULL,
+              PRIMARY KEY (ancestor_user_id, descendant_user_id)
+            )`;
+          await tx`
+            INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+            VALUES (${createdUser.user_id}, ${createdUser.user_id}, 0)
+            ON CONFLICT DO NOTHING`;
+          await tx`
+            INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+            SELECT ancestor_user_id, ${createdUser.user_id}, depth + 1
+            FROM mlm_tree_closure
+            WHERE descendant_user_id = ${pending.sponsor_user_id}
+            ON CONFLICT DO NOTHING`;
+          await tx`
+            INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+            VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, 1)
+            ON CONFLICT DO NOTHING`;
+        } catch (treeErr) {
+          console.warn('[verify-email-otp] mlm_tree_closure warning:', treeErr.message);
+        }
       } else {
-        await tx`
-          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-          VALUES (${createdUser.user_id}, ${createdUser.user_id}, 0)
-          ON CONFLICT DO NOTHING`;
+        try {
+          await tx`
+            CREATE TABLE IF NOT EXISTS mlm_tree_closure (
+              ancestor_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+              descendant_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+              depth INTEGER NOT NULL,
+              PRIMARY KEY (ancestor_user_id, descendant_user_id)
+            )`;
+          await tx`
+            INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+            VALUES (${createdUser.user_id}, ${createdUser.user_id}, 0)
+            ON CONFLICT DO NOTHING`;
+        } catch (treeErr) {
+          console.warn('[verify-email-otp] mlm_tree_closure self warning:', treeErr.message);
+        }
       }
 
       await tx`DELETE FROM pending_registrations WHERE email = ${email}`;
 
-      await tx`
-        INSERT INTO audit_log
-          (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-        VALUES
-          ('User', ${createdUser.user_id}, ${createdUser.full_name},
-           'Auth', 'RegisteredAfterEmailOtp', 'users', ${createdUser.user_id})`;
+      try {
+        await tx`
+          CREATE TABLE IF NOT EXISTS audit_log (
+            id SERIAL PRIMARY KEY,
+            actor_type VARCHAR(50),
+            actor_id INTEGER,
+            actor_name VARCHAR(150),
+            module VARCHAR(50),
+            action VARCHAR(100),
+            target_table VARCHAR(50),
+            target_record_id INTEGER,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+          )`;
+        await tx`
+          INSERT INTO audit_log
+            (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+          VALUES
+            ('User', ${createdUser.user_id}, ${createdUser.full_name},
+             'Auth', 'RegisteredAfterEmailOtp', 'users', ${createdUser.user_id})`;
+      } catch (auditErr) {
+        console.warn('[verify-email-otp] audit_log warning:', auditErr.message);
+      }
 
       return createdUser;
     });
@@ -659,7 +754,7 @@ router.post('/verify-email-otp', async (req, res) => {
         full_name: newUser.full_name,
         user_type: newUser.user_type,
         member_id: newUser.member_id,
-        invitation_code: newUser.invitation_code,
+        invitation_code: newUser.invitation_code || null,
         account_status: pending.user_type === 'Customer' ? 'Active' : 'Pending',
         email_verified: true,
       },
@@ -673,8 +768,13 @@ router.post('/verify-email-otp', async (req, res) => {
     if (e?.code === '23505') {
       return err(res, registrationConflictMessage(e), 409);
     }
-    return err(res, 'Unable to complete registration right now. Please try again.', 500);
+    const cleanMsg = e?.message ? String(e.message).slice(0, 200) : 'Unable to complete registration right now. Please try again.';
+    return err(res, cleanMsg, 500);
   }
+});
+
+router.get('/verify-email-otp', (_req, res) => {
+  return ok(res, null, 'Email verification endpoint requires HTTP POST with email and OTP');
 });
 
 router.post('/resend-email-otp', async (req, res) => {
