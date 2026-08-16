@@ -26,49 +26,69 @@ jobs:
           node --check services/version.service.js
           echo "✅ Build & syntax validation passed successfully."
 
-      - name: Execute Remote SSH Deployment on VPS (Key Auth)
+      - name: Execute Remote SSH Deployment on VPS
         uses: appleboy/ssh-action@v1.2.2
-        if: ${{ secrets.VPS_SSH_PRIVATE_KEY != '' || secrets.VPS_SSH_KEY != '' }}
         with:
           host: ${{ secrets.VPS_HOST || '66.116.248.35' }}
           username: ${{ secrets.VPS_USERNAME || secrets.VPS_USER || 'root' }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY || secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || 22 }}
-          script_stop: true
-          script: |
-            set -e
-            echo "=========================================================================="
-            echo "             STARTING AUTOMATIC CI/CD DEPLOYMENT FOR MMR API              "
-            echo "=========================================================================="
-            
-            PROJECT_DIR="/var/www/mmrcontructionsApi"
-
-            if [ ! -d "$PROJECT_DIR" ]; then
-              echo "❌ Error: Project directory $PROJECT_DIR does not exist on VPS!"
-              exit 1
-            fi
-
-      - name: Execute Remote SSH Deployment on VPS (Password Auth)
-        uses: appleboy/ssh-action@v1.2.2
-        if: ${{ secrets.VPS_SSH_PRIVATE_KEY == '' && secrets.VPS_SSH_KEY == '' }}
-        with:
-          host: ${{ secrets.VPS_HOST || '66.116.248.35' }}
-          username: ${{ secrets.VPS_USERNAME || secrets.VPS_USER || 'root' }}
           password: ${{ secrets.VPS_PASSWORD || secrets.VPS_PASS }}
           port: ${{ secrets.VPS_PORT || 22 }}
-          script_stop: true
           script: |
             set -e
             echo "=========================================================================="
             echo "             STARTING AUTOMATIC CI/CD DEPLOYMENT FOR MMR API              "
             echo "=========================================================================="
             
-            PROJECT_DIR="/var/www/mmrcontructionsApi"
+            # 1. Load Node.js / NVM Environment in SSH Non-Interactive Shell
+            export NVM_DIR="$HOME/.nvm"
+            if [ -s "$NVM_DIR/nvm.sh" ]; then
+              . "$NVM_DIR/nvm.sh"
+            elif [ -s "/root/.nvm/nvm.sh" ]; then
+              . "/root/.nvm/nvm.sh"
+            fi
 
-            if [ ! -d "$PROJECT_DIR" ]; then
-              echo "❌ Error: Project directory $PROJECT_DIR does not exist on VPS!"
+            if ! command -v node >/dev/null 2>&1; then
+              export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:~/.nvm/versions/node/$(ls ~/.nvm/versions/node 2>/dev/null | tail -n 1)/bin:/root/.nvm/versions/node/$(ls /root/.nvm/versions/node 2>/dev/null | tail -n 1)/bin"
+            fi
+
+            echo "🔍 Diagnosing Node.js environment..."
+            echo "PATH=$PATH"
+
+            echo -n "Node binary: " && which node || true
+            if command -v node >/dev/null 2>&1; then
+              echo "✅ Node Version: $(node -v)"
+            else
+              echo "❌ ERROR: Node.js is not available in the GitHub Actions SSH environment."
               exit 1
             fi
+
+            echo -n "NPM binary: " && which npm || true
+            if command -v npm >/dev/null 2>&1; then
+              echo "✅ NPM Version: $(npm -v)"
+            fi
+
+            echo -n "PM2 binary: " && which pm2 || true
+            if command -v pm2 >/dev/null 2>&1; then
+              echo "✅ PM2 Version: $(pm2 -v)"
+            fi
+
+            # 2. Dynamic Project Directory Resolution
+            if [ -d "/var/www/mmrcontructionsApi" ]; then
+              PROJECT_DIR="/var/www/mmrcontructionsApi"
+            elif [ -d "/var/www/mmrconstructionsApi" ]; then
+              PROJECT_DIR="/var/www/mmrconstructionsApi"
+            elif [ -d "/var/www/html/mmrcontructionsApi" ]; then
+              PROJECT_DIR="/var/www/html/mmrcontructionsApi"
+            else
+              PROJECT_DIR=$(find /var/www -maxdepth 2 -name "*mmr*" -type d 2>/dev/null | head -n 1)
+            fi
+
+            if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR" ]; then
+              echo "❌ Error: Project directory not found under /var/www!"
+              exit 1
+            fi
+            echo "📂 Target Project Directory: $PROJECT_DIR"
 
             cd "$PROJECT_DIR"
 
