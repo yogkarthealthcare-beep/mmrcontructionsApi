@@ -26,12 +26,35 @@ jobs:
           node --check services/version.service.js
           echo "✅ Build & syntax validation passed successfully."
 
-      - name: Execute Remote SSH Deployment on VPS
+      - name: Execute Remote SSH Deployment on VPS (Key Auth)
         uses: appleboy/ssh-action@v1.2.2
+        if: ${{ secrets.VPS_SSH_PRIVATE_KEY != '' || secrets.VPS_SSH_KEY != '' }}
         with:
           host: ${{ secrets.VPS_HOST || '66.116.248.35' }}
           username: ${{ secrets.VPS_USERNAME || secrets.VPS_USER || 'root' }}
           key: ${{ secrets.VPS_SSH_PRIVATE_KEY || secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -e
+            echo "=========================================================================="
+            echo "             STARTING AUTOMATIC CI/CD DEPLOYMENT FOR MMR API              "
+            echo "=========================================================================="
+            
+            PROJECT_DIR="/var/www/mmrcontructionsApi"
+
+            if [ ! -d "$PROJECT_DIR" ]; then
+              echo "❌ Error: Project directory $PROJECT_DIR does not exist on VPS!"
+              exit 1
+            fi
+
+      - name: Execute Remote SSH Deployment on VPS (Password Auth)
+        uses: appleboy/ssh-action@v1.2.2
+        if: ${{ secrets.VPS_SSH_PRIVATE_KEY == '' && secrets.VPS_SSH_KEY == '' }}
+        with:
+          host: ${{ secrets.VPS_HOST || '66.116.248.35' }}
+          username: ${{ secrets.VPS_USERNAME || secrets.VPS_USER || 'root' }}
+          password: ${{ secrets.VPS_PASSWORD || secrets.VPS_PASS }}
           port: ${{ secrets.VPS_PORT || 22 }}
           script_stop: true
           script: |
