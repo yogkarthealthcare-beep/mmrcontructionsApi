@@ -810,4 +810,147 @@ router.post('/resend-email-otp', async (req, res) => {
   }
 });
 
+// Safe insert helper in authEmailRoutes
+const safeInsertOtpLogRoute = async (userType, refId, mobile, otpCode, purpose, expiresAt) => {
+  try {
+    const [maxRow] = await sql`SELECT COALESCE(MAX(otp_id), 0) + 1 AS next_id FROM otp_log`;
+    const nextId = Number(maxRow?.next_id || 1);
+    await sql`
+      INSERT INTO otp_log (otp_id, user_type, reference_id, mobile, otp_code, purpose, expires_at)
+      VALUES (${nextId}, ${userType}, ${refId}, ${mobile}, ${otpCode}, ${purpose}, ${expiresAt})`;
+  } catch (e) {
+    if (e.message && (e.message.includes("otp_log_pkey") || e.message.includes("unique constraint") || e.message.includes("duplicate key"))) {
+      const [maxRow2] = await sql`SELECT COALESCE(MAX(otp_id), 0) + 10 AS next_id FROM otp_log`;
+      const nextId2 = Number(maxRow2?.next_id || 100);
+      await sql`
+        INSERT INTO otp_log (otp_id, user_type, reference_id, mobile, otp_code, purpose, expires_at)
+        VALUES (${nextId2}, ${userType}, ${refId}, ${mobile}, ${otpCode}, ${purpose}, ${expiresAt})`;
+    } else {
+      await sql`
+        INSERT INTO otp_log (user_type, reference_id, mobile, otp_code, purpose, expires_at)
+        VALUES (${userType}, ${refId}, ${mobile}, ${otpCode}, ${purpose}, ${expiresAt})`;
+    }
+  }
+};
+
+// Forgot Password - Send OTP
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const emailInput = String(req.body.email || req.body.identifier || '').toLowerCase().trim();
+    const mobileNo = String(req.body.mobile_no || req.body.identifier || '').replace(/\D/g, '');
+
+    if (!emailInput && !mobileNo) return err(res, 'Email or Mobile number required', 400);
+
+    const [user] = emailInput
+      ? await sql`SELECT user_id, full_name, email, mobile_no FROM users WHERE LOWER(email) = ${emailInput}`
+      : await sql`SELECT user_id, full_name, email, mobile_no FROM users WHERE mobile_no = ${mobileNo}`;
+
+    if (!user) {
+      const [investor] = emailInput
+        ? await sql`SELECT id, full_name, email, mobile_number FROM investor_users WHERE LOWER(email) = ${emailInput} AND deleted_at IS NULL LIMIT 1`
+        : await sql`SELECT id, full_name, email, mobile_number FROM investor_users WHERE mobile_number = ${mobileNo} AND deleted_at IS NULL LIMIT 1`;
+
+      if (investor) {
+        const resetEmail = String(investor.email).toLowerCase().trim();
+        const otp = genOTP();
+        const expires = new Date(Date.now() + 15 * 60 * 1000);
+        await sql`UPDATE investor_users SET reset_otp = ${otp}, reset_otp_expires = ${expires} WHERE id = ${investor.id}`;
+        try {
+          await sendEmail(resetEmail, 'MMR Investor Password Reset OTP', otpEmailHtml(otp, 'Password Reset'));
+        } catch (mailErr) {}
+        return ok(res, { email: resetEmail, user_type: 'Investor' }, 'OTP sent to your registered email');
+      }
+
+      return err(res, 'Account not found with this email / phone', 404);
+    }
+
+    if (!user.email) return err(res, 'Registered email not available for this account', 400);
+
+    const resetEmail = String(user.email).toLowerCase().trim();
+    const otp = genOTP();
+
+    await sql`UPDATE otp_log SET is_used = TRUE WHERE mobile = ${resetEmail} AND purpose = 'ResetPassword' AND is_used = FALSE`;
+    await safeInsertOtpLogRoute('User', user.user_id, resetEmail, otp, 'ResetPassword', new Date(Date.now() + 10 * 60 * 1000));
+
+    try {
+      await sendEmail(resetEmail, 'MMR Password Reset OTP', otpEmailHtml(otp, 'Password Reset'));
+    } catch (mailErr) {}
+
+    return ok(res, { email: resetEmail }, 'OTP sent to your registered email');
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+// Reset Password
+router.post('/reset-password', async (req, res) => {
+  try {
+    const email = String(req.body.email || req.body.identifier || '').toLowerCase().trim();
+    const { otp_code, otp, new_password } = req.body;
+    const rawOtp = String(otp_code || otp || '').trim();
+
+    if (!email || !rawOtp || !new_password) {
+      return err(res, 'email, otp, and new_password required', 400);
+    }
+    if (String(new_password).length < 8) {
+      return err(res, 'New password minimum 8 characters required', 400);
+    }
+
+    const [investor] = await sql`
+      SELECT id, reset_otp, reset_otp_expires FROM investor_users
+      WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`;
+
+    if (investor && investor.reset_otp === rawOtp && new Date() <= new Date(investor.reset_otp_expires)) {
+      const salt = await bcrypt.genSalt(10);
+      const password_hash = await bcrypt.hash(new_password, salt);
+      await sql`
+        UPDATE investor_users
+        SET password_hash = ${password_hash}, reset_otp = NULL, reset_otp_expires = NULL, updated_at = NOW()
+        WHERE id = ${investor.id}`;
+      return ok(res, {}, 'Password reset successfully');
+    }
+
+    const [otpRow] = await sql`
+      SELECT * FROM otp_log
+      WHERE mobile = ${email} AND otp_code = ${rawOtp} AND purpose = 'ResetPassword'
+        AND is_used = FALSE AND expires_at > NOW()
+      ORDER BY otp_id DESC LIMIT 1`;
+
+    if (!otpRow) {
+      return err(res, 'Invalid or expired OTP. Please request a new OTP.', 400);
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const password_hash = await bcrypt.hash(new_password, salt);
+
+    await sql`
+      UPDATE users
+      SET password_hash = ${password_hash}, updated_at = NOW()
+      WHERE LOWER(email) = ${email}`;
+
+    await sql`UPDATE otp_log SET is_used = TRUE WHERE otp_id = ${otpRow.otp_id}`;
+
+    return ok(res, {}, 'Password reset successfully');
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+// Clear OTP Logs
+router.post('/clear-otp-logs', async (_req, res) => {
+  try {
+    try {
+      await sql`TRUNCATE TABLE otp_log RESTART IDENTITY CASCADE`;
+    } catch (e1) {
+      await sql`DELETE FROM otp_log`;
+      try {
+        await sql`SELECT setval(pg_get_serial_sequence('otp_log', 'otp_id'), 1, false)`;
+      } catch (seqErr) {}
+    }
+    return ok(res, {}, 'All OTP logs deleted successfully from database.');
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
 export default router;

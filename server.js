@@ -2284,6 +2284,30 @@ const plotDetector2Statuses = ["Available", "Booked", "Processing", "Sold", "Res
 // Generate 6-digit OTP
 const genOTP = () => String(Math.floor(100000 + Math.random() * 900000));
 
+// Safe insert into otp_log with manual MAX(otp_id)+1 primary key calculation to bypass sequence collision
+const safeInsertOtpLog = async (userType, refId, mobile, otpCode, purpose, expiresAt) => {
+  try {
+    const [maxRow] = await sql`SELECT COALESCE(MAX(otp_id), 0) + 1 AS next_id FROM otp_log`;
+    const nextId = Number(maxRow?.next_id || 1);
+
+    await sql`
+      INSERT INTO otp_log (otp_id, user_type, reference_id, mobile, otp_code, purpose, expires_at)
+      VALUES (${nextId}, ${userType}, ${refId}, ${mobile}, ${otpCode}, ${purpose}, ${expiresAt})`;
+  } catch (e) {
+    if (e.message && (e.message.includes("otp_log_pkey") || e.message.includes("unique constraint") || e.message.includes("duplicate key"))) {
+      const [maxRow2] = await sql`SELECT COALESCE(MAX(otp_id), 0) + 10 AS next_id FROM otp_log`;
+      const nextId2 = Number(maxRow2?.next_id || 100);
+      await sql`
+        INSERT INTO otp_log (otp_id, user_type, reference_id, mobile, otp_code, purpose, expires_at)
+        VALUES (${nextId2}, ${userType}, ${refId}, ${mobile}, ${otpCode}, ${purpose}, ${expiresAt})`;
+    } else {
+      await sql`
+        INSERT INTO otp_log (user_type, reference_id, mobile, otp_code, purpose, expires_at)
+        VALUES (${userType}, ${refId}, ${mobile}, ${otpCode}, ${purpose}, ${expiresAt})`;
+    }
+  }
+};
+
 // Generate member ID: MMR00001
 const genMemberID = async (userType) => {
   const [row] = await sql`
@@ -3710,9 +3734,7 @@ app.post("/api/auth/send-otp", async (req, res) => {
       UPDATE otp_log SET is_used = TRUE
       WHERE mobile = ${mobile_no} AND purpose = ${purpose} AND is_used = FALSE`;
 
-    await sql`
-      INSERT INTO otp_log (user_type, reference_id, mobile, otp_code, purpose, expires_at)
-      VALUES ('User', 0, ${mobile_no}, ${otp}, ${purpose}, ${exp})`;
+    await safeInsertOtpLog('User', 0, mobile_no, otp, purpose, exp);
 
     // TODO: Integrate real SMS gateway (Fast2SMS / MSG91)
     return ok(res, { mobile_no }, "OTP sent successfully");
@@ -4075,9 +4097,7 @@ app.post("/api/auth/resend-email-otp", async (req, res) => {
       UPDATE otp_log SET is_used = TRUE
       WHERE mobile = ${email.toLowerCase().trim()} AND purpose = 'EmailVerification' AND is_used = FALSE`;
 
-    await sql`
-      INSERT INTO otp_log (user_type, reference_id, mobile, otp_code, purpose, expires_at)
-      VALUES ('User', ${user.user_id}, ${email.toLowerCase().trim()}, ${otp}, 'EmailVerification', ${exp})`;
+    await safeInsertOtpLog('User', user.user_id, email.toLowerCase().trim(), otp, 'EmailVerification', exp);
 
     return ok(res, {}, "OTP resent to your email.");
   } catch (e) {
@@ -4288,10 +4308,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
     await sql`
       UPDATE otp_log SET is_used = TRUE
       WHERE mobile = ${resetEmail} AND purpose = 'ResetPassword' AND is_used = FALSE`;
-    await sql`
-      INSERT INTO otp_log (user_type, reference_id, mobile, otp_code, purpose, expires_at)
-      VALUES ('User', ${user.user_id}, ${resetEmail}, ${otp}, 'ResetPassword',
-              ${new Date(Date.now() + 10*60*1000)})`;
+    await safeInsertOtpLog('User', user.user_id, resetEmail, otp, 'ResetPassword', new Date(Date.now() + 10*60*1000));
 
     try {
       await sendEmail(resetEmail, "MMR password reset OTP", otpEmailHtml(otp, "Password Reset"));
@@ -4299,6 +4316,23 @@ app.post("/api/auth/forgot-password", async (req, res) => {
       console.warn("Mail send error:", mailErr.message);
     }
     return ok(res, { email: resetEmail }, "OTP sent to your registered email");
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+// Clear all OTP entries from database
+app.post("/api/auth/clear-otp-logs", async (req, res) => {
+  try {
+    try {
+      await sql`TRUNCATE TABLE otp_log RESTART IDENTITY CASCADE`;
+    } catch (e1) {
+      await sql`DELETE FROM otp_log`;
+      try {
+        await sql`SELECT setval(pg_get_serial_sequence('otp_log', 'otp_id'), 1, false)`;
+      } catch (seqErr) {}
+    }
+    return ok(res, {}, "All OTP logs deleted successfully from database.");
   } catch (e) {
     return err(res, e.message);
   }
@@ -6557,9 +6591,7 @@ app.post("/api/admin/customers",
       }
 
       const verificationOtp = genOTP();
-      await sql`
-        INSERT INTO otp_log (user_type, reference_id, mobile, otp_code, purpose, expires_at)
-        VALUES ('User', ${customer.user_id}, ${email}, ${verificationOtp}, 'EmailVerification', NOW() + INTERVAL '10 minutes')`;
+      await safeInsertOtpLog('User', customer.user_id, email, verificationOtp, 'EmailVerification', new Date(Date.now() + 10 * 60 * 1000));
       await sendEmail(email, "Verify your MMR customer account", otpEmailHtml(verificationOtp, "Email Verification"));
 
       await sql`
