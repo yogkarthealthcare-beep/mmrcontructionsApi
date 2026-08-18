@@ -46,11 +46,7 @@ export default class GatewayFactory {
         (c) => c.gateway_name === preferredGateway.toLowerCase()
       );
       if (preferred) {
-        // Check if user selection is allowed on this config or globally enabled
-        const userSelectionAllowed = configs.some((c) => c.allow_user_selection === true);
-        if (userSelectionAllowed) {
-          return this.createInstance(preferred);
-        }
+        return this.createInstance(preferred);
       }
     }
 

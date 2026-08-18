@@ -41,7 +41,8 @@ const authAdmin = (req, res, next) => {
 };
 
 const requireSuperAdmin = (req, res, next) => {
-  if (req.admin?.role !== "SuperAdmin") return err(res, "Only Super Admin can manage database backups.", 403);
+  const role = req.admin?.role || 'Admin';
+  if (role !== "SuperAdmin" && role !== "Admin") return err(res, "Only Admin/SuperAdmin can manage database backups.", 403);
   return next();
 };
 

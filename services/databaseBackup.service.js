@@ -516,7 +516,8 @@ export async function getBackupStatus() {
   const dbInfo = readDatabaseInfo();
   const settings = await getBackupSettings();
   const [lastBackup] = await sql`
-    SELECT * FROM database_backup_files
+    SELECT id, file_name, file_path, database_type, database_host, database_name, file_size_bytes, status, error_message, created_at, restored_at
+    FROM database_backup_files
     WHERE deleted_at IS NULL
     ORDER BY created_at DESC
     LIMIT 1`;
@@ -538,7 +539,8 @@ export async function getBackupStatus() {
 export async function listBackups() {
   await ensureBackupSchema();
   const rows = await sql`
-    SELECT * FROM database_backup_files
+    SELECT id, file_name, file_path, database_type, database_host, database_name, file_size_bytes, status, error_message, created_at, restored_at
+    FROM database_backup_files
     WHERE deleted_at IS NULL
     ORDER BY created_at DESC`;
   return rows.map(mapBackupRow);

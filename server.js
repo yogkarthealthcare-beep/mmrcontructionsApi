@@ -227,7 +227,7 @@ app.use('/api', invoiceModuleRoutes);
 const envValue = (key) => (process.env[key] || "").trim();
 cloudinary.config({
   cloud_name: envValue("CLOUDINARY_CLOUD_NAME"),
-  api_key:    envValue("CLOUDINARY_API_KEY"),
+  api_key: envValue("CLOUDINARY_API_KEY"),
   api_secret: envValue("CLOUDINARY_API_SECRET"),
 });
 
@@ -235,18 +235,18 @@ cloudinary.config({
 const CLOUDINARY_FOLDER = {
   profile_photo: "mmr/profiles",
   payment_proof: "mmr/proofs",
-  pan_card:      "mmr/documents",
-  aadhar_card:   "mmr/documents",
-  property_image:"mmr/site-images",
-  site_map:      "mmr/site-maps",
-  slider_image:  "mmr/home-sliders",
+  pan_card: "mmr/documents",
+  aadhar_card: "mmr/documents",
+  property_image: "mmr/site-images",
+  site_map: "mmr/site-maps",
+  slider_image: "mmr/home-sliders",
   book_plot_background: "mmr/book-plot-backgrounds",
   investor_profile: "mmr/investors",
   company_document: "mmr/company-documents",
   site_document: "mmr/site-documents",
   mobile_app_logo: "mmr/mobile-app",
   mobile_app_apk: "mmr/mobile-app/apk",
-  document:      "mmr/documents",   // generic upload-doc
+  document: "mmr/documents",   // generic upload-doc
 };
 
 /**
@@ -258,9 +258,9 @@ const CLOUDINARY_FOLDER = {
  */
 function uploadToCloudinary(buffer, folder, filename) {
   return new Promise((resolve, reject) => {
-    const ext         = path.extname(filename).toLowerCase().replace(".", "");
-    const isPdf       = ext === "pdf";
-    const isApk       = ext === "apk";
+    const ext = path.extname(filename).toLowerCase().replace(".", "");
+    const isPdf = ext === "pdf";
+    const isApk = ext === "apk";
     const isSiteMapPdf = isPdf && folder === CLOUDINARY_FOLDER.site_map;
     const resourceType = (isPdf && !isSiteMapPdf) || isApk ? "raw" : "image";
     const cloudinaryConfig = {
@@ -344,14 +344,14 @@ const upload = multer({
     allowed.test(path.extname(file.originalname).toLowerCase())
       ? cb(null, true)
       : cb(new Error(
-          isSiteMap
-            ? "Only JPG, JPEG, PNG, PDF, and SVG files are allowed."
-            : isSiteImage
+        isSiteMap
+          ? "Only JPG, JPEG, PNG, PDF, and SVG files are allowed."
+          : isSiteImage
             ? "Only JPG, JPEG, and PNG files are allowed."
             : isCompanyDocument
               ? "Only JPG, JPEG, PNG, WEBP, and PDF files are allowed."
               : "Only JPG, PNG, WEBP, and PDF files are allowed."
-        ));
+      ));
   },
 });
 
@@ -450,8 +450,8 @@ const siteDocumentUpload = multer({
 /* ==========================
    HELPERS
 ========================== */
-const ok  = (res, data, msg = "Success", status = 200) =>
-  res.status(status).json({ success: true,  message: msg, data });
+const ok = (res, data, msg = "Success", status = 200) =>
+  res.status(status).json({ success: true, message: msg, data });
 
 const INTERNAL_ERROR_PATTERN =
   /(postgres|database|sql|relation|column|constraint|cloudinary|syntax|enoent|econn|enotfound|connection string|api[_ -]?key)/i;
@@ -623,12 +623,14 @@ const ensureHomeExperienceSchema = () => {
           profile_image_public_id TEXT,
           designation VARCHAR(160),
           short_description TEXT,
+          investment_amount NUMERIC(15, 2) DEFAULT 0,
           display_order INTEGER NOT NULL DEFAULT 0,
           is_active BOOLEAN NOT NULL DEFAULT TRUE,
           is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`;
+      await sql`ALTER TABLE investors ADD COLUMN IF NOT EXISTS investment_amount NUMERIC(15, 2) DEFAULT 0`;
       await sql`CREATE SEQUENCE IF NOT EXISTS investors_id_seq`;
       await sql`ALTER TABLE investors ALTER COLUMN id SET DEFAULT nextval('investors_id_seq')`;
       await sql`ALTER SEQUENCE investors_id_seq OWNED BY investors.id`;
@@ -2495,7 +2497,7 @@ app.get("/api/home-page/settings", async (_req, res) => {
   }
 });
 
-app.get("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "SiteManager"), async (_req, res) => {
+app.get("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "Admin", "SiteManager"), async (_req, res) => {
   try {
     await ensureHomeExperienceSchema();
     const [settings] = await sql`SELECT * FROM home_page_settings WHERE id = 1`;
@@ -2503,13 +2505,13 @@ app.get("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "S
   } catch (e) { return err(res, e.message); }
 });
 
-app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "SiteManager"), async (req, res) => {
+app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "Admin", "SiteManager"), async (req, res) => {
   try {
     await ensureHomeExperienceSchema();
     const displayType = "hero_slider";
     const sectionVisibility = req.body.section_visibility && typeof req.body.section_visibility === "object"
       ? Object.fromEntries(["investors", "sites", "why_choose", "emi_calculator", "buyback", "earn", "facilities", "cta", "contact"]
-          .map((key) => [key, parseBool(req.body.section_visibility[key], true)]))
+        .map((key) => [key, parseBool(req.body.section_visibility[key], true)]))
       : null;
     const [settings] = await sql`
       UPDATE home_page_settings SET
@@ -2528,33 +2530,29 @@ app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "S
 app.get("/api/investors", async (_req, res) => {
   try {
     await ensureHomeExperienceSchema();
-    const investors = await getCachedOrFetch("investors", 15000, async () => {
-      const showcase = await sql`
-        SELECT id::text as id, name, profile_image_url, display_order, created_at
-        FROM investors
-        WHERE is_active = TRUE AND is_deleted = FALSE`;
+    const showcase = await sql`
+      SELECT id::text as id, name, profile_image_url, COALESCE(investment_amount, 0)::numeric as investment_amount, display_order, created_at
+      FROM investors
+      WHERE is_active = TRUE AND is_deleted = FALSE
+      ORDER BY COALESCE(investment_amount, 0) DESC, display_order ASC, created_at ASC`;
 
-      const portalInvestors = await sql`
-        SELECT ('portal_' || id::text) as id,
-               full_name as name,
-               COALESCE(profile_picture_url, '') as profile_image_url,
-               0 as display_order,
-               created_at
-        FROM investor_users
-        WHERE (status = 'active' OR status = 'approved')
-          AND (deleted_at IS NULL)
-          AND (is_verified = TRUE OR status = 'approved' OR status = 'active')`;
+    const seen = new Set();
+    const unique = [];
+    for (const item of showcase) {
+      const key = (item.name || "").trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      unique.push(item);
+    }
 
-      const combined = [...showcase, ...portalInvestors];
-      combined.sort((a, b) => (a.display_order - b.display_order) || (new Date(a.created_at) - new Date(b.created_at)));
+    const investors = unique.map(item => ({
+      id: item.id,
+      name: item.name,
+      profile_image_url: item.profile_image_url,
+      investment_amount: Number(item.investment_amount || 0),
+      display_order: item.display_order
+    }));
 
-      return combined.map(item => ({
-        id: item.id,
-        name: item.name,
-        profile_image_url: item.profile_image_url,
-        display_order: item.display_order
-      }));
-    });
     return ok(res, investors);
   } catch (e) { return err(res, "Failed to load investors"); }
 });
@@ -2571,7 +2569,7 @@ app.post("/api/admin/investors", verifyAdminToken, role("SuperAdmin", "SiteManag
     if (!req.file || !/^image\/(jpeg|png|webp)$/.test(req.file.mimetype)) return err(res, "Profile image is required (JPG, PNG or WEBP)", 400);
     const { url } = await saveFileToVPS(req.file.buffer, { module: "investor", entityId: name, entityType: "Investor", originalName: req.file.originalname });
     const [created] = await sql`INSERT INTO investors(name, profile_image_url, profile_image_public_id, display_order, is_active)
-      VALUES(${name}, ${url}, ${null}, ${Number(req.body.display_order)||0}, ${parseBool(req.body.is_active,true)}) RETURNING *`;
+      VALUES(${name}, ${url}, ${null}, ${Number(req.body.display_order) || 0}, ${parseBool(req.body.is_active, true)}) RETURNING *`;
     invalidateApiCache("investors");
     return ok(res, created, "Investor added.", 201);
   } catch (e) { return err(res, e.message); }
@@ -2582,23 +2580,25 @@ app.put("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "SiteMa
     await ensureHomeExperienceSchema(); const [current] = await sql`SELECT * FROM investors WHERE id=${req.params.id} AND is_deleted=FALSE`;
     if (!current) return err(res, "Investor not found", 404);
     const name = String(req.body.name || "").trim(); if (!name) return err(res, "Investor name is required", 400);
-    let url=current.profile_image_url, publicId=current.profile_image_public_id;
-    if(req.file){ if(!/^image\/(jpeg|png|webp)$/.test(req.file.mimetype)) return err(res,"Profile image must be JPG, PNG or WEBP",400);
+    let url = current.profile_image_url, publicId = current.profile_image_public_id;
+    if (req.file) {
+      if (!/^image\/(jpeg|png|webp)$/.test(req.file.mimetype)) return err(res, "Profile image must be JPG, PNG or WEBP", 400);
       const saved = await saveFileToVPS(req.file.buffer, { module: "investor", entityId: req.params.id, entityType: "Investor", originalName: req.file.originalname });
       url = saved.url; publicId = null;
-      await deleteFileFromStorage(current.profile_image_url, current.profile_image_public_id); }
-    const [updated]=await sql`UPDATE investors SET name=${name},profile_image_url=${url},profile_image_public_id=${publicId},display_order=${Number(req.body.display_order)||0},is_active=${parseBool(req.body.is_active,true)},updated_at=NOW() WHERE id=${req.params.id} RETURNING *`;
+      await deleteFileFromStorage(current.profile_image_url, current.profile_image_public_id);
+    }
+    const [updated] = await sql`UPDATE investors SET name=${name},profile_image_url=${url},profile_image_public_id=${publicId},display_order=${Number(req.body.display_order) || 0},is_active=${parseBool(req.body.is_active, true)},updated_at=NOW() WHERE id=${req.params.id} RETURNING *`;
     invalidateApiCache("investors");
-    return ok(res,updated,"Investor updated.");
-  } catch(e){return err(res,e.message);}
+    return ok(res, updated, "Investor updated.");
+  } catch (e) { return err(res, e.message); }
 });
 
-app.patch("/api/admin/investors/:id/status", verifyAdminToken, role("SuperAdmin", "SiteManager"), async(req,res)=>{
-  try{await ensureHomeExperienceSchema();const [row]=await sql`UPDATE investors SET is_active=${parseBool(req.body.is_active,false)},updated_at=NOW() WHERE id=${req.params.id} AND is_deleted=FALSE RETURNING *`;if(!row)return err(res,"Investor not found",404);invalidateApiCache("investors");return ok(res,row,"Investor status updated.");}catch(e){return err(res,e.message);}
+app.patch("/api/admin/investors/:id/status", verifyAdminToken, role("SuperAdmin", "SiteManager"), async (req, res) => {
+  try { await ensureHomeExperienceSchema(); const [row] = await sql`UPDATE investors SET is_active=${parseBool(req.body.is_active, false)},updated_at=NOW() WHERE id=${req.params.id} AND is_deleted=FALSE RETURNING *`; if (!row) return err(res, "Investor not found", 404); invalidateApiCache("investors"); return ok(res, row, "Investor status updated."); } catch (e) { return err(res, e.message); }
 });
 
-app.delete("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "SiteManager"), async(req,res)=>{
-  try{await ensureHomeExperienceSchema();const [row]=await sql`UPDATE investors SET is_deleted=TRUE,is_active=FALSE,updated_at=NOW() WHERE id=${req.params.id} AND is_deleted=FALSE RETURNING id,profile_image_url,profile_image_public_id`;if(!row)return err(res,"Investor not found",404);await deleteFileFromStorage(row.profile_image_url, row.profile_image_public_id);invalidateApiCache("investors");return ok(res,{},"Investor deleted.");}catch(e){return err(res,e.message);}
+app.delete("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "SiteManager"), async (req, res) => {
+  try { await ensureHomeExperienceSchema(); const [row] = await sql`UPDATE investors SET is_deleted=TRUE,is_active=FALSE,updated_at=NOW() WHERE id=${req.params.id} AND is_deleted=FALSE RETURNING id,profile_image_url,profile_image_public_id`; if (!row) return err(res, "Investor not found", 404); await deleteFileFromStorage(row.profile_image_url, row.profile_image_public_id); invalidateApiCache("investors"); return ok(res, {}, "Investor deleted."); } catch (e) { return err(res, e.message); }
 });
 
 app.get("/api/book-plot/backgrounds", async (_req, res) => {
@@ -2682,7 +2682,7 @@ app.post("/api/book-plot/leads", optionalUserToken, async (req, res) => {
       INSERT INTO book_plot_leads (full_name, contact_number, site_id, custom_site_name, user_id)
       VALUES (${fullName}, ${mobile}, ${siteId}, ${customSiteName}, ${req.user?.user_id || null})
       RETURNING id, created_at`;
-    const inquiryNumber = `BPL-${new Date(lead.created_at).toISOString().slice(0,10).replace(/-/g, "")}-${String(lead.id).padStart(6, "0")}`;
+    const inquiryNumber = `BPL-${new Date(lead.created_at).toISOString().slice(0, 10).replace(/-/g, "")}-${String(lead.id).padStart(6, "0")}`;
     await sql`UPDATE book_plot_leads SET inquiry_number = ${inquiryNumber} WHERE id = ${lead.id}`;
     return ok(res, { inquiry_number: inquiryNumber, inquiry_date: lead.created_at }, "Your inquiry has been submitted.", 201);
   } catch (e) { console.error("[Book Plot Lead Error]", e); return err(res, "Failed to submit inquiry"); }
@@ -2731,7 +2731,7 @@ app.get("/api/admin/book-plot/leads/export", verifyAdminToken, role("SuperAdmin"
     })));
     const workbook = xlsx.utils.book_new(); xlsx.utils.book_append_sheet(workbook, sheet, "Book Plot Leads");
     const buffer = xlsx.write(workbook, { type: "buffer", bookType: "xlsx" });
-    res.setHeader("Content-Disposition", `attachment; filename=book-plot-leads-${new Date().toISOString().slice(0,10)}.xlsx`);
+    res.setHeader("Content-Disposition", `attachment; filename=book-plot-leads-${new Date().toISOString().slice(0, 10)}.xlsx`);
     res.type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"); return res.send(buffer);
   } catch (e) { return err(res, e.message); }
 });
@@ -2765,7 +2765,7 @@ app.get("/api/home-sliders", async (_req, res) => {
 
 app.get("/api/admin/home-sliders",
   verifyAdminToken,
-  role("SuperAdmin", "SiteManager"),
+  role("SuperAdmin", "Admin", "SiteManager"),
   async (_req, res) => {
     try {
       await ensureHomeSlidersSchema();
@@ -2788,7 +2788,7 @@ app.get("/api/admin/home-sliders",
 
 app.get("/api/admin/home-sliders/:id",
   verifyAdminToken,
-  role("SuperAdmin", "SiteManager"),
+  role("SuperAdmin", "Admin", "SiteManager"),
   async (req, res) => {
     try {
       await ensureHomeSlidersSchema();
@@ -2812,7 +2812,7 @@ app.get("/api/admin/home-sliders/:id",
 
 app.post("/api/admin/home-sliders",
   verifyAdminToken,
-  role("SuperAdmin", "SiteManager"),
+  role("SuperAdmin", "Admin", "SiteManager"),
   upload.single("slider_image"),
   async (req, res) => {
     try {
@@ -2882,7 +2882,7 @@ app.post("/api/admin/home-sliders",
 
 app.post("/api/admin/home-sliders/bulk",
   verifyAdminToken,
-  role("SuperAdmin", "SiteManager"),
+  role("SuperAdmin", "Admin", "SiteManager"),
   upload.array("slider_images", 20),
   async (req, res) => {
     try {
@@ -2899,7 +2899,7 @@ app.post("/api/admin/home-sliders/bulk",
       const created = [];
 
       for (const [index, file] of files.entries()) {
-        const saved = await saveFileToVPS(file.buffer, { module: "slider", entityId: `bulk_${index+1}`, entityType: "HomeSlider", originalName: file.originalname });
+        const saved = await saveFileToVPS(file.buffer, { module: "slider", entityId: `bulk_${index + 1}`, entityType: "HomeSlider", originalName: file.originalname });
         const originalName = path.basename(file.originalname || `Slider ${index + 1}`, path.extname(file.originalname || ""));
         const title = originalName.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim() || `Slider ${index + 1}`;
         const [slider] = await sql`
@@ -2931,7 +2931,7 @@ app.post("/api/admin/home-sliders/bulk",
 
 app.put("/api/admin/home-sliders/:id",
   verifyAdminToken,
-  role("SuperAdmin", "SiteManager"),
+  role("SuperAdmin", "Admin", "SiteManager"),
   upload.single("slider_image"),
   async (req, res) => {
     try {
@@ -2996,7 +2996,7 @@ app.put("/api/admin/home-sliders/:id",
 
 app.delete("/api/admin/home-sliders/:id",
   verifyAdminToken,
-  role("SuperAdmin", "SiteManager"),
+  role("SuperAdmin", "Admin", "SiteManager"),
   async (req, res) => {
     try {
       await ensureHomeSlidersSchema();
@@ -3686,9 +3686,9 @@ app.get("/api/usersNew", async (req, res) => {
 app.get("/api/days", async (req, res) => {
   try {
     const days = [
-      { id: 1, name: "Monday" },   { id: 2, name: "Tuesday" },
+      { id: 1, name: "Monday" }, { id: 2, name: "Tuesday" },
       { id: 3, name: "Wednesday" }, { id: 4, name: "Thursday" },
-      { id: 5, name: "Friday" },   { id: 6, name: "Saturday" },
+      { id: 5, name: "Friday" }, { id: 6, name: "Saturday" },
       { id: 7, name: "Sunday" },
     ];
     res.json(days);
@@ -3726,8 +3726,8 @@ app.post("/api/auth/send-otp", async (req, res) => {
     const { mobile_no, purpose = "Login" } = req.body;
     if (!mobile_no) return err(res, "mobile_no required", 400);
 
-    const otp  = genOTP();
-    const exp  = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+    const otp = genOTP();
+    const exp = new Date(Date.now() + 10 * 60 * 1000); // 10 min
 
     // Invalidate old OTPs
     await sql`
@@ -3745,8 +3745,8 @@ app.post("/api/auth/send-otp", async (req, res) => {
 
 // Register (multi-step — submit all at once after form)
 app.post("/api/auth/register", upload.fields([
-  { name: "pan_card",      maxCount: 1 },
-  { name: "aadhar_card",   maxCount: 1 },
+  { name: "pan_card", maxCount: 1 },
+  { name: "aadhar_card", maxCount: 1 },
   { name: "profile_photo", maxCount: 1 },
 ]), async (req, res) => {
   try {
@@ -3868,8 +3868,8 @@ app.post("/api/auth/register", upload.fields([
 
     // ── Documents — Cloudinary upload ──
     const fileFields = [
-      { field: "pan_card",      type: "PANCard"      },
-      { field: "aadhar_card",   type: "AadharCard"   },
+      { field: "pan_card", type: "PANCard" },
+      { field: "aadhar_card", type: "AadharCard" },
       { field: "profile_photo", type: "ProfilePhoto" },
     ];
 
@@ -4056,11 +4056,11 @@ app.post("/api/auth/verify-email-otp", async (req, res) => {
     await sql`DELETE FROM pending_registrations WHERE email = ${cleanEmail}`;
 
     const payload = {
-      user_id:   createdUser.user_id,
+      user_id: createdUser.user_id,
       user_type: createdUser.user_type,
       member_id: createdUser.member_id,
       mobile_no: pending.mobile_no,
-      email:     createdUser.email,
+      email: createdUser.email,
     };
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
     const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, { expiresIn: "30d" });
@@ -4214,25 +4214,27 @@ app.post("/api/auth/login", async (req, res) => {
     }
 
     const payload = {
-      user_id:    user.user_id,
-      user_type:  user.user_type,
-      member_id:  user.member_id,
-      mobile_no:  user.mobile_no,
-      email:      user.email,
+      user_id: user.user_id,
+      user_type: user.user_type,
+      member_id: user.member_id,
+      mobile_no: user.mobile_no,
+      email: user.email,
     };
 
     const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
     const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
-    const token        = jwt.sign(payload, jwtSecret,         { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
+    const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
     const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "30d" });
 
     return ok(res, {
       token, refresh_token: refreshToken,
-      user: { user_id: user.user_id, full_name: user.full_name,
-              user_type: user.user_type, member_id: user.member_id,
-              invitation_code: user.invitation_code, email: user.email,
-              account_status: user.account_status,
-              email_verified: Boolean(user.email_verified || user.is_otp_verified) },
+      user: {
+        user_id: user.user_id, full_name: user.full_name,
+        user_type: user.user_type, member_id: user.member_id,
+        invitation_code: user.invitation_code, email: user.email,
+        account_status: user.account_status,
+        email_verified: Boolean(user.email_verified || user.is_otp_verified)
+      },
     }, "Login successful");
   } catch (e) {
     return err(res, e.message);
@@ -4245,9 +4247,11 @@ app.post("/api/auth/refresh", async (req, res) => {
     const { refresh_token } = req.body;
     if (!refresh_token) return err(res, "refresh_token required", 400);
     const decoded = jwt.verify(refresh_token, process.env.JWT_REFRESH_SECRET);
-    const token   = jwt.sign(
-      { user_id: decoded.user_id, user_type: decoded.user_type,
-        member_id: decoded.member_id, mobile_no: decoded.mobile_no },
+    const token = jwt.sign(
+      {
+        user_id: decoded.user_id, user_type: decoded.user_type,
+        member_id: decoded.member_id, mobile_no: decoded.mobile_no
+      },
       process.env.JWT_SECRET, { expiresIn: "7d" }
     );
     return ok(res, { token }, "Token refreshed");
@@ -4308,7 +4312,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
     await sql`
       UPDATE otp_log SET is_used = TRUE
       WHERE mobile = ${resetEmail} AND purpose = 'ResetPassword' AND is_used = FALSE`;
-    await safeInsertOtpLog('User', user.user_id, resetEmail, otp, 'ResetPassword', new Date(Date.now() + 10*60*1000));
+    await safeInsertOtpLog('User', user.user_id, resetEmail, otp, 'ResetPassword', new Date(Date.now() + 10 * 60 * 1000));
 
     try {
       await sendEmail(resetEmail, "MMR password reset OTP", otpEmailHtml(otp, "Password Reset"));
@@ -4330,7 +4334,7 @@ app.post("/api/auth/clear-otp-logs", async (req, res) => {
       await sql`DELETE FROM otp_log`;
       try {
         await sql`SELECT setval(pg_get_serial_sequence('otp_log', 'otp_id'), 1, false)`;
-      } catch (seqErr) {}
+      } catch (seqErr) { }
     }
     return ok(res, {}, "All OTP logs deleted successfully from database.");
   } catch (e) {
@@ -4440,9 +4444,9 @@ app.post("/api/admin/auth/login", async (req, res) => {
       JOIN admin_roles r ON a.role_id = r.role_id
       WHERE a.email = ${email}`;
 
-    if (!admin)      return err(res, "Invalid credentials", 401);
+    if (!admin) return err(res, "Invalid credentials", 401);
     if (!admin.is_active) return err(res, "Account deactivated", 403);
-    if (admin.is_locked)  return err(res, "Account locked after 5 failed attempts. Contact Super Admin.", 403);
+    if (admin.is_locked) return err(res, "Account locked after 5 failed attempts. Contact Super Admin.", 403);
 
     const valid = await bcrypt.compare(password, admin.password_hash);
 
@@ -4461,10 +4465,12 @@ app.post("/api/admin/auth/login", async (req, res) => {
       UPDATE admin_users SET failed_login_attempts = 0, last_login_at = NOW()
       WHERE admin_id = ${admin.admin_id}`;
 
-    const payload = { admin_id: admin.admin_id, email: admin.email,
-                      full_name: admin.full_name, role: admin.role };
+    const payload = {
+      admin_id: admin.admin_id, email: admin.email,
+      full_name: admin.full_name, role: admin.role
+    };
 
-    const token        = jwt.sign(payload, adminJwtSecret(),               { expiresIn: "8h" });
+    const token = jwt.sign(payload, adminJwtSecret(), { expiresIn: "8h" });
     const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET || adminJwtSecret(), { expiresIn: "1d" });
 
     // Log session
@@ -4479,9 +4485,12 @@ app.post("/api/admin/auth/login", async (req, res) => {
       console.warn("[Admin Login Log Warning]:", logErr.message);
     }
 
-    return ok(res, { token, refresh_token: refreshToken,
-      admin: { admin_id: admin.admin_id, full_name: admin.full_name,
-               email: admin.email, role: admin.role }
+    return ok(res, {
+      token, refresh_token: refreshToken,
+      admin: {
+        admin_id: admin.admin_id, full_name: admin.full_name,
+        email: admin.email, role: admin.role
+      }
     }, "Admin login successful");
   } catch (e) {
     return err(res, e.message);
@@ -4493,9 +4502,11 @@ app.post("/api/admin/auth/refresh", async (req, res) => {
     const { refresh_token } = req.body;
     if (!refresh_token) return err(res, "refresh_token required", 400);
     const decoded = jwt.verify(refresh_token, process.env.JWT_REFRESH_SECRET);
-    const token   = jwt.sign(
-      { admin_id: decoded.admin_id, email: decoded.email,
-        full_name: decoded.full_name, role: decoded.role },
+    const token = jwt.sign(
+      {
+        admin_id: decoded.admin_id, email: decoded.email,
+        full_name: decoded.full_name, role: decoded.role
+      },
       adminJwtSecret(), { expiresIn: "8h" }
     );
     return ok(res, { token }, "Token refreshed");
@@ -4727,8 +4738,8 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
 app.put("/api/profile", verifyUserToken, async (req, res) => {
   try {
     const { alternate_mobile, email, spouse_name,
-            account_holder_name, bank_name, branch_name,
-            nominee_name, nominee_relationship } = req.body;
+      account_holder_name, bank_name, branch_name,
+      nominee_name, nominee_relationship } = req.body;
     const uid = req.user.user_id;
 
     if (email) {
@@ -4790,7 +4801,7 @@ app.post("/api/profile/upload-doc",
     try {
       const { document_type } = req.body;
       if (!req.file) return err(res, "No file uploaded", 400);
-      if (!["PANCard","AadharCard","Passport","DrivingLicense","AddressProof","IdentityProof","ProfilePhoto","Other"].includes(document_type))
+      if (!["PANCard", "AadharCard", "Passport", "DrivingLicense", "AddressProof", "IdentityProof", "ProfilePhoto", "Other"].includes(document_type))
         return err(res, "Invalid document_type", 400);
 
       // Save to VPS Storage
@@ -5197,7 +5208,7 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
     const [seq] = await sql`
       SELECT COALESCE(MAX(CAST(SUBSTRING(booking_serial FROM 10) AS INT)),0)+1 AS n
       FROM bookings WHERE booking_serial LIKE 'MMR-' || to_char(NOW(),'YYYY') || '-%'`;
-    const serial = `MMR-${new Date().getFullYear()}-${String(seq.n).padStart(5,"0")}`;
+    const serial = `MMR-${new Date().getFullYear()}-${String(seq.n).padStart(5, "0")}`;
 
     const [booking] = await sql`
       INSERT INTO bookings (booking_serial, user_id, plot_id, payment_type, advance_amount)
@@ -5665,7 +5676,7 @@ app.get("/api/associate/network", verifyUserToken, requireAssociate, async (req,
 
 app.get("/api/admin/mlm/network",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager","SiteManager"),
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
   async (_req, res) => {
     try {
       await requireMlmSchema();
@@ -6061,8 +6072,8 @@ app.post("/api/buyback/apply", verifyUserToken, async (req, res) => {
     if (!booking) return err(res, "Valid confirmed booking not found", 404);
 
     // Check 2-year window
-    const purchaseDate   = new Date(booking.booking_date);
-    const twoYearCutoff  = new Date(purchaseDate);
+    const purchaseDate = new Date(booking.booking_date);
+    const twoYearCutoff = new Date(purchaseDate);
     twoYearCutoff.setFullYear(twoYearCutoff.getFullYear() + 2);
     const eligible = new Date() <= twoYearCutoff;
 
@@ -6087,9 +6098,9 @@ app.post("/api/buyback/apply", verifyUserToken, async (req, res) => {
     });
 
     return ok(res, {
-      buyback_id:        app_.buyback_id,
-      buyback_amount:    app_.buyback_amount,
-      eligible:          app_.eligibility_check,
+      buyback_id: app_.buyback_id,
+      buyback_amount: app_.buyback_amount,
+      eligible: app_.eligibility_check,
     }, eligible
       ? "Buyback applied. Admin will process your request."
       : "Applied but 2-year window may have passed. Admin will verify.", 201);
@@ -6402,7 +6413,7 @@ app.post("/api/inquiries", async (req, res) => {
 
 app.get("/api/admin/inquiries",
   verifyAdminToken,
-  role("SuperAdmin","SupportStaff","SiteManager"),
+  role("SuperAdmin", "SupportStaff", "SiteManager"),
   async (req, res) => {
     try {
       const result = await getAdminInquiriesPage(req.query);
@@ -6417,7 +6428,7 @@ app.get("/api/admin/inquiries",
 
 app.get("/api/admin/inquiries/:id",
   verifyAdminToken,
-  role("SuperAdmin","SupportStaff","SiteManager"),
+  role("SuperAdmin", "SupportStaff", "SiteManager"),
   async (req, res) => {
     try {
       await ensureInquirySchema();
@@ -6438,7 +6449,7 @@ app.get("/api/admin/inquiries/:id",
 
 app.put("/api/admin/inquiries/:id",
   verifyAdminToken,
-  role("SuperAdmin","SupportStaff","SiteManager"),
+  role("SuperAdmin", "SupportStaff", "SiteManager"),
   async (req, res) => {
     try {
       await ensureInquirySchema();
@@ -6487,7 +6498,7 @@ app.delete("/api/admin/inquiries/:id",
 
 app.get("/api/admin/users/pending",
   verifyAdminToken,
-  role("SuperAdmin","SupportStaff"),
+  role("SuperAdmin", "SupportStaff"),
   async (req, res) => {
     try {
       const result = await getAdminUsersPage(req.query, {
@@ -6504,7 +6515,7 @@ app.get("/api/admin/users/pending",
 
 app.get("/api/admin/users",
   verifyAdminToken,
-  role("SuperAdmin","SupportStaff"),
+  role("SuperAdmin", "SupportStaff"),
   async (req, res) => {
     try {
       const result = await getAdminUsersPage(req.query);
@@ -6517,7 +6528,7 @@ app.get("/api/admin/users",
 
 app.get("/api/admin/customers",
   verifyAdminToken,
-  role("SuperAdmin","SupportStaff"),
+  role("SuperAdmin", "SupportStaff"),
   async (req, res) => {
     try {
       const result = await getAdminUsersPage(
@@ -6533,7 +6544,7 @@ app.get("/api/admin/customers",
 
 app.post("/api/admin/customers",
   verifyAdminToken,
-  role("SuperAdmin","SupportStaff"),
+  role("SuperAdmin", "SupportStaff"),
   async (req, res) => {
     try {
       const fullName = String(req.body.full_name || "").trim();
@@ -6609,7 +6620,7 @@ app.post("/api/admin/customers",
 
 app.put("/api/admin/customers/:id",
   verifyAdminToken,
-  role("SuperAdmin","SupportStaff"),
+  role("SuperAdmin", "SupportStaff"),
   async (req, res) => {
     try {
       const uid = req.params.id;
@@ -6703,17 +6714,17 @@ app.delete("/api/admin/customers/:id",
 
 app.get("/api/admin/users/:id",
   verifyAdminToken,
-  role("SuperAdmin","SupportStaff"),
+  role("SuperAdmin", "SupportStaff"),
   async (req, res) => {
     try {
       const uid = req.params.id;
       const [user] = await sql`SELECT * FROM users WHERE user_id = ${uid}`;
       if (!user) return err(res, "User not found", 404);
 
-      const [address]  = await sql`SELECT * FROM user_addresses    WHERE user_id = ${uid} AND address_type = 'Permanent'`;
-      const [bank]     = await sql`SELECT * FROM user_bank_details  WHERE user_id = ${uid}`;
-      const [nominee]  = await sql`SELECT * FROM user_nominees      WHERE user_id = ${uid}`;
-      const documents  = await sql`SELECT * FROM user_documents     WHERE user_id = ${uid} AND is_active = TRUE`;
+      const [address] = await sql`SELECT * FROM user_addresses    WHERE user_id = ${uid} AND address_type = 'Permanent'`;
+      const [bank] = await sql`SELECT * FROM user_bank_details  WHERE user_id = ${uid}`;
+      const [nominee] = await sql`SELECT * FROM user_nominees      WHERE user_id = ${uid}`;
+      const documents = await sql`SELECT * FROM user_documents     WHERE user_id = ${uid} AND is_active = TRUE`;
 
       return ok(res, { ...user, address, bank, nominee, documents });
     } catch (e) {
@@ -6727,7 +6738,7 @@ app.post("/api/admin/users/:id/approve",
   role("SuperAdmin"),
   async (req, res) => {
     try {
-      const uid   = req.params.id;
+      const uid = req.params.id;
       const { verify_note } = req.body;
       const [user] = await sql`
         SELECT user_id, user_type, full_name, account_status, member_id, invitation_code
@@ -6859,7 +6870,7 @@ app.post("/api/admin/users/:id/blacklist",
 
 app.get("/api/admin/bookings",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","FinanceManager"),
+  role("SuperAdmin", "SiteManager", "FinanceManager"),
   async (req, res) => {
     try {
       const { status, site_id, payment_status, from_date, to_date, search, page = 1, limit = 20 } = req.query;
@@ -6937,7 +6948,7 @@ app.get("/api/admin/bookings",
 
 app.get("/api/admin/bookings/:id",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","FinanceManager"),
+  role("SuperAdmin", "SiteManager", "FinanceManager"),
   async (req, res) => {
     try {
       const [booking] = await sql`
@@ -7005,7 +7016,7 @@ app.get("/api/admin/bookings/:id",
 
 app.post("/api/admin/bookings/:id/confirm",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","FinanceManager"),
+  role("SuperAdmin", "SiteManager", "FinanceManager"),
   async (req, res) => {
     try {
       const bid = req.params.id;
@@ -7017,7 +7028,7 @@ app.post("/api/admin/bookings/:id/confirm",
 
       const [plot] = await sql`SELECT base_price, monthly_emi, emi_tenure_months FROM plots WHERE plot_id = ${booking.plot_id}`;
       if (booking.payment_type === "EMI") {
-        const start  = new Date(); start.setMonth(start.getMonth() + 1);
+        const start = new Date(); start.setMonth(start.getMonth() + 1);
         for (let i = 1; i <= Number(plot.emi_tenure_months || 60); i++) {
           const due = new Date(start);
           due.setMonth(due.getMonth() + (i - 1));
@@ -7078,7 +7089,7 @@ app.post("/api/admin/bookings/:id/confirm",
 
 app.post("/api/admin/bookings/:id/cancel",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","FinanceManager"),
+  role("SuperAdmin", "SiteManager", "FinanceManager"),
   async (req, res) => {
     try {
       const reason = req.body?.reason || req.body?.cancellation_reason;
@@ -7120,7 +7131,7 @@ app.post("/api/admin/bookings/:id/cancel",
 
 app.patch("/api/admin/bookings/:id/confirm",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","FinanceManager"),
+  role("SuperAdmin", "SiteManager", "FinanceManager"),
   async (req, res) => {
     try {
       const bid = req.params.id;
@@ -7178,7 +7189,7 @@ app.patch("/api/admin/bookings/:id/confirm",
 
 app.patch("/api/admin/bookings/:id/cancel",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","FinanceManager"),
+  role("SuperAdmin", "SiteManager", "FinanceManager"),
   async (req, res) => {
     try {
       const reason = req.body?.reason || req.body?.cancellation_reason;
@@ -7216,7 +7227,7 @@ app.patch("/api/admin/bookings/:id/cancel",
 
 app.get("/api/admin/emi/overdue",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin", "FinanceManager"),
   async (req, res) => {
     try {
       // Auto-mark overdue
@@ -7247,7 +7258,7 @@ app.get("/api/admin/emi/overdue",
 
 app.post("/api/admin/emi/:id/confirm",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin", "FinanceManager"),
   async (req, res) => {
     try {
       const emiId = req.params.id;
@@ -7302,7 +7313,7 @@ app.post("/api/admin/emi/:id/confirm",
 
 app.put("/api/admin/plots/:plotId/polygon",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const { coordinates, label_x, label_y, change_reason } = req.body;
@@ -7346,7 +7357,7 @@ app.put("/api/admin/plots/:plotId/polygon",
 
 app.post("/api/admin/plots/:id/polygon",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const { coordinates, label_x, label_y, change_reason } = req.body;
@@ -7388,7 +7399,7 @@ app.post("/api/admin/plots/:id/polygon",
 
 app.get("/api/admin/plots/:plotId/polygon",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","SupportStaff"),
+  role("SuperAdmin", "SiteManager", "SupportStaff"),
   async (req, res) => {
     try {
       const [polygon] = await sql`
@@ -7409,7 +7420,7 @@ app.get("/api/admin/plots/:plotId/polygon",
 
 app.get("/api/admin/plots/:plotId/polygon-history",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const history = await sql`
@@ -7466,7 +7477,7 @@ app.put("/api/admin/plots/:plotId/polygon/restore/:historyId",
 
 app.get("/api/admin/plots/:plotId/details",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","SupportStaff"),
+  role("SuperAdmin", "SiteManager", "SupportStaff"),
   async (req, res) => {
     try {
       const [plot] = await sql`
@@ -7489,7 +7500,7 @@ app.get("/api/admin/plots/:plotId/details",
 
 app.put("/api/admin/plots/:plotId/details",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const plotId = req.params.plotId;
@@ -7533,7 +7544,7 @@ app.put("/api/admin/plots/:plotId/details",
 
 app.post("/api/admin/plots/:plotId/images",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   plotImageUpload.single("image"),
   async (req, res) => {
     try {
@@ -7568,7 +7579,7 @@ app.post("/api/admin/plots/:plotId/images",
 
 app.get("/api/admin/plots/:plotId/images",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","SupportStaff"),
+  role("SuperAdmin", "SiteManager", "SupportStaff"),
   async (req, res) => {
     try {
       const images = await sql`
@@ -7585,7 +7596,7 @@ app.get("/api/admin/plots/:plotId/images",
 
 app.put("/api/admin/plots/:plotId/images/:imageId",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const [existing] = await sql`
@@ -7609,14 +7620,14 @@ app.put("/api/admin/plots/:plotId/images/:imageId",
 
 app.delete("/api/admin/plots/:plotId/images/:imageId",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const [image] = await sql`
         SELECT id, image_path FROM plot_images
         WHERE id = ${req.params.imageId} AND plot_id = ${req.params.plotId}`;
       if (!image) return err(res, "Image not found", 404);
-      if (image.image_path) await fs.unlink(image.image_path).catch(() => {});
+      if (image.image_path) await fs.unlink(image.image_path).catch(() => { });
       await sql`DELETE FROM plot_images WHERE id = ${req.params.imageId} AND plot_id = ${req.params.plotId}`;
       await logPlotAudit(req, "DeletePlotImage", req.params.plotId);
       return ok(res, null, "Image deleted.");
@@ -7628,7 +7639,7 @@ app.delete("/api/admin/plots/:plotId/images/:imageId",
 
 app.post("/api/admin/sites/:siteId/detect-plots",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const [site] = await sql`
@@ -7663,7 +7674,7 @@ app.post("/api/admin/sites/:siteId/detect-plots",
 
 app.post("/api/admin/sites/:siteId/detected-plots",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const [site] = await sql`
@@ -7725,7 +7736,7 @@ app.post("/api/admin/sites/:siteId/detected-plots",
 
 app.get("/api/admin/sites/:siteId/plots/import-template",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","SupportStaff"),
+  role("SuperAdmin", "SiteManager", "SupportStaff"),
   async (_req, res) => {
     try {
       const worksheet = xlsx.utils.aoa_to_sheet([
@@ -7746,7 +7757,7 @@ app.get("/api/admin/sites/:siteId/plots/import-template",
 
 app.post("/api/admin/sites/:siteId/plots/bulk-import",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   importUpload.single("file"),
   async (req, res) => {
     try {
@@ -7784,15 +7795,15 @@ app.post("/api/admin/sites/:siteId/plots/bulk-import",
           );
           const plotNumber = String(row.plot_number || "").trim();
           const plotKey = plotNumber.toLowerCase();
-        if (!plotNumber) {
-          errors.push({ row: rowNumber, plot_number: plotNumber, error: "plot_number is required." });
-          continue;
-        }
+          if (!plotNumber) {
+            errors.push({ row: rowNumber, plot_number: plotNumber, error: "plot_number is required." });
+            continue;
+          }
           if (seen.has(plotKey)) {
             duplicateCount += 1;
             errors.push({ row: rowNumber, plot_number: plotNumber, error: "Duplicate plot number in uploaded file." });
-          continue;
-        }
+            continue;
+          }
           seen.add(plotKey);
 
           let [plot] = await sql`
@@ -7862,19 +7873,19 @@ app.post("/api/admin/sites/:siteId/plots/bulk-import",
                 ${row.facing || null}, ${["yes", "true", "1"].includes(String(row.corner_plot || "").toLowerCase())},
                 ${asNumberOrNull(row.road_width)},
                 ${sql.json([
-                  row.plc ? `PLC: ${row.plc}` : null,
-                  row.east ? `East: ${row.east}` : null,
-                  row.west ? `West: ${row.west}` : null,
-                  row.north ? `North: ${row.north}` : null,
-                  row.south ? `South: ${row.south}` : null,
-                  row.customer_name ? `Customer: ${row.customer_name}` : null,
-                  row.customer_mobile ? `Mobile: ${row.customer_mobile}` : null,
-                  row.booking_date ? `Booking Date: ${row.booking_date}` : null,
-                  row.registry_status ? `Registry: ${row.registry_status}` : null,
-                  row.registry_date ? `Registry Date: ${row.registry_date}` : null,
-                  row.balance_amount ? `Balance: ${row.balance_amount}` : null,
-                  ["yes", "true", "1"].includes(String(row.park_facing || "").toLowerCase()) ? "Park Facing" : null,
-                ].filter(Boolean))},
+              row.plc ? `PLC: ${row.plc}` : null,
+              row.east ? `East: ${row.east}` : null,
+              row.west ? `West: ${row.west}` : null,
+              row.north ? `North: ${row.north}` : null,
+              row.south ? `South: ${row.south}` : null,
+              row.customer_name ? `Customer: ${row.customer_name}` : null,
+              row.customer_mobile ? `Mobile: ${row.customer_mobile}` : null,
+              row.booking_date ? `Booking Date: ${row.booking_date}` : null,
+              row.registry_status ? `Registry: ${row.registry_status}` : null,
+              row.registry_date ? `Registry Date: ${row.registry_date}` : null,
+              row.balance_amount ? `Balance: ${row.balance_amount}` : null,
+              ["yes", "true", "1"].includes(String(row.park_facing || "").toLowerCase()) ? "Park Facing" : null,
+            ].filter(Boolean))},
                 ${row.description || row.remarks || null}, ${row.block || null}, ${row.phase || null}, ${req.admin.admin_id}, NOW()
               )
               ON CONFLICT (plot_id) DO UPDATE SET
@@ -7935,7 +7946,7 @@ app.post("/api/admin/sites/:siteId/plots/bulk-import",
 
 app.get("/api/admin/sites/:siteId/plots/import-history",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const history = await sql`
@@ -7955,7 +7966,7 @@ app.get("/api/admin/sites/:siteId/plots/import-history",
 
 app.get("/api/admin/plots/:plotId/booking-history",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","FinanceManager"),
+  role("SuperAdmin", "SiteManager", "FinanceManager"),
   async (req, res) => {
     try {
       const history = await sql`
@@ -8006,7 +8017,7 @@ app.get("/api/admin/plots/:plotId/booking-history",
 
 app.get("/api/admin/sites/:id/documents",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","SupportStaff"),
+  role("SuperAdmin", "SiteManager", "SupportStaff"),
   async (req, res) => {
     try {
       await requireSiteDocumentsSchema();
@@ -8026,7 +8037,7 @@ app.get("/api/admin/sites/:id/documents",
 
 app.post("/api/admin/sites/:id/documents",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   siteDocumentUpload.single("site_document"),
   async (req, res) => {
     try {
@@ -8065,7 +8076,7 @@ app.post("/api/admin/sites/:id/documents",
 
 app.put("/api/admin/sites/:siteId/documents/:documentId",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   siteDocumentUpload.single("site_document"),
   async (req, res) => {
     try {
@@ -8128,7 +8139,7 @@ app.put("/api/admin/sites/:siteId/documents/:documentId",
 
 app.delete("/api/admin/sites/:siteId/documents/:documentId",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       await requireSiteDocumentsSchema();
@@ -8150,7 +8161,7 @@ app.delete("/api/admin/sites/:siteId/documents/:documentId",
 
 app.get("/api/admin/sites",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","SupportStaff"),
+  role("SuperAdmin", "SiteManager", "SupportStaff"),
   async (req, res) => {
     try {
       await ensureSiteHtmlMapSchema();
@@ -8183,7 +8194,7 @@ app.get("/api/admin/sites",
 
 app.post("/api/admin/sites",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   upload.fields([
     { name: "property_image", maxCount: 1 },
     { name: "site_map", maxCount: 1 },
@@ -8250,7 +8261,7 @@ app.post("/api/admin/sites",
 
 app.put("/api/admin/sites/:id",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   upload.fields([
     { name: "property_image", maxCount: 1 },
     { name: "site_map", maxCount: 1 },
@@ -8296,18 +8307,18 @@ app.put("/api/admin/sites/:id",
         : null;
       await sql`
         UPDATE sites SET
-          site_name        = COALESCE(${site_name        || null}, site_name),
+          site_name        = COALESCE(${site_name || null}, site_name),
           site_prefix      = COALESCE(${generatedPrefix}, site_prefix),
-          city             = COALESCE(${city             || null}, city),
-          state            = COALESCE(${state            || null}, state),
-          full_address     = COALESCE(${full_address     || null}, full_address),
-          description      = COALESCE(${description      || null}, description),
+          city             = COALESCE(${city || null}, city),
+          state            = COALESCE(${state || null}, state),
+          full_address     = COALESCE(${full_address || null}, full_address),
+          description      = COALESCE(${description || null}, description),
           total_plots      = COALESCE(${total_plots ? Number(total_plots) : null}, total_plots),
           starting_price   = COALESCE(${starting_price ? Number(starting_price) : null}, starting_price),
-          total_area       = COALESCE(${total_area       || null}, total_area),
-          highlights       = COALESCE(${highlights       || null}, highlights),
+          total_area       = COALESCE(${total_area || null}, total_area),
+          highlights       = COALESCE(${highlights || null}, highlights),
           display_on_home_page = COALESCE(${display_on_home_page != null ? parseBool(display_on_home_page, true) : null}, display_on_home_page),
-          site_status      = COALESCE(${site_status      || null}::site_status_enum, site_status),
+          site_status      = COALESCE(${site_status || null}::site_status_enum, site_status),
           has_govt_approval= COALESCE(${has_govt_approval != null ? has_govt_approval : null}, has_govt_approval),
           property_image_url = COALESCE(${propertyImageUrl}, property_image_url),
           property_image_public_id = COALESCE(${propertyImagePublicId}, property_image_public_id),
@@ -8328,7 +8339,7 @@ app.put("/api/admin/sites/:id",
 
 app.delete("/api/admin/sites/:id",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const siteId = req.params.id;
@@ -8357,7 +8368,7 @@ app.delete("/api/admin/sites/:id",
 
 app.post("/api/admin/sites/:siteId/html-map",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   upload.single("html_map"),
   async (req, res) => {
     try {
@@ -8388,7 +8399,7 @@ app.post("/api/admin/sites/:siteId/html-map",
 
 app.post("/api/admin/sites/:id/map",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   upload.single("site_map"),
   async (req, res) => {
     try {
@@ -8409,7 +8420,7 @@ app.post("/api/admin/sites/:id/map",
 
 app.post("/api/admin/sites/:id/map-image",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   upload.single("site_map"),
   async (req, res) => {
     try {
@@ -8430,7 +8441,7 @@ app.post("/api/admin/sites/:id/map-image",
 
 app.post("/api/admin/sites/:id/property-image",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   upload.single("property_image"),
   async (req, res) => {
     try {
@@ -8451,7 +8462,7 @@ app.post("/api/admin/sites/:id/property-image",
 
 app.get("/api/admin/sites/:id/plots",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager","SupportStaff","FinanceManager"),
+  role("SuperAdmin", "SiteManager", "SupportStaff", "FinanceManager"),
   async (req, res) => {
     try {
       const plots = await sql`
@@ -8516,12 +8527,12 @@ app.get("/api/admin/sites/:id/plots",
 
 app.post("/api/admin/sites/:id/plots",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const { plot_number, plot_area, plot_category,
-              base_price, down_payment, monthly_emi, emi_tenure_months,
-              file_charge, plot_status, coordinates_x, coordinates_y } = req.body;
+        base_price, down_payment, monthly_emi, emi_tenure_months,
+        file_charge, plot_status, coordinates_x, coordinates_y } = req.body;
       if (!plot_number || !plot_area || base_price == null)
         return err(res, "plot_number, plot_area, base_price required", 400);
 
@@ -8547,12 +8558,12 @@ app.post("/api/admin/sites/:id/plots",
 
 app.post("/api/admin/plots",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const { site_id, plot_number, plot_area, plot_category,
-              base_price, down_payment, monthly_emi, emi_tenure_months,
-              file_charge, plot_status, coordinates_x, coordinates_y } = req.body;
+        base_price, down_payment, monthly_emi, emi_tenure_months,
+        file_charge, plot_status, coordinates_x, coordinates_y } = req.body;
       if (!site_id || !plot_number || !plot_area || base_price == null)
         return err(res, "site_id, plot_number, plot_area, base_price required", 400);
 
@@ -8578,12 +8589,12 @@ app.post("/api/admin/plots",
 
 app.put("/api/admin/plots/:id",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const { plot_number, plot_area, plot_category, base_price, down_payment,
-              monthly_emi, emi_tenure_months, file_charge, plot_status,
-              coordinates_x, coordinates_y, reason } = req.body;
+        monthly_emi, emi_tenure_months, file_charge, plot_status,
+        coordinates_x, coordinates_y, reason } = req.body;
       const [oldPlot] = await sql`SELECT plot_status FROM plots WHERE plot_id = ${req.params.id}`;
       if (!oldPlot) return err(res, "Plot not found", 404);
       if (plot_status && plot_status !== oldPlot.plot_status && !reason) {
@@ -8630,7 +8641,7 @@ app.put("/api/admin/plots/:id",
 
 app.delete("/api/admin/plots/:id",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const [booking] = await sql`SELECT booking_id FROM bookings WHERE plot_id = ${req.params.id} LIMIT 1`;
@@ -8649,7 +8660,7 @@ app.delete("/api/admin/plots/:id",
 
 app.put("/api/admin/plots/:id/status",
   verifyAdminToken,
-  role("SuperAdmin","SiteManager"),
+  role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
       const { new_status, reason } = req.body;
@@ -8725,7 +8736,7 @@ app.get("/api/emi-calculator/details/:plotSize", async (req, res) => {
 
 app.get("/api/admin/emi-calculator",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager","SiteManager"),
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
       await requireEmiCalculatorSchema();
@@ -8781,7 +8792,7 @@ app.get("/api/admin/emi-calculator",
 
 app.get("/api/admin/emi-calculator/:id",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager","SiteManager"),
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
       await requireEmiCalculatorSchema();
@@ -8796,7 +8807,7 @@ app.get("/api/admin/emi-calculator/:id",
 
 app.post("/api/admin/emi-calculator",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager","SiteManager"),
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
       await requireEmiCalculatorSchema();
@@ -8822,7 +8833,7 @@ app.post("/api/admin/emi-calculator",
 
 app.put("/api/admin/emi-calculator/:id",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager","SiteManager"),
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
       await requireEmiCalculatorSchema();
@@ -8853,7 +8864,7 @@ app.put("/api/admin/emi-calculator/:id",
 
 app.delete("/api/admin/emi-calculator/:id",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager","SiteManager"),
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
       await requireEmiCalculatorSchema();
@@ -8869,7 +8880,7 @@ app.delete("/api/admin/emi-calculator/:id",
 
 app.get("/api/admin/associates/:id",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager","SiteManager"),
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
       await requireMlmSchema();
@@ -8899,7 +8910,7 @@ app.get("/api/admin/associates/:id",
 
 app.get("/api/admin/associates",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager","SiteManager"),
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
       await requireMlmSchema();
@@ -8935,7 +8946,7 @@ app.get("/api/admin/associates",
 
 app.get("/api/admin/associates/:id/network-tree",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager","SiteManager"),
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
       await requireMlmSchema();
@@ -8987,14 +8998,14 @@ const changeAssociateStatus = async (req, res, newStatus) => {
   }
 };
 
-app.post("/api/admin/associates/:id/suspend", verifyAdminToken, role("SuperAdmin","FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Suspended"));
-app.post("/api/admin/associates/:id/activate", verifyAdminToken, role("SuperAdmin","FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Active"));
-app.post("/api/admin/associates/:id/blacklist", verifyAdminToken, role("SuperAdmin","FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Blacklisted"));
+app.post("/api/admin/associates/:id/suspend", verifyAdminToken, role("SuperAdmin", "FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Suspended"));
+app.post("/api/admin/associates/:id/activate", verifyAdminToken, role("SuperAdmin", "FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Active"));
+app.post("/api/admin/associates/:id/blacklist", verifyAdminToken, role("SuperAdmin", "FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Blacklisted"));
 app.post("/api/admin/associates/:id/unblacklist", verifyAdminToken, role("SuperAdmin"), (req, res) => changeAssociateStatus(req, res, "Active"));
 
 app.get("/api/admin/commissions",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin", "FinanceManager"),
   async (req, res) => {
     try {
       const { status = "", associate_id = "", booking_id = "", from = "", to = "", page = 1, limit = 30 } = req.query;
@@ -9025,7 +9036,7 @@ app.get("/api/admin/commissions",
 
 app.post("/api/admin/commissions/generate/:bookingId",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin", "FinanceManager"),
   async (req, res) => {
     try {
       const [booking] = await sql`
@@ -9054,7 +9065,7 @@ app.post("/api/admin/commissions/generate/:bookingId",
 
 app.post("/api/admin/bookings/:id/partial-payment/approve",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin", "FinanceManager"),
   async (req, res) => {
     try {
       const bookingId = Number(req.params.id);
@@ -9085,7 +9096,7 @@ app.post("/api/admin/bookings/:id/partial-payment/approve",
 
 app.post("/api/admin/commissions/:id/reject",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin", "FinanceManager"),
   async (req, res) => {
     try {
       const reason = req.body?.reason || "Rejected by admin";
@@ -9124,7 +9135,7 @@ app.post("/api/admin/commissions/:id/adjust",
   }
 );
 
-app.get("/api/admin/commission-rules", verifyAdminToken, role("SuperAdmin","FinanceManager"), async (_req, res) => {
+app.get("/api/admin/commission-rules", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (_req, res) => {
   try {
     await requireMlmSchema();
     return ok(res, await sql`SELECT * FROM commission_rules ORDER BY commission_type, level_depth`);
@@ -9159,7 +9170,7 @@ app.get("/api/commission-engine/summary", verifyUserToken, async (_req, res) => 
 
 app.get("/api/admin/commission-engine/settings",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin", "FinanceManager"),
   async (_req, res) => {
     try {
       const snapshot = await commissionEngineSnapshot();
@@ -9172,7 +9183,7 @@ app.get("/api/admin/commission-engine/settings",
 
 app.put("/api/admin/commission-engine/settings",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin", "FinanceManager"),
   async (req, res) => {
     try {
       await requireCommissionEngineSchema();
@@ -9283,7 +9294,7 @@ app.put("/api/admin/commission-engine/settings",
 
 app.get("/api/admin/commission-engine/audit",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin", "FinanceManager"),
   async (req, res) => {
     try {
       await requireCommissionEngineSchema();
@@ -9303,7 +9314,7 @@ app.get("/api/admin/commission-engine/audit",
   }
 );
 
-app.post("/api/admin/commission-rules", verifyAdminToken, role("SuperAdmin","FinanceManager"), async (req, res) => {
+app.post("/api/admin/commission-rules", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (req, res) => {
   try {
     await requireMlmSchema();
     const commissionType = String(req.body.commission_type || "").trim();
@@ -9332,7 +9343,7 @@ app.post("/api/admin/commission-rules", verifyAdminToken, role("SuperAdmin","Fin
   }
 });
 
-app.put("/api/admin/commission-rules/:id", verifyAdminToken, role("SuperAdmin","FinanceManager"), async (req, res) => {
+app.put("/api/admin/commission-rules/:id", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (req, res) => {
   try {
     await requireMlmSchema();
     const commissionType = String(req.body.commission_type || "").trim();
@@ -9368,7 +9379,7 @@ app.put("/api/admin/commission-rules/:id", verifyAdminToken, role("SuperAdmin","
   }
 });
 
-app.get("/api/admin/ranks", verifyAdminToken, role("SuperAdmin","FinanceManager"), async (_req, res) => {
+app.get("/api/admin/ranks", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (_req, res) => {
   try {
     await requireMlmSchema();
     return ok(res, await sql`SELECT * FROM associate_ranks ORDER BY min_total_network_sales_gaj, rank_id`);
@@ -9377,7 +9388,7 @@ app.get("/api/admin/ranks", verifyAdminToken, role("SuperAdmin","FinanceManager"
   }
 });
 
-app.post("/api/admin/ranks", verifyAdminToken, role("SuperAdmin","FinanceManager"), async (req, res) => {
+app.post("/api/admin/ranks", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (req, res) => {
   try {
     await requireMlmSchema();
     const [rank] = await sql`
@@ -9391,7 +9402,7 @@ app.post("/api/admin/ranks", verifyAdminToken, role("SuperAdmin","FinanceManager
   }
 });
 
-app.put("/api/admin/ranks/:id", verifyAdminToken, role("SuperAdmin","FinanceManager"), async (req, res) => {
+app.put("/api/admin/ranks/:id", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (req, res) => {
   try {
     await requireMlmSchema();
     const [rank] = await sql`
@@ -9410,7 +9421,7 @@ app.put("/api/admin/ranks/:id", verifyAdminToken, role("SuperAdmin","FinanceMana
   }
 });
 
-app.post("/api/admin/associates/recalculate-ranks", verifyAdminToken, role("SuperAdmin","FinanceManager"), async (req, res) => {
+app.post("/api/admin/associates/recalculate-ranks", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (req, res) => {
   try {
     await requireMlmSchema();
     const associates = await sql`
@@ -9452,7 +9463,7 @@ app.post("/api/admin/associates/recalculate-ranks", verifyAdminToken, role("Supe
   }
 });
 
-app.get("/api/admin/mlm/reports", verifyAdminToken, role("SuperAdmin","FinanceManager"), async (_req, res) => {
+app.get("/api/admin/mlm/reports", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (_req, res) => {
   try {
     await requireMlmSchema();
     const [topAssociates, commissionSummary, payoutSummary, growth] = await Promise.all([
@@ -9472,7 +9483,7 @@ app.get("/api/admin/mlm/reports", verifyAdminToken, role("SuperAdmin","FinanceMa
   }
 });
 
-app.get("/api/admin/mlm/network/export", verifyAdminToken, role("SuperAdmin","FinanceManager"), async (req, res) => {
+app.get("/api/admin/mlm/network/export", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (req, res) => {
   try {
     await requireMlmSchema();
     const rows = await sql`
@@ -9485,7 +9496,7 @@ app.get("/api/admin/mlm/network/export", verifyAdminToken, role("SuperAdmin","Fi
       LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
       WHERE u.user_type = 'Associate'
       ORDER BY sp.member_id NULLS FIRST, u.member_id`;
-    const header = ["Member ID","Name","Type","Status","Sponsor ID","Sponsor Name","Gaj Sold","Commission Earned"];
+    const header = ["Member ID", "Name", "Type", "Status", "Sponsor ID", "Sponsor Name", "Gaj Sold", "Commission Earned"];
     const csv = [header.join(","), ...rows.map(r => [
       r.member_id, r.full_name, r.user_type, r.account_status, r.sponsor_member_id || "", r.sponsor_name || "",
       r.total_gaj_sold, r.total_commission_earned
@@ -9498,7 +9509,7 @@ app.get("/api/admin/mlm/network/export", verifyAdminToken, role("SuperAdmin","Fi
   }
 });
 
-app.get("/api/admin/payout-requests", verifyAdminToken, role("SuperAdmin","FinanceManager"), async (req, res) => {
+app.get("/api/admin/payout-requests", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (req, res) => {
   try {
     await requireMlmSchema();
     const statusFilter = String(req.query.status || "");
@@ -9514,7 +9525,7 @@ app.get("/api/admin/payout-requests", verifyAdminToken, role("SuperAdmin","Finan
   }
 });
 
-app.post("/api/admin/payout-requests/:id/:action", verifyAdminToken, role("SuperAdmin","FinanceManager"), async (req, res) => {
+app.post("/api/admin/payout-requests/:id/:action", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (req, res) => {
   try {
     await requireMlmSchema();
     const actionMap = { approve: "Approved", reject: "Rejected", pay: "Paid" };
@@ -9540,7 +9551,7 @@ app.post("/api/admin/payout-requests/:id/:action", verifyAdminToken, role("Super
 
 app.get("/api/admin/commissions/pending",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin", "FinanceManager"),
   async (req, res) => {
     try {
       const pending = await sql`
@@ -9567,7 +9578,7 @@ app.get("/api/admin/commissions/pending",
 
 app.post("/api/admin/commissions/:id/approve",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager"),
+  role("SuperAdmin", "FinanceManager"),
   async (req, res) => {
     try {
       const { payment_reference } = req.body;
@@ -9601,7 +9612,7 @@ app.post("/api/admin/commissions/:id/approve",
 
 app.post("/api/admin/notifications/send",
   verifyAdminToken,
-  role("SuperAdmin","SupportStaff"),
+  role("SuperAdmin", "SupportStaff"),
   async (req, res) => {
     try {
       const { user_id, title, message, channel = "Push" } = req.body;
@@ -9619,7 +9630,7 @@ app.post("/api/admin/notifications/send",
 
 app.post("/api/admin/notifications/bulk",
   verifyAdminToken,
-  role("SuperAdmin","SupportStaff"),
+  role("SuperAdmin", "SupportStaff"),
   async (req, res) => {
     try {
       const { target, title, message, channel = "All" } = req.body;
@@ -9696,7 +9707,7 @@ async function timedDashboardQuery(label, queryFactory, fallback) {
 
 app.get("/api/admin/dashboard",
   verifyAdminToken,
-  role("SuperAdmin","FinanceManager","SiteManager"),
+  role("SuperAdmin", "FinanceManager", "SiteManager"),
   async (req, res) => {
     const startedAt = Date.now();
     console.log("[Dashboard API Start] /api/admin/dashboard");
@@ -9898,7 +9909,7 @@ app.get("/api/admin/dashboard/turnover",
         WHERE b.booking_status <> 'Cancelled' AND u.user_type = 'Customer'
         ${period === 'monthly' ? sql`AND b.booking_date >= date_trunc('month', CURRENT_DATE)` :
           period === 'quarterly' ? sql`AND b.booking_date >= date_trunc('quarter', CURRENT_DATE)` :
-          period === 'yearly' ? sql`AND b.booking_date >= date_trunc('year', CURRENT_DATE)` : sql``}
+            period === 'yearly' ? sql`AND b.booking_date >= date_trunc('year', CURRENT_DATE)` : sql``}
       `.catch(() => []);
 
       const customerEmis = await sql`
@@ -9911,7 +9922,7 @@ app.get("/api/admin/dashboard/turnover",
         WHERE e.emi_status = 'Paid' AND u.user_type = 'Customer'
         ${period === 'monthly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('month', CURRENT_DATE)` :
           period === 'quarterly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('quarter', CURRENT_DATE)` :
-          period === 'yearly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('year', CURRENT_DATE)` : sql``}
+            period === 'yearly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('year', CURRENT_DATE)` : sql``}
       `.catch(() => []);
 
       const customerWallet = await sql`
@@ -9923,7 +9934,7 @@ app.get("/api/admin/dashboard/turnover",
         WHERE w.transaction_type = 'credit' AND w.source IN ('Add Fund', 'Deposit') AND w.status = 'success' AND u.user_type = 'Customer'
         ${period === 'monthly' ? sql`AND w.created_at >= date_trunc('month', CURRENT_DATE)` :
           period === 'quarterly' ? sql`AND w.created_at >= date_trunc('quarter', CURRENT_DATE)` :
-          period === 'yearly' ? sql`AND w.created_at >= date_trunc('year', CURRENT_DATE)` : sql``}
+            period === 'yearly' ? sql`AND w.created_at >= date_trunc('year', CURRENT_DATE)` : sql``}
       `.catch((e) => { console.error("[customerWallet error]", e); return []; });
 
       // 2. Associate Collections
@@ -9936,7 +9947,7 @@ app.get("/api/admin/dashboard/turnover",
         WHERE b.booking_status <> 'Cancelled' AND u.user_type = 'Associate'
         ${period === 'monthly' ? sql`AND b.booking_date >= date_trunc('month', CURRENT_DATE)` :
           period === 'quarterly' ? sql`AND b.booking_date >= date_trunc('quarter', CURRENT_DATE)` :
-          period === 'yearly' ? sql`AND b.booking_date >= date_trunc('year', CURRENT_DATE)` : sql``}
+            period === 'yearly' ? sql`AND b.booking_date >= date_trunc('year', CURRENT_DATE)` : sql``}
       `.catch(() => []);
 
       const associateEmis = await sql`
@@ -9949,7 +9960,7 @@ app.get("/api/admin/dashboard/turnover",
         WHERE e.emi_status = 'Paid' AND u.user_type = 'Associate'
         ${period === 'monthly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('month', CURRENT_DATE)` :
           period === 'quarterly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('quarter', CURRENT_DATE)` :
-          period === 'yearly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('year', CURRENT_DATE)` : sql``}
+            period === 'yearly' ? sql`AND COALESCE(e.payment_date, e.updated_at, e.created_at) >= date_trunc('year', CURRENT_DATE)` : sql``}
       `.catch(() => []);
 
       const associateWallet = await sql`
@@ -9961,7 +9972,7 @@ app.get("/api/admin/dashboard/turnover",
         WHERE w.transaction_type = 'credit' AND w.source IN ('Add Fund', 'Deposit') AND w.status = 'success' AND u.user_type = 'Associate'
         ${period === 'monthly' ? sql`AND w.created_at >= date_trunc('month', CURRENT_DATE)` :
           period === 'quarterly' ? sql`AND w.created_at >= date_trunc('quarter', CURRENT_DATE)` :
-          period === 'yearly' ? sql`AND w.created_at >= date_trunc('year', CURRENT_DATE)` : sql``}
+            period === 'yearly' ? sql`AND w.created_at >= date_trunc('year', CURRENT_DATE)` : sql``}
       `.catch((e) => { console.error("[associateWallet error]", e); return []; });
 
       // 3. Investor Collections
@@ -9974,7 +9985,7 @@ app.get("/api/admin/dashboard/turnover",
         WHERE d.status IN ('approved', 'Approved') AND (d.deleted_at IS NULL)
         ${period === 'monthly' ? sql`AND COALESCE(d.approved_at, d.created_at) >= date_trunc('month', CURRENT_DATE)` :
           period === 'quarterly' ? sql`AND COALESCE(d.approved_at, d.created_at) >= date_trunc('quarter', CURRENT_DATE)` :
-          period === 'yearly' ? sql`AND COALESCE(d.approved_at, d.created_at) >= date_trunc('year', CURRENT_DATE)` : sql``}
+            period === 'yearly' ? sql`AND COALESCE(d.approved_at, d.created_at) >= date_trunc('year', CURRENT_DATE)` : sql``}
       `.catch(() => []);
 
       const customerHistory = [...customerBookingAdvances, ...customerEmis, ...customerWallet]
@@ -10678,7 +10689,7 @@ app.get("/api/admin/analytics/export",
       });
 
       res.setHeader("Content-Type", "text/csv");
-      res.setHeader("Content-Disposition", `attachment; filename="mmr-analytics-${preset}-${new Date().toISOString().slice(0,10)}.csv"`);
+      res.setHeader("Content-Disposition", `attachment; filename="mmr-analytics-${preset}-${new Date().toISOString().slice(0, 10)}.csv"`);
       return res.status(200).send(csv);
     } catch (e) {
       console.error("[Admin Analytics Export Error]", e);
@@ -10716,9 +10727,9 @@ app.use((error, req, res, next) => {
 const PORT = Number(process.env.PORT) || 5000;
 const shouldStartServer =
   !process.env.FUNCTION_TARGET &&
-process.on("uncaughtException", (err) => {
-  console.error("[MMR API Global Uncaught Exception]", err?.message || err);
-});
+  process.on("uncaughtException", (err) => {
+    console.error("[MMR API Global Uncaught Exception]", err?.message || err);
+  });
 
 process.on("unhandledRejection", (reason) => {
   console.error("[MMR API Global Unhandled Rejection]", reason?.message || reason);
@@ -10733,7 +10744,7 @@ if (shouldStartServer) {
             INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
             VALUES ('System', null, 'Automatic Backup Scheduler', 'DatabaseBackup', ${action},
                     'database_backup_files', ${backup?.id || null}, ${JSON.stringify(backup || {})})`;
-        } catch {}
+        } catch { }
       },
     });
   } catch (schedErr) {
@@ -10757,11 +10768,11 @@ if (shouldStartServer) {
         await requirePlotManagementSchema().catch((e) => console.warn("[MMR API] Plot schema warning:", e.message));
       }
       await Promise.all([
-        ensureHomeExperienceSchema().catch(() => {}),
-        ensureHomeSlidersSchema().catch(() => {}),
-        ensureSiteHtmlMapSchema().catch(() => {}),
-        ensureAnalyticsSchema().catch(() => {}),
-      ]).catch(() => {});
+        ensureHomeExperienceSchema().catch(() => { }),
+        ensureHomeSlidersSchema().catch(() => { }),
+        ensureSiteHtmlMapSchema().catch(() => { }),
+        ensureAnalyticsSchema().catch(() => { }),
+      ]).catch(() => { });
     } catch (error) {
       console.warn("[MMR API] Schema initialization warning:", error.message);
     }
