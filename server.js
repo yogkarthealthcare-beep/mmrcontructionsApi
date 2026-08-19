@@ -2186,6 +2186,11 @@ const ensureSiteHtmlMapSchema = () => {
       await sql`ALTER TABLE sites ADD COLUMN IF NOT EXISTS html_map_file_url TEXT`;
       await sql`ALTER TABLE sites ADD COLUMN IF NOT EXISTS html_map_updated_at TIMESTAMPTZ`;
       await sql`ALTER TABLE sites ADD COLUMN IF NOT EXISTS site_prefix VARCHAR(12)`;
+      await sql`ALTER TABLE sites ADD COLUMN IF NOT EXISTS nearest_place TEXT`;
+      await sql`ALTER TABLE sites ADD COLUMN IF NOT EXISTS landmark TEXT`;
+      await sql`ALTER TABLE sites ADD COLUMN IF NOT EXISTS highway_distance TEXT`;
+      await sql`ALTER TABLE sites ADD COLUMN IF NOT EXISTS airport_distance TEXT`;
+      await sql`ALTER TABLE sites ADD COLUMN IF NOT EXISTS is_booking_enabled BOOLEAN DEFAULT TRUE`;
     })();
   }
   return siteHtmlMapSchemaReady;
@@ -4861,6 +4866,8 @@ app.get("/api/sites", async (req, res) => {
              s.description, s.starting_price, s.total_area, s.highlights,
              s.property_image_url, s.map_image_url, s.display_on_home_page,
              s.site_status, s.has_govt_approval,
+             s.nearest_place, s.landmark, s.highway_distance, s.airport_distance,
+             COALESCE(s.is_booking_enabled, TRUE) AS is_booking_enabled,
              COUNT(p.plot_id)                                              AS total_plots,
              COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Vacant')     AS vacant,
              COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'InProcess')  AS in_process,
@@ -8171,6 +8178,8 @@ app.get("/api/admin/sites",
                s.property_image_url, s.map_image_url, s.display_on_home_page,
                s.html_map_code, s.html_map_file_url, s.html_map_updated_at,
                s.site_status, s.has_govt_approval,
+               s.nearest_place, s.landmark, s.highway_distance, s.airport_distance,
+               COALESCE(s.is_booking_enabled, TRUE) AS is_booking_enabled,
                s.total_plots AS planned_total_plots, s.created_at, s.updated_at,
                COUNT(p.plot_id)::int AS total_plots,
                COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Vacant')::int AS vacant,
@@ -8183,7 +8192,9 @@ app.get("/api/admin/sites",
                  s.description, s.starting_price, s.total_area, s.highlights,
                  s.property_image_url, s.map_image_url, s.display_on_home_page,
                  s.html_map_code, s.html_map_file_url, s.html_map_updated_at,
-                 s.site_status, s.has_govt_approval, s.total_plots, s.created_at, s.updated_at
+                 s.site_status, s.has_govt_approval, s.nearest_place, s.landmark,
+                 s.highway_distance, s.airport_distance, s.is_booking_enabled,
+                 s.total_plots, s.created_at, s.updated_at
         ORDER BY s.site_id`;
       return ok(res, sites);
     } catch (e) {
@@ -8206,6 +8217,7 @@ app.post("/api/admin/sites",
       const {
         site_name, site_prefix, city, state, description, total_plots, site_status,
         starting_price, total_area, highlights, display_on_home_page,
+        nearest_place, landmark, highway_distance, airport_distance, is_booking_enabled
       } = req.body;
       const full_address = req.body.full_address || req.body.address || null;
       if (!site_name || !city) return err(res, "site_name, city required", 400);
@@ -8229,12 +8241,15 @@ app.post("/api/admin/sites",
       const htmlMapCode = htmlMapFromRequest(req);
       const htmlMapUpdatedAt = htmlMapCode ? new Date() : null;
       const generatedPrefix = await uniqueSitePrefix(site_name, site_prefix);
+      const bookingEnabledBool = is_booking_enabled != null ? (is_booking_enabled === true || is_booking_enabled === 'true' || is_booking_enabled === 'ON' || is_booking_enabled === 'on') : true;
+
       const [site] = await sql`
         INSERT INTO sites (
           site_name, site_prefix, city, state, full_address, description, total_plots,
           starting_price, total_area, highlights, property_image_url, property_image_public_id,
           display_on_home_page, site_status, map_image_url, map_public_id,
-          html_map_code, html_map_file_url, html_map_updated_at, created_by_admin_id
+          html_map_code, html_map_file_url, html_map_updated_at, created_by_admin_id,
+          nearest_place, landmark, highway_distance, airport_distance, is_booking_enabled
         )
         VALUES (
           ${site_name}, ${generatedPrefix}, ${city}, ${state || "Uttar Pradesh"}, ${full_address || null},
@@ -8242,7 +8257,8 @@ app.post("/api/admin/sites",
           ${starting_price ? Number(starting_price) : null}, ${total_area || null}, ${highlights || null},
           ${propertyImageUrl}, ${propertyImagePublicId}, ${parseBool(display_on_home_page, true)},
           ${site_status || "Active"}::site_status_enum, ${mapUrl}, ${mapPublicId},
-          ${htmlMapCode}, ${null}, ${htmlMapUpdatedAt}, ${req.admin.admin_id}
+          ${htmlMapCode}, ${null}, ${htmlMapUpdatedAt}, ${req.admin.admin_id},
+          ${nearest_place || null}, ${landmark || null}, ${highway_distance || null}, ${airport_distance || null}, ${bookingEnabledBool}
         )
         RETURNING site_id, site_name`;
       if (htmlMapCode) {
@@ -8273,6 +8289,7 @@ app.put("/api/admin/sites/:id",
       const {
         site_name, site_prefix, city, state, description, total_plots, site_status, has_govt_approval,
         starting_price, total_area, highlights, display_on_home_page,
+        nearest_place, landmark, highway_distance, airport_distance, is_booking_enabled
       } = req.body;
       const full_address = req.body.full_address || req.body.address || null;
       let propertyImageUrl = null;
@@ -8305,6 +8322,8 @@ app.put("/api/admin/sites/:id",
       const generatedPrefix = site_name || site_prefix
         ? await uniqueSitePrefix(site_name || "", site_prefix || "", Number(req.params.id))
         : null;
+      const bookingEnabledVal = is_booking_enabled !== undefined ? (is_booking_enabled === true || is_booking_enabled === 'true' || is_booking_enabled === 'ON' || is_booking_enabled === 'on') : null;
+
       await sql`
         UPDATE sites SET
           site_name        = COALESCE(${site_name || null}, site_name),
@@ -8320,6 +8339,11 @@ app.put("/api/admin/sites/:id",
           display_on_home_page = COALESCE(${display_on_home_page != null ? parseBool(display_on_home_page, true) : null}, display_on_home_page),
           site_status      = COALESCE(${site_status || null}::site_status_enum, site_status),
           has_govt_approval= COALESCE(${has_govt_approval != null ? has_govt_approval : null}, has_govt_approval),
+          nearest_place    = COALESCE(${nearest_place !== undefined ? (nearest_place || null) : null}, nearest_place),
+          landmark         = COALESCE(${landmark !== undefined ? (landmark || null) : null}, landmark),
+          highway_distance = COALESCE(${highway_distance !== undefined ? (highway_distance || null) : null}, highway_distance),
+          airport_distance = COALESCE(${airport_distance !== undefined ? (airport_distance || null) : null}, airport_distance),
+          is_booking_enabled = COALESCE(${bookingEnabledVal}, is_booking_enabled),
           property_image_url = COALESCE(${propertyImageUrl}, property_image_url),
           property_image_public_id = COALESCE(${propertyImagePublicId}, property_image_public_id),
           map_image_url    = COALESCE(${mapUrl}, map_image_url),
