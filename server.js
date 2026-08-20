@@ -8205,7 +8205,7 @@ app.get("/api/admin/sites",
   }
 );
 
-app.post("/api/admin/sites",
+app.post(["/api/admin/sites", "/api/admin/new-site-area"],
   verifyAdminToken,
   role("SuperAdmin", "SiteManager"),
   upload.fields([
