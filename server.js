@@ -4985,7 +4985,9 @@ app.get("/api/sites/:id/map", async (req, res) => {
     const [site] = await sql`
       SELECT site_id, site_id AS id, site_name, site_prefix, city, state, full_address, description,
              starting_price, total_area, highlights, property_image_url,
-             map_image_url, map_image_url AS layout_map_url, site_status, total_plots, display_on_home_page
+             map_image_url, map_image_url AS layout_map_url, site_status, total_plots, display_on_home_page,
+             nearest_place, landmark, highway_distance, airport_distance,
+             COALESCE(is_booking_enabled, TRUE) AS is_booking_enabled
       FROM sites
       WHERE site_id = ${id}`;
     if (!site) return err(res, "Site not found", 404);
