@@ -8423,68 +8423,87 @@ app.post("/api/admin/sites/:siteId/html-map",
   }
 );
 
-app.post("/api/admin/sites/:id/map",
-  verifyAdminToken,
-  role("SuperAdmin", "SiteManager"),
-  upload.single("site_map"),
-  async (req, res) => {
-    try {
-      if (!req.file) return err(res, "site_map image is required", 400);
-      const [oldSite] = await sql`SELECT map_image_url, map_public_id FROM sites WHERE site_id = ${req.params.id}`;
-      if (!oldSite) return err(res, "Site not found", 404);
-      const saved = await saveFileToVPS(req.file.buffer, { module: "site", entityId: req.params.id, entityType: "SiteMap", originalName: req.file.originalname });
-      await sql`
-        UPDATE sites SET map_image_url = ${saved.url}, map_public_id = ${null}, updated_at = NOW()
-        WHERE site_id = ${req.params.id}`;
-      await deleteFileFromStorage(oldSite.map_image_url, oldSite.map_public_id);
-      return ok(res, { map_image_url: saved.url }, "Map uploaded successfully");
-    } catch (e) {
-      return err(res, e.message);
-    }
-  }
-);
+const siteMapRoutes = [
+  "/api/admin/sites/:id/map",
+  "/api/admin/sites/:siteId/map",
+  "/api/sites/:id/map",
+  "/api/sites/:siteId/map",
+  "/api/admin/sites/:id/map-image",
+  "/api/admin/sites/:siteId/map-image",
+  "/api/sites/:id/map-image",
+  "/api/sites/:siteId/map-image",
+  "/api/admin/sites/:id/photo",
+  "/api/admin/sites/:siteId/photo"
+];
 
-app.post("/api/admin/sites/:id/map-image",
-  verifyAdminToken,
-  role("SuperAdmin", "SiteManager"),
-  upload.single("site_map"),
-  async (req, res) => {
-    try {
-      if (!req.file) return err(res, "site_map image is required", 400);
-      const [oldSite] = await sql`SELECT map_image_url, map_public_id FROM sites WHERE site_id = ${req.params.id}`;
-      if (!oldSite) return err(res, "Site not found", 404);
-      const saved = await saveFileToVPS(req.file.buffer, { module: "site", entityId: req.params.id, entityType: "SiteMap", originalName: req.file.originalname });
-      await sql`
-        UPDATE sites SET map_image_url = ${saved.url}, map_public_id = ${null}, updated_at = NOW()
-        WHERE site_id = ${req.params.id}`;
-      await deleteFileFromStorage(oldSite.map_image_url, oldSite.map_public_id);
-      return ok(res, { map_image_url: saved.url }, "Map uploaded successfully");
-    } catch (e) {
-      return err(res, e.message);
-    }
-  }
-);
+const handleSiteMapUpload = async (req, res) => {
+  try {
+    const file = req.file || (req.files && (Array.isArray(req.files) ? req.files[0] : (req.files.site_map?.[0] || req.files.map_image?.[0] || req.files.file?.[0])));
+    if (!file) return err(res, "site_map or map_image file is required", 400);
 
-app.post("/api/admin/sites/:id/property-image",
-  verifyAdminToken,
-  role("SuperAdmin", "SiteManager"),
-  upload.single("property_image"),
-  async (req, res) => {
-    try {
-      if (!req.file) return err(res, "property_image is required", 400);
-      const [oldSite] = await sql`SELECT property_image_url, property_image_public_id FROM sites WHERE site_id = ${req.params.id}`;
-      if (!oldSite) return err(res, "Site not found", 404);
-      const saved = await saveFileToVPS(req.file.buffer, { module: "site", entityId: req.params.id, entityType: "SiteProperty", originalName: req.file.originalname });
-      await sql`
-        UPDATE sites SET property_image_url = ${saved.url}, property_image_public_id = ${null}, updated_at = NOW()
-        WHERE site_id = ${req.params.id}`;
-      await deleteFileFromStorage(oldSite.property_image_url, oldSite.property_image_public_id);
-      return ok(res, { property_image_url: saved.url }, "Property image uploaded successfully");
-    } catch (e) {
-      return err(res, e.message);
+    const siteId = Number(req.params.id || req.params.siteId || req.body?.site_id || 0);
+    if (!siteId) return err(res, "Invalid or missing site ID", 400);
+
+    const [oldSite] = await sql`SELECT map_image_url, map_public_id FROM sites WHERE site_id = ${siteId}`;
+    if (!oldSite) return err(res, "Site not found", 404);
+
+    const saved = await saveFileToVPS(file.buffer, { module: "site", entityId: siteId, entityType: "SiteMap", originalName: file.originalname });
+    await sql`
+      UPDATE sites SET map_image_url = ${saved.url}, map_public_id = ${null}, updated_at = NOW()
+      WHERE site_id = ${siteId}`;
+    
+    if (oldSite.map_image_url) {
+      await deleteFileFromStorage(oldSite.map_image_url, oldSite.map_public_id).catch(() => {});
     }
+
+    return ok(res, { map_image_url: saved.url, url: saved.url, site_id: siteId }, "Map image uploaded successfully");
+  } catch (e) {
+    console.error("[Site Map Upload Error]", e);
+    return err(res, e.message);
   }
-);
+};
+
+app.post(siteMapRoutes, verifyAdminToken, role("SuperAdmin", "SiteManager", "Admin"), upload.any(), handleSiteMapUpload);
+app.put(siteMapRoutes, verifyAdminToken, role("SuperAdmin", "SiteManager", "Admin"), upload.any(), handleSiteMapUpload);
+
+
+const propertyImageRoutes = [
+  "/api/admin/sites/:id/property-image",
+  "/api/admin/sites/:siteId/property-image",
+  "/api/sites/:id/property-image",
+  "/api/sites/:siteId/property-image"
+];
+
+const handlePropertyImageUpload = async (req, res) => {
+  try {
+    const file = req.file || (req.files && (Array.isArray(req.files) ? req.files[0] : (req.files.property_image?.[0] || req.files.file?.[0])));
+    if (!file) return err(res, "property_image file is required", 400);
+
+    const siteId = Number(req.params.id || req.params.siteId || req.body?.site_id || 0);
+    if (!siteId) return err(res, "Invalid or missing site ID", 400);
+
+    const [oldSite] = await sql`SELECT property_image_url, property_image_public_id FROM sites WHERE site_id = ${siteId}`;
+    if (!oldSite) return err(res, "Site not found", 404);
+
+    const saved = await saveFileToVPS(file.buffer, { module: "site", entityId: siteId, entityType: "SiteProperty", originalName: file.originalname });
+    await sql`
+      UPDATE sites SET property_image_url = ${saved.url}, property_image_public_id = ${null}, updated_at = NOW()
+      WHERE site_id = ${siteId}`;
+    
+    if (oldSite.property_image_url) {
+      await deleteFileFromStorage(oldSite.property_image_url, oldSite.property_image_public_id).catch(() => {});
+    }
+
+    return ok(res, { property_image_url: saved.url, url: saved.url, site_id: siteId }, "Property image uploaded successfully");
+  } catch (e) {
+    console.error("[Property Image Upload Error]", e);
+    return err(res, e.message);
+  }
+};
+
+app.post(propertyImageRoutes, verifyAdminToken, role("SuperAdmin", "SiteManager", "Admin"), upload.any(), handlePropertyImageUpload);
+app.put(propertyImageRoutes, verifyAdminToken, role("SuperAdmin", "SiteManager", "Admin"), upload.any(), handlePropertyImageUpload);
+
 
 app.get("/api/admin/sites/:id/plots",
   verifyAdminToken,
