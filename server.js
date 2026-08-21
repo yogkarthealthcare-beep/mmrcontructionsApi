@@ -8245,25 +8245,71 @@ app.post(["/api/admin/sites", "/api/admin/new-site-area"],
       const generatedPrefix = await uniqueSitePrefix(site_name, site_prefix);
       const bookingEnabledBool = is_booking_enabled != null ? (is_booking_enabled === true || is_booking_enabled === 'true' || is_booking_enabled === 'ON' || is_booking_enabled === 'on') : true;
 
-      const [site] = await sql`
-        INSERT INTO sites (
-          site_name, site_prefix, city, state, full_address, description, total_plots,
-          starting_price, total_area, highlights, property_image_url, property_image_public_id,
-          display_on_home_page, site_status, map_image_url, map_public_id,
-          html_map_code, html_map_file_url, html_map_updated_at, created_by_admin_id,
-          nearest_place, landmark, highway_distance, airport_distance, is_booking_enabled
-        )
-        VALUES (
-          ${site_name}, ${generatedPrefix}, ${city}, ${state || "Uttar Pradesh"}, ${full_address || null},
-          ${description || null}, ${Number(total_plots || 0)},
-          ${starting_price ? Number(starting_price) : null}, ${total_area || null}, ${highlights || null},
-          ${propertyImageUrl}, ${propertyImagePublicId}, ${parseBool(display_on_home_page, true)},
-          ${site_status || "Active"}::site_status_enum, ${mapUrl}, ${mapPublicId},
-          ${htmlMapCode}, ${null}, ${htmlMapUpdatedAt}, ${req.admin.admin_id},
-          ${nearest_place || null}, ${landmark || null}, ${highway_distance || null}, ${airport_distance || null}, ${bookingEnabledBool}
-        )
-        RETURNING site_id, site_name`;
-      if (htmlMapCode) {
+      // Sync PostgreSQL sites_site_id_seq to MAX(site_id) + 1 to prevent "sites_pkey" duplicate key errors
+      await sql`
+        SELECT setval(
+          pg_get_serial_sequence('sites', 'site_id'),
+          COALESCE((SELECT MAX(site_id) FROM sites), 0) + 1,
+          false
+        );
+      `.catch(() => {});
+
+      let site;
+      try {
+        const [inserted] = await sql`
+          INSERT INTO sites (
+            site_name, site_prefix, city, state, full_address, description, total_plots,
+            starting_price, total_area, highlights, property_image_url, property_image_public_id,
+            display_on_home_page, site_status, map_image_url, map_public_id,
+            html_map_code, html_map_file_url, html_map_updated_at, created_by_admin_id,
+            nearest_place, landmark, highway_distance, airport_distance, is_booking_enabled
+          )
+          VALUES (
+            ${site_name}, ${generatedPrefix}, ${city}, ${state || "Uttar Pradesh"}, ${full_address || null},
+            ${description || null}, ${Number(total_plots || 0)},
+            ${starting_price ? Number(starting_price) : null}, ${total_area || null}, ${highlights || null},
+            ${propertyImageUrl}, ${propertyImagePublicId}, ${parseBool(display_on_home_page, true)},
+            ${site_status || "Active"}::site_status_enum, ${mapUrl}, ${mapPublicId},
+            ${htmlMapCode}, ${null}, ${htmlMapUpdatedAt}, ${req.admin.admin_id},
+            ${nearest_place || null}, ${landmark || null}, ${highway_distance || null}, ${airport_distance || null}, ${bookingEnabledBool}
+          )
+          RETURNING site_id, site_name`;
+        site = inserted;
+      } catch (insertErr) {
+        if (insertErr.message && insertErr.message.includes('sites_pkey')) {
+          await sql`
+            SELECT setval(
+              pg_get_serial_sequence('sites', 'site_id'),
+              COALESCE((SELECT MAX(site_id) FROM sites), 0) + 1,
+              false
+            );
+          `.catch(() => {});
+
+          const [retried] = await sql`
+            INSERT INTO sites (
+              site_name, site_prefix, city, state, full_address, description, total_plots,
+              starting_price, total_area, highlights, property_image_url, property_image_public_id,
+              display_on_home_page, site_status, map_image_url, map_public_id,
+              html_map_code, html_map_file_url, html_map_updated_at, created_by_admin_id,
+              nearest_place, landmark, highway_distance, airport_distance, is_booking_enabled
+            )
+            VALUES (
+              ${site_name}, ${generatedPrefix}, ${city}, ${state || "Uttar Pradesh"}, ${full_address || null},
+              ${description || null}, ${Number(total_plots || 0)},
+              ${starting_price ? Number(starting_price) : null}, ${total_area || null}, ${highlights || null},
+              ${propertyImageUrl}, ${propertyImagePublicId}, ${parseBool(display_on_home_page, true)},
+              ${site_status || "Active"}::site_status_enum, ${mapUrl}, ${mapPublicId},
+              ${htmlMapCode}, ${null}, ${htmlMapUpdatedAt}, ${req.admin.admin_id},
+              ${nearest_place || null}, ${landmark || null}, ${highway_distance || null}, ${airport_distance || null}, ${bookingEnabledBool}
+            )
+            RETURNING site_id, site_name`;
+          site = retried;
+        } else {
+          throw insertErr;
+        }
+      }
+
+      if (htmlMapCode && site?.site_id) {
         await sql`
           UPDATE sites
           SET html_map_file_url = ${`/api/sites/${site.site_id}/html-map`}
