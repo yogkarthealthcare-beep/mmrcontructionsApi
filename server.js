@@ -6393,7 +6393,9 @@ app.post("/api/inquiries", async (req, res) => {
     if (!fullName) return err(res, "Full name is required", 400);
     if (!mobileNo) return err(res, "Mobile number is required", 400);
     if (!/^[6-9]\d{9}$/.test(mobileNo)) return err(res, "Valid Indian mobile number is required", 400);
-    if (!verifyCaptchaChallenge(captchaToken, captchaAnswer)) return err(res, "Captcha verification failed. Please try again.", 400);
+    if (captchaToken || captchaAnswer) {
+      if (!verifyCaptchaChallenge(captchaToken, captchaAnswer)) return err(res, "Captcha verification failed. Please try again.", 400);
+    }
     if (siteId) {
       const [site] = await sql`SELECT site_id FROM sites WHERE site_id=${siteId} AND is_active=TRUE`;
       if (!site) return err(res, "Selected site is not active", 400);
