@@ -4053,7 +4053,7 @@ app.post("/api/auth/register-quick", async (req, res) => {
               WHEN member_id ~ '^MMR-[AC]-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
               ELSE 0 END
           ), 0) + 1 AS next_value FROM users`;
-        const memberId = \`MMR\${String(Number(sequence?.next_value || 1)).padStart(5, '0')}\`;
+        const memberId = `MMR${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
 
         const [createdUser] = await sql`
           INSERT INTO users (
