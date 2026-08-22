@@ -1044,6 +1044,32 @@ const getMobileAppSettingsRow = async () => {
   return { ...defaultMobileAppSettings, ...(row || {}) };
 };
 
+let appAuthSettingsReady = null;
+const ensureAppAuthSettingsSchema = () => {
+  if (!appAuthSettingsReady) {
+    appAuthSettingsReady = (async () => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS app_auth_settings (
+          id SERIAL PRIMARY KEY,
+          email_otp_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+          whatsapp_otp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`;
+      const [existing] = await sql`SELECT id FROM app_auth_settings LIMIT 1`;
+      if (!existing) {
+        await sql`INSERT INTO app_auth_settings (email_otp_enabled, whatsapp_otp_enabled) VALUES (TRUE, FALSE)`;
+      }
+    })();
+  }
+  return appAuthSettingsReady;
+};
+
+const getAppAuthSettingsRow = async () => {
+  await ensureAppAuthSettingsSchema();
+  const [row] = await sql`SELECT * FROM app_auth_settings LIMIT 1`;
+  return row || { email_otp_enabled: true, whatsapp_otp_enabled: false };
+};
+
 const safeNullableText = (value, maxLength = 1000) => {
   const text = String(value ?? "").trim();
   if (!text) return null;
@@ -2438,6 +2464,42 @@ app.get("/api/admin/company-settings",
   }
 );
 
+app.get("/api/admin/auth-settings",
+  verifyAdminToken,
+  role("SuperAdmin", "Admin", "SiteManager"),
+  async (req, res) => {
+    try {
+      const settings = await getAppAuthSettingsRow();
+      return ok(res, settings, "Auth settings fetched.");
+    } catch (e) {
+      console.error("[Admin Auth Settings Fetch Error]", e);
+      return err(res, "Failed to load auth settings");
+    }
+  }
+);
+
+app.post("/api/admin/auth-settings",
+  verifyAdminToken,
+  role("SuperAdmin", "Admin"),
+  async (req, res) => {
+    try {
+      const { email_otp_enabled, whatsapp_otp_enabled } = req.body;
+      await ensureAppAuthSettingsSchema();
+      await sql`
+        UPDATE app_auth_settings SET
+        email_otp_enabled = ${Boolean(email_otp_enabled)},
+        whatsapp_otp_enabled = ${Boolean(whatsapp_otp_enabled)},
+        updated_at = NOW()
+      `;
+      const settings = await getAppAuthSettingsRow();
+      return ok(res, settings, "Auth settings updated successfully.");
+    } catch (e) {
+      console.error("[Admin Auth Settings Update Error]", e);
+      return err(res, "Failed to update auth settings");
+    }
+  }
+);
+
 app.put("/api/admin/company-settings",
   verifyAdminToken,
   role("SuperAdmin", "SiteManager"),
@@ -3731,6 +3793,11 @@ app.post("/api/auth/send-otp", async (req, res) => {
     const { mobile_no, purpose = "Login" } = req.body;
     if (!mobile_no) return err(res, "mobile_no required", 400);
 
+    const authSettings = await getAppAuthSettingsRow();
+    if (authSettings.email_otp_enabled === false) {
+      return ok(res, { otpBypassed: true }, "OTP is disabled. Bypassing.");
+    }
+
     const otp = genOTP();
     const exp = new Date(Date.now() + 10 * 60 * 1000); // 10 min
 
@@ -3938,6 +4005,106 @@ app.post("/api/auth/register-quick", async (req, res) => {
     }
 
     const passwordHash = await bcrypt.hash(password, 12);
+
+    const authSettings = await getAppAuthSettingsRow();
+    
+    if (authSettings.email_otp_enabled === false) {
+      if (user_type === "Investor") {
+        const [createdInvestor] = await sql`
+          INSERT INTO investor_users (
+            full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
+          ) VALUES (
+            ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
+            'active', true, NOW(), NOW()
+          )
+          RETURNING id, full_name, email, mobile_number, status, is_verified`;
+
+        const payload = {
+          id: createdInvestor.id,
+          user_id: createdInvestor.id,
+          user_type: "Investor",
+          role: "Investor",
+          email: createdInvestor.email,
+          full_name: createdInvestor.full_name
+        };
+        const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+        const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
+        const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
+        const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "30d" });
+
+        return ok(res, {
+          otpBypassed: true,
+          token,
+          refresh_token: refreshToken,
+          user: {
+            id: createdInvestor.id,
+            user_id: createdInvestor.id,
+            full_name: createdInvestor.full_name,
+            email: createdInvestor.email,
+            mobile_no: createdInvestor.mobile_number,
+            user_type: "Investor"
+          }
+        }, "Registration successful. Logging in...", 201);
+      } else {
+        const [sequence] = await sql`
+          SELECT COALESCE(MAX(
+            CASE
+              WHEN member_id ~ '^MMR[0-9]+$' THEN SUBSTRING(member_id FROM 4)::integer
+              WHEN member_id ~ '^MMR-[AC]-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
+              ELSE 0 END
+          ), 0) + 1 AS next_value FROM users`;
+        const memberId = \`MMR\${String(Number(sequence?.next_value || 1)).padStart(5, '0')}\`;
+
+        const [createdUser] = await sql`
+          INSERT INTO users (
+            member_id, user_type, full_name, mobile_no, email, password_hash,
+            sponsor_user_id, account_status, email_verified, is_otp_verified,
+            created_at, updated_at
+          ) VALUES (
+            ${memberId}, ${user_type}, ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
+            ${sponsorUserId}, 'Active', true, true,
+            NOW(), NOW()
+          )
+          RETURNING user_id, member_id, user_type, full_name, email, mobile_no`;
+
+        await sql`
+          INSERT INTO user_wallets (user_id, balance, total_earned, total_withdrawn)
+          VALUES (${createdUser.user_id}, 0, 0, 0)`;
+        
+        await sql`
+          INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+          VALUES ('User', ${createdUser.user_id}, ${createdUser.full_name}, 'Auth', 'Registered', 'users', ${createdUser.user_id})`;
+
+        const payload = {
+          user_id: createdUser.user_id,
+          user_type: createdUser.user_type,
+          member_id: createdUser.member_id,
+          mobile_no: createdUser.mobile_no,
+          email: createdUser.email
+        };
+        const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+        const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
+        const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
+        const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "30d" });
+
+        return ok(res, {
+          otpBypassed: true,
+          token,
+          refresh_token: refreshToken,
+          user: {
+            user_id: createdUser.user_id,
+            member_id: createdUser.member_id,
+            user_type: createdUser.user_type,
+            full_name: createdUser.full_name,
+            email: createdUser.email,
+            mobile_no: createdUser.mobile_no,
+            account_status: "Active",
+            email_verified: true
+          }
+        }, "Registration successful. Logging in...", 201);
+      }
+    }
+
     const otp = String(Math.floor(100000 + Math.random() * 900000));
     const exp = new Date(Date.now() + 10 * 60 * 1000);
 
@@ -4198,16 +4365,21 @@ app.post("/api/auth/login", async (req, res) => {
       return err(res, message, 403);
     }
 
+    const authSettings = await getAppAuthSettingsRow();
+
     // OTP login
-    if (otp_code) {
+    if (otp_code || (authSettings.email_otp_enabled === false && !password)) {
       if (!loginMobile) return err(res, "OTP login requires mobile number", 400);
-      const [otpRow] = await sql`
-        SELECT * FROM otp_log
-        WHERE mobile = ${loginMobile} AND otp_code = ${otp_code}
-          AND purpose = 'Login' AND is_used = FALSE AND expires_at > NOW()
-        ORDER BY otp_id DESC LIMIT 1`;
-      if (!otpRow) return err(res, "Invalid or expired OTP", 401);
-      await sql`UPDATE otp_log SET is_used = TRUE WHERE otp_id = ${otpRow.otp_id}`;
+      
+      if (authSettings.email_otp_enabled !== false) {
+        const [otpRow] = await sql`
+          SELECT * FROM otp_log
+          WHERE mobile = ${loginMobile} AND otp_code = ${otp_code}
+            AND purpose = 'Login' AND is_used = FALSE AND expires_at > NOW()
+          ORDER BY otp_id DESC LIMIT 1`;
+        if (!otpRow) return err(res, "Invalid or expired OTP", 401);
+        await sql`UPDATE otp_log SET is_used = TRUE WHERE otp_id = ${otpRow.otp_id}`;
+      }
     }
     // Password login
     else if (password) {
