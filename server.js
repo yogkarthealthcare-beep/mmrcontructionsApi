@@ -11059,27 +11059,3 @@ if (shouldStartServer) {
 }
 
 export default app;
-
- / /   T E M P O R A R Y   E N D P O I N T   T O   F I X   I D s 
- a p p . g e t ( ' / a p i / t e m p - u p d a t e - i d s ' ,   a s y n c   ( r e q ,   r e s )   = >   { 
-     t r y   { 
-         c o n s t   r e s 1   =   a w a i t   s q l \ 
-             U P D A T E   u s e r s   
-             S E T   m e m b e r _ i d   =   R E P L A C E ( R E P L A C E ( R E P L A C E ( m e m b e r _ i d ,   ' - C - ' ,   ' ' ) ,   ' - A - ' ,   ' ' ) ,   ' - A S C - ' ,   ' ' ) 
-             W H E R E   m e m b e r _ i d   L I K E   ' M M R - % ' 
-         \ ; 
-         c o n s t   r e s 2   =   a w a i t   s q l \ 
-             U P D A T E   u s e r s   
-             S E T   i n v i t a t i o n _ c o d e   =   R E P L A C E ( R E P L A C E ( R E P L A C E ( i n v i t a t i o n _ c o d e ,   ' - C - ' ,   ' ' ) ,   ' - A - ' ,   ' ' ) ,   ' - A S C - ' ,   ' ' ) 
-             W H E R E   i n v i t a t i o n _ c o d e   L I K E   ' M M R - % ' 
-         \ ; 
-         c o n s t   r e s 3   =   a w a i t   s q l \ 
-             U P D A T E   u s e r s   S E T   f u l l _ n a m e   =   ' S u r a j   K u m a r   V a r m a '   W H E R E   u s e r _ t y p e   =   ' A d m i n ' 
-         \ ; 
-         r e s . j s o n ( {   s u c c e s s :   t r u e ,   m e s s a g e :   ' I D s   a n d   A d m i n   N a m e   u p d a t e d   s u c c e s s f u l l y '   } ) ; 
-     }   c a t c h   ( e r r o r )   { 
-         r e s . s t a t u s ( 5 0 0 ) . j s o n ( {   s u c c e s s :   f a l s e ,   e r r o r :   e r r o r . m e s s a g e   } ) ; 
-     } 
- } ) ; 
-  
- 
