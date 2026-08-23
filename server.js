@@ -9196,7 +9196,7 @@ app.get("/api/admin/associates",
         LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
         LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
         LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
-        WHERE u.user_type = 'Associate'
+        WHERE u.user_type ILIKE 'Associate'
           AND (${searchTerm} = '%%' OR u.full_name ILIKE ${searchTerm} OR u.member_id ILIKE ${searchTerm} OR u.mobile_no ILIKE ${searchTerm})
           AND (${String(status)} = '' OR u.account_status = ${String(status)})
           AND (${String(rank)} = '' OR r.rank_name = ${String(rank)})
