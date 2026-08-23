@@ -80,7 +80,7 @@ const registrationConflictMessage = (error) => {
     return 'Referral registration already exists for this account.';
   }
 
-  return 'Registration conflict detected. Please start registration again.';
+  return `Registration conflict detected (${error?.constraint || error?.table || 'Unknown'}). Please start registration again.`;
 };
 
 let pendingTableReady = false;
@@ -773,6 +773,20 @@ router.post('/verify-email-otp', async (req, res) => {
 
 router.get('/verify-email-otp', (_req, res) => {
   return ok(res, null, 'Email verification endpoint requires HTTP POST with email and OTP');
+});
+
+router.get('/sync-sequences', async (req, res) => {
+  try {
+    await sql`SELECT setval(pg_get_serial_sequence('users', 'user_id'), COALESCE(MAX(user_id), 1) + 1, false) FROM users`;
+    await sql`SELECT setval(pg_get_serial_sequence('referral_registrations', 'id'), COALESCE(MAX(id), 1) + 1, false) FROM referral_registrations`;
+    await sql`SELECT setval(pg_get_serial_sequence('mlm_network', 'id'), COALESCE(MAX(id), 1) + 1, false) FROM mlm_network`;
+    await sql`SELECT setval(pg_get_serial_sequence('user_addresses', 'address_id'), COALESCE(MAX(address_id), 1) + 1, false) FROM user_addresses`;
+    await sql`SELECT setval(pg_get_serial_sequence('otp_log', 'otp_id'), COALESCE(MAX(otp_id), 1) + 1, false) FROM otp_log`;
+    await sql`SELECT setval(pg_get_serial_sequence('associate_referral_links', 'id'), COALESCE(MAX(id), 1) + 1, false) FROM associate_referral_links`;
+    return res.json({ success: true, message: 'Sequences synced successfully' });
+  } catch (err) {
+    return res.json({ success: false, error: err.message, stack: err.stack });
+  }
 });
 
 router.post('/resend-email-otp', async (req, res) => {
