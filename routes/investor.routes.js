@@ -192,6 +192,59 @@ async function ensureInvestorSchema() {
         is_read BOOLEAN DEFAULT false,
         created_at TIMESTAMPTZ DEFAULT NOW()
       )`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS investor_enrollments (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        investor_id INTEGER REFERENCES investor_users(id) ON DELETE SET NULL,
+        form_no VARCHAR(100),
+        form_date DATE,
+        branch_code VARCHAR(100),
+        branch_name VARCHAR(255),
+        investor_enrollment_id VARCHAR(100),
+        project_name VARCHAR(255),
+        inv_first_name VARCHAR(100) NOT NULL,
+        inv_middle_name VARCHAR(100),
+        inv_surname VARCHAR(100),
+        fh_first_name VARCHAR(100),
+        fh_middle_name VARCHAR(100),
+        fh_surname VARCHAR(100),
+        dob DATE,
+        age INTEGER,
+        gender VARCHAR(20),
+        occupation VARCHAR(100),
+        occupation_other VARCHAR(255),
+        address TEXT,
+        city VARCHAR(100),
+        state VARCHAR(100),
+        pin_code VARCHAR(20),
+        mobile VARCHAR(50) NOT NULL,
+        alt_tel VARCHAR(50),
+        email VARCHAR(255),
+        pan VARCHAR(50),
+        aadhar VARCHAR(50),
+        amount NUMERIC(12,2),
+        amount_words VARCHAR(255),
+        payment_mode VARCHAR(100),
+        txn_no VARCHAR(100),
+        txn_date DATE,
+        bank_branch VARCHAR(255),
+        nominees JSONB,
+        decl_date DATE,
+        decl_place VARCHAR(100),
+        decl_signature_name VARCHAR(255),
+        first_applicant_name VARCHAR(255),
+        joint_applicant_name VARCHAR(255),
+        app_status VARCHAR(50) DEFAULT 'Pending',
+        verified_by VARCHAR(255),
+        payment_status VARCHAR(50),
+        payment_status_date DATE,
+        authorized_signatory VARCHAR(255),
+        photo_url TEXT,
+        signature_first_url TEXT,
+        signature_joint_url TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_investor_documents_investor ON investor_documents(investor_id, status)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_investor_deposits_status ON investor_deposits(status, created_at)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_investor_transactions_investor ON investor_transactions(investor_id, created_at)`;
@@ -1522,6 +1575,112 @@ router.get("/admin/investors-portal/transactions", authAdmin, async (req, res) =
     return ok(res, rows);
   } catch (e) {
     return err(res, "Failed to fetch transaction history.");
+  }
+});
+
+// POST /api/investor/enroll
+router.post("/investor/enroll", authInvestor, async (req, res) => {
+  try {
+    const investor_id = req.investor.id;
+    const body = req.body;
+    
+    if (!body.invFirstName || !body.mobile) {
+      return err(res, "First name and mobile number are required.");
+    }
+
+    const processBase64 = async (dataUrl, filename) => {
+      if (!dataUrl) return null;
+      const matches = dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+      if (!matches || matches.length !== 3) return null;
+      const buffer = Buffer.from(matches[2], 'base64');
+      const fileUrl = await saveFileToVPS(buffer, filename, "investor", {
+        entityId: investor_id,
+        subCategory: "enrollments"
+      });
+      return fileUrl;
+    };
+
+    const photoUrl = await processBase64(body.photo, `photo_${Date.now()}.png`);
+    const sigFirstUrl = await processBase64(body.signatureFirstApplicant, `sig1_${Date.now()}.png`);
+    const sigJointUrl = await processBase64(body.signatureJointApplicant, `sig2_${Date.now()}.png`);
+
+    const newRow = await sql`
+      INSERT INTO investor_enrollments (
+        investor_id, form_no, form_date, branch_code, branch_name, investor_enrollment_id, project_name,
+        inv_first_name, inv_middle_name, inv_surname, fh_first_name, fh_middle_name, fh_surname,
+        dob, age, gender, occupation, occupation_other, address, city, state, pin_code,
+        mobile, alt_tel, email, pan, aadhar, amount, amount_words, payment_mode, txn_no, txn_date, bank_branch,
+        nominees, decl_date, decl_place, decl_signature_name, first_applicant_name, joint_applicant_name,
+        photo_url, signature_first_url, signature_joint_url
+      ) VALUES (
+        ${investor_id}, ${body.formNo || null}, ${body.formDate || null}, ${body.branchCode || null}, ${body.branchName || null}, ${body.investorId || null}, ${body.projectName || null},
+        ${body.invFirstName}, ${body.invMiddleName || null}, ${body.invSurname || null}, ${body.fhFirstName || null}, ${body.fhMiddleName || null}, ${body.fhSurname || null},
+        ${body.dob || null}, ${body.age || null}, ${body.gender || null}, ${body.occupation || null}, ${body.occupationOther || null}, ${body.address || null}, ${body.city || null}, ${body.state || null}, ${body.pinCode || null},
+        ${body.mobile}, ${body.altTel || null}, ${body.email || null}, ${body.pan || null}, ${body.aadhar || null}, ${body.amount || null}, ${body.amountWords || null}, ${body.paymentMode || null}, ${body.txnNo || null}, ${body.txnDate || null}, ${body.bankBranch || null},
+        ${body.nominees ? JSON.stringify(body.nominees) : null}, ${body.declDate || null}, ${body.declPlace || null}, ${body.declSignatureName || null}, ${body.firstApplicantName || null}, ${body.jointApplicantName || null},
+        ${photoUrl || null}, ${sigFirstUrl || null}, ${sigJointUrl || null}
+      ) RETURNING id
+    `;
+
+    return ok(res, newRow[0], "Investor enrollment submitted successfully.");
+  } catch (e) {
+    console.error("Investor Enrollment Error:", e);
+    return err(res, "Failed to submit enrollment form.");
+  }
+});
+// GET /api/admin/investor-enrollment (Admin - List)
+router.get("/admin/investor-enrollment", authAdmin, async (req, res) => {
+  try {
+    const rows = await sql`
+      SELECT e.*, u.full_name as investor_name, u.email as investor_email, u.mobile_number
+      FROM investor_enrollments e
+      LEFT JOIN investor_users u ON e.investor_id = u.id
+      ORDER BY e.created_at DESC
+    `;
+    return ok(res, rows);
+  } catch (e) {
+    return err(res, "Failed to fetch investor enrollments.");
+  }
+});
+
+// GET /api/admin/investor-enrollment/:id (Admin - Detail)
+router.get("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [row] = await sql`SELECT * FROM investor_enrollments WHERE id = ${id}`;
+    if (!row) return err(res, "Enrollment not found.", 404);
+    return ok(res, row);
+  } catch (e) {
+    return err(res, "Failed to fetch enrollment.");
+  }
+});
+
+// PUT /api/admin/investor-enrollment/:id (Admin - Update)
+router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const b = req.body;
+    
+    // We update everything the admin sends, since admin can modify anything.
+    const [updated] = await sql`
+      UPDATE investor_enrollments
+      SET
+        form_no = ${b.formNo || null}, form_date = ${b.formDate || null}, branch_code = ${b.branchCode || null}, branch_name = ${b.branchName || null}, investor_enrollment_id = ${b.investorId || null}, project_name = ${b.projectName || null},
+        inv_first_name = ${b.invFirstName || null}, inv_middle_name = ${b.invMiddleName || null}, inv_surname = ${b.invSurname || null}, fh_first_name = ${b.fhFirstName || null}, fh_middle_name = ${b.fhMiddleName || null}, fh_surname = ${b.fhSurname || null},
+        dob = ${b.dob || null}, age = ${b.age || null}, gender = ${b.gender || null}, occupation = ${b.occupation || null}, occupation_other = ${b.occupationOther || null}, address = ${b.address || null}, city = ${b.city || null}, state = ${b.state || null}, pin_code = ${b.pinCode || null},
+        mobile = ${b.mobile || null}, alt_tel = ${b.altTel || null}, email = ${b.email || null}, pan = ${b.pan || null}, aadhar = ${b.aadhar || null}, amount = ${b.amount || null}, amount_words = ${b.amountWords || null}, payment_mode = ${b.paymentMode || null}, txn_no = ${b.txnNo || null}, txn_date = ${b.txnDate || null}, bank_branch = ${b.bankBranch || null},
+        nominees = ${b.nominees ? JSON.stringify(b.nominees) : null}, decl_date = ${b.declDate || null}, decl_place = ${b.declPlace || null}, decl_signature_name = ${b.declSignatureName || null}, first_applicant_name = ${b.firstApplicantName || null}, joint_applicant_name = ${b.jointApplicantName || null},
+        app_status = ${b.appStatus || 'Pending'}, verified_by = ${b.verifiedBy || null}, payment_status = ${b.paymentStatus || null}, payment_status_date = ${b.paymentStatusDate || null}, authorized_signatory = ${b.authorizedSignatory || null},
+        updated_at = NOW()
+      WHERE id = ${id}
+      RETURNING *
+    `;
+
+    if (!updated) return err(res, "Enrollment not found.", 404);
+    return ok(res, updated, "Investor enrollment updated successfully.");
+  } catch (e) {
+    console.error("Update Enrollment Error:", e);
+    return err(res, "Failed to update enrollment.");
   }
 });
 
