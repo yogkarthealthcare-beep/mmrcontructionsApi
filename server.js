@@ -6571,7 +6571,7 @@ app.post("/api/inquiries", async (req, res) => {
       if (!verifyCaptchaChallenge(captchaToken, captchaAnswer)) return err(res, "Captcha verification failed. Please try again.", 400);
     }
     if (siteId) {
-      const [site] = await sql`SELECT site_id FROM sites WHERE site_id=${siteId} AND is_active=TRUE`;
+      const [site] = await sql`SELECT site_id FROM sites WHERE site_id=${siteId}`;
       if (!site) return err(res, "Selected site is not active", 400);
     }
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err(res, "Valid email is required", 400);
