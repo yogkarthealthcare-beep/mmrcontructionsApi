@@ -615,8 +615,7 @@ router.post('/verify-email-otp', async (req, res) => {
             )`;
           await tx`
             INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, registration_source, status, approved_at)
-            VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, ${pending.sponsor_invite_code}, 'Signup', 'Approved', NOW())
-            ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
+            VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, ${pending.sponsor_invite_code}, 'Signup', 'Approved', NOW())`;
         } catch (refErr) {
           console.warn('[verify-email-otp] referral_registrations warning:', refErr.message);
         }
@@ -654,8 +653,7 @@ router.post('/verify-email-otp', async (req, res) => {
           await tx`
             INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
             VALUES (${createdUser.user_id}, ${pending.sponsor_user_id},
-              COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${pending.sponsor_user_id}), 0) + 1)
-            ON CONFLICT (associate_user_id) DO NOTHING`;
+              COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${pending.sponsor_user_id}), 0) + 1)`;
         } catch (mlmErr) {
           console.warn('[verify-email-otp] mlm_network warning:', mlmErr.message);
         }
