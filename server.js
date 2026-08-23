@@ -2579,8 +2579,11 @@ app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "A
     await ensureHomeExperienceSchema();
     const displayType = "hero_slider";
     const sectionVisibility = req.body.section_visibility && typeof req.body.section_visibility === "object"
-      ? Object.fromEntries(["investors", "sites", "why_choose", "emi_calculator", "buyback", "earn", "facilities", "cta", "contact"]
-        .map((key) => [key, parseBool(req.body.section_visibility[key], true)]))
+      ? Object.fromEntries(["investors", "sites", "why_choose", "emi_calculator", "buyback", "earn", "facilities", "cta", "contact", "master_property_tools"]
+        .map((key) => {
+           if (req.body.section_visibility[key] === undefined && key === "master_property_tools") return [key, true];
+           return [key, parseBool(req.body.section_visibility[key], true)];
+        }))
       : null;
     const [settings] = await sql`
       UPDATE home_page_settings SET
