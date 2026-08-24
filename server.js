@@ -1328,6 +1328,19 @@ const requireMlmSchema = (() => {
             changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
         await sql`
+          CREATE TABLE IF NOT EXISTS associate_sales_tracker (
+            tracker_id SERIAL PRIMARY KEY,
+            associate_user_id INTEGER NOT NULL UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
+            total_gaj_sold NUMERIC(14,2) NOT NULL DEFAULT 0,
+            total_commission_earned NUMERIC(14,2) NOT NULL DEFAULT 0,
+            current_rank_id INTEGER REFERENCES associate_ranks(rank_id) ON DELETE SET NULL,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+          )`;
+        try {
+          await sql`ALTER TABLE associate_sales_tracker ADD COLUMN IF NOT EXISTS current_rank_id INTEGER REFERENCES associate_ranks(rank_id) ON DELETE SET NULL`;
+        } catch(e) {}
+        
+        await sql`
           CREATE TABLE IF NOT EXISTS commission_rules (
             rule_id SERIAL PRIMARY KEY,
             commission_type VARCHAR(30) NOT NULL,
@@ -3723,6 +3736,14 @@ const ensureInquirySchema = () => {
       await sql`ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
       await sql`CREATE INDEX IF NOT EXISTS idx_inquiries_created_at ON inquiries (created_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_inquiries_status ON inquiries (status)`;
+      
+      // Permanently fix sequence issues by syncing it with the max ID
+      await sql`
+        SELECT setval(
+          pg_get_serial_sequence('inquiries', 'inquiry_id'),
+          COALESCE((SELECT MAX(inquiry_id) FROM inquiries), 1)
+        )
+      `.catch(err => console.error("Error syncing inquiries sequence:", err));
     })();
   }
   return inquirySchemaReady;
@@ -9199,7 +9220,7 @@ app.get("/api/admin/associates",
         LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
         LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
         LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
-        WHERE u.user_type ILIKE 'Associate'
+        WHERE TRIM(u.user_type) ILIKE 'Associate'
           AND (${searchTerm} = '%%' OR u.full_name ILIKE ${searchTerm} OR u.member_id ILIKE ${searchTerm} OR u.mobile_no ILIKE ${searchTerm})
           AND (${String(status)} = '' OR u.account_status = ${String(status)})
           AND (${String(rank)} = '' OR r.rank_name = ${String(rank)})

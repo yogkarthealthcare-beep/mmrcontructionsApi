@@ -161,7 +161,7 @@ async function findSponsorByCode(code) {
       ON l.associate_user_id = u.user_id
       AND l.is_active = TRUE
     WHERE u.account_status = 'Active'
-      AND u.user_type = 'Associate'
+      AND u.user_type IN ('Associate', 'Customer', 'Investor')
       AND (
         UPPER(COALESCE(u.invitation_code, '')) = ${sponsorCode}
         OR UPPER(COALESCE(u.member_id, '')) = ${sponsorCode}
