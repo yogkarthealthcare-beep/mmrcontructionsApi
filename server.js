@@ -9237,28 +9237,13 @@ app.get("/api/admin/fix-db-2", async (req, res) => {
         SELECT MIN(ctid) as ctid, rank_name
         FROM associate_ranks 
         GROUP BY rank_name HAVING COUNT(*) > 1
-      ) b
-      WHERE a.rank_name = b.rank_name AND a.ctid <> b.ctid`;
-      
-    await sql`
-      DELETE FROM associate_referral_links a USING (
-        SELECT MIN(ctid) as ctid, invite_code
-        FROM associate_referral_links 
-        GROUP BY invite_code HAVING COUNT(*) > 1
-      ) b
-      WHERE a.invite_code = b.invite_code AND a.ctid <> b.ctid`;
-
-    await sql`
-      DELETE FROM mlm_tree_closure a USING (
-        SELECT MIN(ctid) as ctid, ancestor_user_id, descendant_user_id
-        FROM mlm_tree_closure 
-        GROUP BY ancestor_user_id, descendant_user_id HAVING COUNT(*) > 1
-      ) b
-      WHERE a.ancestor_user_id = b.ancestor_user_id AND a.descendant_user_id = b.descendant_user_id AND a.ctid <> b.ctid`;
-
-    res.json({ success: true, duplicates: results });
-  } catch (e) {
-    res.json({ success: false, message: e.message, stack: e.stack });
+app.get("/api/admin/logs", async (req, res) => {
+  try {
+    const { execSync } = require('child_process');
+    const logs = execSync('pm2 logs mmrconstructions-api --lines 100 --nostream', { encoding: 'utf-8' });
+    res.send(`<pre>${logs}</pre>`);
+  } catch(e) {
+    res.send(e.message);
   }
 });
 
@@ -9267,11 +9252,13 @@ app.get("/api/admin/associates",
   role("SuperAdmin", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
-      await requireMlmSchema();
-      const { search = "", status = "", rank = "", sponsor = "", page = 1, limit = 30 } = req.query;
+      // Intentionally skipping requireMlmSchema() on read to prevent random crashes
+      const { search = "", status = "", rank = "", sponsor = "", page = 1, limit, pageSize } = req.query;
+      
       const pageNumber = Math.max(Number(page) || 1, 1);
-      const pageSize = Math.min(Math.max(Number(limit) || 30, 1), 100);
+      const actualLimit = Math.min(Math.max(Number(limit) || Number(pageSize) || 30, 1), 100);
       const searchTerm = `%${String(search || "").trim()}%`;
+      
       const rows = await sql`
         SELECT u.user_id, u.member_id, u.full_name, u.email, u.mobile_no, u.account_status,
                u.invitation_code, u.registered_at, sp.full_name AS sponsor_name,
@@ -9289,11 +9276,13 @@ app.get("/api/admin/associates",
           AND (${String(rank)} = '' OR r.rank_name = ${String(rank)})
           AND (${String(sponsor)} = '' OR sp.member_id = ${String(sponsor)} OR sp.full_name ILIKE ${`%${String(sponsor)}%`})
         ORDER BY u.registered_at DESC
-        LIMIT ${pageSize} OFFSET ${(pageNumber - 1) * pageSize}`;
+        LIMIT ${actualLimit} OFFSET ${(pageNumber - 1) * actualLimit}`;
+        
       const total = Number(rows[0]?.total_count || 0);
-      return ok(res, { items: rows.map(({ total_count, ...row }) => row), total, page: pageNumber, limit: pageSize });
+      return ok(res, { items: rows.map(({ total_count, ...row }) => row), total, page: pageNumber, limit: actualLimit });
     } catch (e) {
-      return err(res, e.message);
+      console.error("[Associates API Error]:", e);
+      return err(res, "Failed to load associates: " + e.message);
     }
   }
 );
