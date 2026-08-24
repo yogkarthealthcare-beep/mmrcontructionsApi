@@ -1340,6 +1340,27 @@ const requireMlmSchema = (() => {
           await sql`ALTER TABLE associate_sales_tracker ADD COLUMN IF NOT EXISTS current_rank_id INTEGER REFERENCES associate_ranks(rank_id) ON DELETE SET NULL`;
         } catch(e) {}
         
+        try {
+          await sql`DELETE FROM associate_ranks WHERE rank_id NOT IN (SELECT MIN(rank_id) FROM associate_ranks GROUP BY rank_name)`;
+          await sql`ALTER TABLE associate_ranks ADD UNIQUE (rank_name)`;
+        } catch(e) {}
+        try {
+          await sql`DELETE FROM associate_referral_links WHERE id NOT IN (SELECT MIN(id) FROM associate_referral_links GROUP BY invite_code)`;
+          await sql`ALTER TABLE associate_referral_links ADD UNIQUE (invite_code)`;
+        } catch(e) {}
+        try {
+          await sql`DELETE FROM referral_registrations WHERE id NOT IN (SELECT MIN(id) FROM referral_registrations GROUP BY referred_user_id)`;
+          await sql`ALTER TABLE referral_registrations ADD UNIQUE (referred_user_id)`;
+        } catch(e) {}
+        try {
+          await sql`DELETE FROM mlm_tree_closure WHERE id NOT IN (SELECT MIN(id) FROM mlm_tree_closure GROUP BY ancestor_user_id, descendant_user_id)`;
+          await sql`ALTER TABLE mlm_tree_closure ADD UNIQUE (ancestor_user_id, descendant_user_id)`;
+        } catch(e) {}
+        try {
+          await sql`DELETE FROM commission_monthly_schedule WHERE schedule_id NOT IN (SELECT MIN(schedule_id) FROM commission_monthly_schedule GROUP BY commission_id, month_no)`;
+          await sql`ALTER TABLE commission_monthly_schedule ADD UNIQUE (commission_id, month_no)`;
+        } catch(e) {}
+        
         await sql`
           CREATE TABLE IF NOT EXISTS commission_rules (
             rule_id SERIAL PRIMARY KEY,
