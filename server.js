@@ -1275,7 +1275,8 @@ const requireMlmSchema = (() => {
   return () => {
     if (!ready) {
       ready = (async () => {
-        await sql`
+        try {
+          await sql`
           CREATE TABLE IF NOT EXISTS associate_referral_links (
             id SERIAL PRIMARY KEY,
             associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -1442,6 +1443,9 @@ const requireMlmSchema = (() => {
         await sql`CREATE INDEX IF NOT EXISTS idx_payout_assoc ON associate_payout_requests(associate_user_id, requested_at DESC)`;
         await seedMlmDefaults();
         await createDashboardViews();
+        } catch(e) {
+          console.error("Schema init error suppressed:", e.message);
+        }
       })();
     }
     return ready;
