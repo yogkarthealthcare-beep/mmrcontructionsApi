@@ -9250,7 +9250,7 @@ app.get("/api/admin/associates",
         LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
         WHERE u.user_type = 'Associate'
           AND (${searchTerm} = '%%' OR u.full_name ILIKE ${searchTerm} OR u.member_id ILIKE ${searchTerm} OR u.mobile_no ILIKE ${searchTerm})
-          AND (${String(status)} = '' OR u.account_status = ${String(status)})
+          AND (${String(status)} = '' OR u.account_status::TEXT = ${String(status)})
           AND (${String(rank)} = '' OR r.rank_name = ${String(rank)})
           AND (${String(sponsor)} = '' OR sp.member_id = ${String(sponsor)} OR sp.full_name ILIKE ${`%${String(sponsor)}%`})
         ORDER BY u.registered_at DESC
