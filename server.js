@@ -9224,28 +9224,6 @@ app.get("/api/admin/associates/:id",
   }
 );
 
-app.get("/api/admin/fix-db-2", async (req, res) => {
-  try {
-    const results = {};
-    results.ranks = await sql`SELECT rank_name, COUNT(*) FROM associate_ranks GROUP BY rank_name HAVING COUNT(*) > 1`;
-    results.links = await sql`SELECT invite_code, COUNT(*) FROM associate_referral_links GROUP BY invite_code HAVING COUNT(*) > 1`;
-    results.tree = await sql`SELECT ancestor_user_id, descendant_user_id, COUNT(*) FROM mlm_tree_closure GROUP BY ancestor_user_id, descendant_user_id HAVING COUNT(*) > 1`;
-    
-    // Attempt to manually delete duplicates using ctid which is safer
-    await sql`
-      DELETE FROM associate_ranks a USING (
-        SELECT MIN(ctid) as ctid, rank_name
-        FROM associate_ranks 
-        GROUP BY rank_name HAVING COUNT(*) > 1
-app.get("/api/admin/logs", async (req, res) => {
-  try {
-    const { execSync } = require('child_process');
-    const logs = execSync('pm2 logs mmrconstructions-api --lines 100 --nostream', { encoding: 'utf-8' });
-    res.send(`<pre>${logs}</pre>`);
-  } catch(e) {
-    res.send(e.message);
-  }
-});
 
 app.get("/api/admin/associates",
   verifyAdminToken,
