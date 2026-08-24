@@ -9225,6 +9225,64 @@ app.get("/api/admin/associates/:id",
 );
 
 
+app.post("/api/admin/impersonate/:user_id", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (req, res) => {
+  try {
+    const { user_id } = req.params;
+    const [user] = await sql`SELECT user_id, full_name, email, user_type, member_id, account_status FROM users WHERE user_id = ${user_id}`;
+    if (!user) return err(res, "User not found", 404);
+    
+    const jwtSecret = process.env.JWT_SECRET || 'secret';
+    const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
+    
+    const payload = {
+      user_id: user.user_id,
+      user_type: user.user_type,
+      role: user.user_type,
+      email: user.email,
+      member_id: user.member_id,
+    };
+    
+    const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
+    const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "30d" });
+    
+    return ok(res, { token, refreshToken, user }, "Impersonated successfully");
+  } catch (e) {
+    return err(res, "Failed to impersonate: " + e.message);
+  }
+});
+
+app.post("/api/admin/fix-sequence", verifyAdminToken, role("SuperAdmin"), async (req, res) => {
+  try {
+    const users = await sql`SELECT user_id, member_id, invitation_code FROM users WHERE user_type = 'Associate' ORDER BY registered_at ASC`;
+    let seq = 1;
+    let changed = 0;
+    
+    // First pass: prevent unique constraint collisions by temp renaming if needed
+    for (const u of users) {
+      const newCode = "MMR" + String(seq).padStart(5, "0");
+      if (u.member_id !== newCode || u.invitation_code !== newCode) {
+        await sql`UPDATE users SET member_id = ${'TMP' + u.user_id}, invitation_code = ${'TMP' + u.user_id} WHERE user_id = ${u.user_id}`;
+      }
+      seq++;
+    }
+    
+    seq = 1;
+    // Second pass: apply correct codes
+    for (const u of users) {
+      const newCode = "MMR" + String(seq).padStart(5, "0");
+      if (u.member_id !== newCode || u.invitation_code !== newCode) {
+        await sql`UPDATE users SET member_id = ${newCode}, invitation_code = ${newCode} WHERE user_id = ${u.user_id}`;
+        changed++;
+      }
+      seq++;
+    }
+    
+    return ok(res, { checked: users.length, changed }, "Successfully re-sequenced associates");
+  } catch (e) {
+    return err(res, "Failed to resequence: " + e.message);
+  }
+});
+
 app.get("/api/admin/associates",
   verifyAdminToken,
   role("SuperAdmin", "FinanceManager", "SiteManager"),
@@ -9246,7 +9304,11 @@ app.get("/api/admin/associates",
                COUNT(*) OVER() AS total_count
         FROM users u
         LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
-        LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
+        LEFT JOIN (
+          SELECT DISTINCT ON (associate_user_id) *
+          FROM associate_sales_tracker
+          ORDER BY associate_user_id, updated_at DESC NULLS LAST
+        ) t ON t.associate_user_id = u.user_id
         LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
         WHERE u.user_type = 'Associate'
           AND (${searchTerm} = '%%' OR u.full_name ILIKE ${searchTerm} OR u.member_id ILIKE ${searchTerm} OR u.mobile_no ILIKE ${searchTerm})
