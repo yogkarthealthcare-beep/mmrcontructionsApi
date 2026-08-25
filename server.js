@@ -632,6 +632,7 @@ const ensureHomeExperienceSchema = () => {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`;
+      await sql`ALTER TABLE investors ADD COLUMN IF NOT EXISTS user_id INTEGER`;
       await sql`ALTER TABLE investors ADD COLUMN IF NOT EXISTS investment_amount NUMERIC(15, 2) DEFAULT 0`;
       await sql`CREATE SEQUENCE IF NOT EXISTS investors_id_seq`;
       await sql`ALTER TABLE investors ALTER COLUMN id SET DEFAULT nextval('investors_id_seq')`;
@@ -2641,10 +2642,11 @@ app.get("/api/investors", async (_req, res) => {
   try {
     await ensureHomeExperienceSchema();
     const showcase = await sql`
-      SELECT id::text as id, name, profile_image_url, COALESCE(investment_amount, 0)::numeric as investment_amount, display_order, created_at
-      FROM investors
-      WHERE is_active = TRUE AND is_deleted = FALSE
-      ORDER BY COALESCE(investment_amount, 0) DESC, display_order ASC, created_at ASC`;
+      SELECT i.id::text as id, COALESCE(iu.full_name, i.name) as name, i.profile_image_url, COALESCE(i.investment_amount, 0)::numeric as investment_amount, i.display_order, i.created_at
+      FROM investors i
+      LEFT JOIN investor_users iu ON i.user_id = iu.id
+      WHERE i.is_active = TRUE AND i.is_deleted = FALSE
+      ORDER BY COALESCE(i.investment_amount, 0) DESC, i.display_order ASC, i.created_at ASC`;
 
     const seen = new Set();
     const unique = [];
@@ -2668,7 +2670,7 @@ app.get("/api/investors", async (_req, res) => {
 });
 
 app.get("/api/admin/investors", verifyAdminToken, role("SuperAdmin", "SiteManager"), async (_req, res) => {
-  try { await ensureHomeExperienceSchema(); return ok(res, await sql`SELECT * FROM investors WHERE is_deleted = FALSE ORDER BY display_order, created_at`); }
+  try { await ensureHomeExperienceSchema(); return ok(res, await sql`SELECT i.*, COALESCE(iu.full_name, i.name) AS name, iu.email, iu.mobile_number FROM investors i LEFT JOIN investor_users iu ON i.user_id = iu.id WHERE i.is_deleted = FALSE ORDER BY i.display_order, i.created_at`); }
   catch (e) { return err(res, e.message); }
 });
 
@@ -2678,8 +2680,10 @@ app.post("/api/admin/investors", verifyAdminToken, role("SuperAdmin", "SiteManag
     if (!name) return err(res, "Investor name is required", 400);
     if (!req.file || !/^image\/(jpeg|png|webp)$/.test(req.file.mimetype)) return err(res, "Profile image is required (JPG, PNG or WEBP)", 400);
     const { url } = await saveFileToVPS(req.file.buffer, { module: "investor", entityId: name, entityType: "Investor", originalName: req.file.originalname });
-    const [created] = await sql`INSERT INTO investors(name, profile_image_url, profile_image_public_id, display_order, is_active)
-      VALUES(${name}, ${url}, ${null}, ${Number(req.body.display_order) || 0}, ${parseBool(req.body.is_active, true)}) RETURNING *`;
+    const [user] = await sql`SELECT id FROM investor_users WHERE full_name ILIKE ${name} LIMIT 1`;
+    const userId = user ? user.id : null;
+    const [created] = await sql`INSERT INTO investors(name, profile_image_url, profile_image_public_id, display_order, is_active, user_id)
+      VALUES(${name}, ${url}, ${null}, ${Number(req.body.display_order) || 0}, ${parseBool(req.body.is_active, true)}, ${userId}) RETURNING *`;
     invalidateApiCache("investors");
     return ok(res, created, "Investor added.", 201);
   } catch (e) { return err(res, e.message); }
@@ -2697,7 +2701,9 @@ app.put("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "SiteMa
       url = saved.url; publicId = null;
       await deleteFileFromStorage(current.profile_image_url, current.profile_image_public_id);
     }
-    const [updated] = await sql`UPDATE investors SET name=${name},profile_image_url=${url},profile_image_public_id=${publicId},display_order=${Number(req.body.display_order) || 0},is_active=${parseBool(req.body.is_active, true)},updated_at=NOW() WHERE id=${req.params.id} RETURNING *`;
+    const [user] = await sql`SELECT id FROM investor_users WHERE full_name ILIKE ${name} LIMIT 1`;
+    const userId = user ? user.id : null;
+    const [updated] = await sql`UPDATE investors SET name=${name},profile_image_url=${url},profile_image_public_id=${publicId},display_order=${Number(req.body.display_order) || 0},is_active=${parseBool(req.body.is_active, true)},user_id=${userId},updated_at=NOW() WHERE id=${req.params.id} RETURNING *`;
     invalidateApiCache("investors");
     return ok(res, updated, "Investor updated.");
   } catch (e) { return err(res, e.message); }
