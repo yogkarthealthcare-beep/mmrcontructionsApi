@@ -1,0 +1,1394 @@
+{
+  "admin_roles": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createAdmin.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\diagnose_cashfree_config.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\set_custom_admin_password.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\smoke_test_live_dashboards.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_impersonation.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_or_create_admin_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "admin_sessions": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createAdmin.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_or_create_admin_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "admin_users": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\newRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\payment.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\check_admin_accounts.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createAdmin.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_booking_workflow_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_wallet_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\diagnose_cashfree_config.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\reset_admin_password.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\set_custom_admin_password.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\smoke_test_live_dashboards.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_admin_login_api.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_impersonation.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_wallet_logic.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_or_create_admin_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "analytics_events": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "app_auth_settings": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "associate_payout_requests": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "associate_rank_history": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "associate_ranks": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "associate_referral_links": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\authEmailRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\seed_default_associate.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "associate_sales_tracker": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\fix_mlm_trigger_function.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "associate_status_history": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "audit_log": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\authEmailRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\database-backup.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\payment.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\wallet.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\check_audit.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_invoice_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_payment_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_wallet_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\debug_impersonation.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_impersonation.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_wallet_logic.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_vps_database_backup.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "blacklist_registry": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "book_plot_background_images": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "book_plot_leads": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "booking_appointments": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_booking_workflow_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "booking_invoices": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_booking_workflow_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "booking_payment_proofs": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "booking_payment_records": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_booking_workflow_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_invoice_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "booking_workflow_settings": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_booking_workflow_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "bookings": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_booking_workflow_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_commission_engine_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_invoice_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\inspect_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_dashboard_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_vps_database_backup.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\booking-management\\booking-management.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\booking-report\\booking-report.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\booking-report\\booking-report.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\booking-workflow\\booking-workflow.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\dashboard\\dashboard.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\dashboard\\dashboard.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\emi-payments\\emi-payments.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\emi-payments\\emi-payments.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\about-us\\about-us.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\legal-page\\legal-page.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\services\\api.service.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\buyback\\buyback.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\buyback\\buyback.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\dashboard\\dashboard.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\dashboard\\dashboard.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\my-plots\\my-plots.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\my-plots\\my-plots.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\notifications\\notifications.component.html"
+    ],
+    "unused": false
+  },
+  "buyback_applications": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "buyback_terms": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\update_buyback_terms_from_offer.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "categories": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "cms_content": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "cms_content_history": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "commission_engine_audit": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_commission_engine_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_commission_engine.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "commission_engine_levels": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_commission_engine_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_commission_engine.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "commission_engine_settings": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_commission_engine_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_commission_engine.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "commission_monthly_schedule": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "commission_rules": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\cleanup_commission_rules.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "commission_source_events": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_commission_engine_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_commission_engine.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "commission_transactions": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_commission_engine_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_subqueries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_commission_engine.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "company_documents": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_company_documents_table.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\migrate_company_documents_to_database.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\update_company_documents_hindi.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "company_settings": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "customer_enrollment_submissions": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\customer-enrollment.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "customer_nominees": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\customer-enrollment.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "database_backup_files": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\database-backup.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\services\\databaseBackup.service.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "database_backup_settings": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\services\\databaseBackup.service.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "database_restore_history": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\services\\databaseBackup.service.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "database_restore_uploads": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\services\\databaseBackup.service.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "duplicate_alerts": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "email_otp_log": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "emi_calculator_master": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createEmiCalculatorTable.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "emi_payment_proofs": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "emi_schedules": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_dashboard_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_subqueries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "home_page_settings": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\drop_hero_book_now_columns.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_hero_book_now_columns_removed.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "home_sliders": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_home_sliders_table.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_vps_database_backup.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "inquiries": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\book-plot-leads\\book-plot-leads.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\services\\api.service.ts"
+    ],
+    "unused": false
+  },
+  "investor_deposits": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\investor.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_investor_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_investor_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "investor_documents": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\investor.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_investor_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "investor_enrollments": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\investor.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "investor_notifications": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\investor.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_investor_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "investor_settlement_preferences": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\investor.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_investor_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "investor_transactions": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\investor.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_investor_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_investor_module.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_investor_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "investor_users": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\authEmailRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\investor.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\newRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\check_investors.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\check_user.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_investor_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\debug_impersonation.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\debug_server_login.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\reset_user_pass.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_duplicate_check.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_impersonation.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_investor_module.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_login_code.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_password.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_vps_database_backup.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_investor_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "investor_withdrawals": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\investor.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_investor_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_investor_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "investors": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\investor.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\check_investors.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\seed_investor.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_investor_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\services\\fileStorage.service.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\approvals\\approvals.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\home-slider\\home-slider.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\investor-enrollments\\admin-investor-enrollment-detail.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\investor-enrollments\\admin-investor-enrollments-list.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\investor-enrollments\\admin-investor-enrollments-list.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\investor-portal\\investor-portal-admin.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\investor-portal\\investor-portal-admin.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\investors\\investors.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\investors\\investors.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\layout\\layout.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\app.routes.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\blog\\blog.data.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\investor\\investor-enrollment\\investor-enrollment.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\about-us\\about-us.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\all-investors\\all-investors.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\all-investors\\all-investors.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\city-landing\\city-landing.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\home\\home.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\home\\home.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\signup\\signup.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\investors\\investors.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\investors\\investors.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\services\\api.service.ts"
+    ],
+    "unused": false
+  },
+  "invoice_audit_log": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_invoice_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "invoice_number_sequence": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_invoice_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "invoice_settings": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_invoice_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "invoices": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_booking_workflow_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_invoice_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\invoice-settings\\invoice-settings.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\verify-invoice\\verify-invoice.component.html"
+    ],
+    "unused": false
+  },
+  "mlm_network": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\authEmailRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\diagnose_mlm_error.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\fix_mlm_trigger_function.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "mlm_tree_closure": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\authEmailRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "mobile_app_settings": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "notification_log": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_dashboard_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "notification_queue": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\repositories\\whatsapp.repository.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\whatsapp.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_whatsapp_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "notification_templates": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "otp_history": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\repositories\\whatsapp.repository.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_whatsapp_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\services\\whatsapp.service.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "otp_log": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\authEmailRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\clear_otp_log.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\fix_otp_log_sequence.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "otp_master": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_whatsapp_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\services\\whatsapp.service.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "otp_store": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "payment_gateway_audit_logs": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\payment.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_payment_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "payment_gateway_configs": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\payment\\GatewayFactory.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\payment.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_payment_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\diagnose_cashfree_config.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_api_endpoints.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_payment_gateways.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\upsert_payu_gateway.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\upsert_razorpay_gateway.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "payment_logs": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\payment.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_payment_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "payment_transactions": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\payment.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_payment_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\inspect_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_api_endpoints.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "payment_vouchers": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "pending_registrations": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\authEmailRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\investor.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\check_user.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_investor_module.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\temp_fetch.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "plot_booking_history": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "plot_booking_locks": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_booking_workflow_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "plot_bulk_import_log": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "plot_details_extended": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "plot_images": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\site-map\\site-map.component.ts"
+    ],
+    "unused": false
+  },
+  "plot_polygon_coordinates": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "plot_polygon_history": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "plot_status_history": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "plots": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\audit_and_fix_all_primary_keys.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_booking_workflow_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_home_sliders_table.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_invoice_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\inspect_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\smoke_test_live_dashboards.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_dashboard_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_subqueries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_vps_database_backup.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\services\\fileStorage.service.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\admin\\customers\\customers.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\admin\\customers\\customers.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\admin\\sites-mgmt\\sites-mgmt.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\app.routes.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\pages\\home\\home.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\pages\\login\\login.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\pages\\register\\register.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\sections\\hero-slider\\hero-slider.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\sections\\sites\\sites.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\shared\\footer\\footer.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\user\\dashboard\\dashboard.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\user\\emi-history\\emi-history.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\user\\layout\\layout.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\user\\my-plots\\my-plots.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\user\\my-plots\\my-plots.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\user\\payment-history\\payment-history.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\analytics\\analytics.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\analytics\\analytics.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\associates\\associates.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\commissions\\commissions.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\customers\\customers.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\dashboard\\dashboard.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\dashboard\\dashboard.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\database-backup\\database-backup.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\emi-payments\\emi-payments.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\enquiries\\enquiries.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\new-site-area\\new-site-area.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\new-site-area\\new-site-area.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\plot-detector-2\\plot-detector-2.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\plot-detector-2\\plot-detector-2.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\plot-detector-tool\\plot-detector-tool.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\plot-map-editor\\plot-map-editor.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\plot-map-editor\\plot-map-editor.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\sites-mgmt\\sites-mgmt.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\sites-mgmt\\sites-mgmt.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\app.routes.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\blog\\blog.data.hi.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\blog\\blog.data.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\about-us\\about-us.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\about-us\\about-us.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\all-sites\\all-sites.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\all-sites\\all-sites.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\city-landing\\city-landing.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\city-landing\\city-landing.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\home\\home.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\login\\login.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\register\\register.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\services\\services.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\signup\\signup.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\site-map\\site-map.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\site-map\\site-map.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\site-map-new\\site-map-new.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\site-map-new\\site-map-new.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\hero-slider\\hero-slider.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\sites\\sites.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\sites\\sites.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\services\\api.service.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\services\\language.service.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\services\\role-access.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\shared\\footer\\footer.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\shared\\navbar\\navbar.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\buyback\\buyback.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\dashboard\\dashboard.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\documents\\documents.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\layout\\layout.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\my-plots\\my-plots.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\my-plots\\my-plots.component.ts"
+    ],
+    "unused": false
+  },
+  "products": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "referral_clicks": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "referral_registrations": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\authEmailRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_invoice_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\diagnose_mlm_error.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "registry_records": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "report_schedules": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "settlement_change_requests": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\investor.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "site_documents": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_site_documents_table.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "site_landmarks": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "site_layout_maps": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "site_photos": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "sites": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\audit_and_fix_all_primary_keys.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_home_sliders_table.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_invoice_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_site_documents_table.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_vps_database_backup.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\admin\\layout\\layout.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\admin\\sites-mgmt\\sites-mgmt.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\admin\\sites-mgmt\\sites-mgmt.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\app.routes.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\pages\\home\\home.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\pages\\home\\home.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\sections\\hero-slider\\hero-slider.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\sections\\sites\\sites.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\sections\\sites\\sites.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\shared\\footer\\footer.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\shared\\navbar\\navbar.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\analytics\\analytics.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\analytics\\analytics.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\dashboard\\dashboard.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\dashboard\\dashboard.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\home-slider\\home-slider.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\home-slider\\home-slider.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\layout\\layout.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\new-site-area\\new-site-area.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\new-site-area\\new-site-area.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\plot-detector-2\\plot-detector-2.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\plot-detector-tool\\plot-detector-tool.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\plot-detector-tool\\plot-detector-tool.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\plot-map-editor\\plot-map-editor.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\sites-mgmt\\sites-mgmt.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\sites-mgmt\\sites-mgmt.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\app.routes.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\all-sites\\all-sites.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\all-sites\\all-sites.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\home\\home.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\home\\home.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\site-map\\site-map.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\site-map-new\\site-map-new.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\site-map-new\\site-map-new.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\book-plot-hero\\book-plot-hero.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\book-plot-hero\\book-plot-hero.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\contact\\contact.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\contact\\contact.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\hero-slider\\hero-slider.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\sites\\sites.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\sites\\sites.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\services\\api.service.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\services\\language.service.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\services\\public-navigation.service.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\shared\\footer\\footer.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\shared\\navbar\\navbar.component.html"
+    ],
+    "unused": false
+  },
+  "user_addresses": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\authEmailRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "user_bank_details": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "user_device_tokens": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "user_documents": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_booking_workflow_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\inspect_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "user_kyc_profiles": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_booking_workflow_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "user_nominees": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "user_wallets": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\payment.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\wallet.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_wallet_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_wallet_logic.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "users": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\authEmailRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\booking-workflow.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\investor.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\invoice-module.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\newRoutes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\payment.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\wallet.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\whatsapp.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\check_admin_accounts.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\check_audit.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\check_investors.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\check_user.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createAdmin.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\createMlmTables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_booking_workflow_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_investor_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_invoice_module_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_wallet_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\debug_impersonation.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\debug_server_login.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\diagnose_cashfree_config.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\diagnose_mlm_error.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\inspect_booking_workflow_schema.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\inspect_users_table.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\reset_admin_password.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\reset_user_pass.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\seed_default_associate.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\set_custom_admin_password.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\smoke_test_live_dashboards.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_admin_login_api.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_dashboard_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_duplicate_check.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_impersonation.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_investor_module.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_login_code.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_password.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_queries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_subqueries.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_wallet_logic.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_or_create_admin_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\verify_vps_database_backup.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_investor_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\temp_fetch.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\temp_query.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\update-ids.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\admin\\dashboard\\dashboard.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\mmr-constructions\\src\\app\\admin\\layout\\layout.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\admin-users-response.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\approvals\\approvals.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\approvals\\approvals.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\associates\\associates.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\customers\\customers.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\customers\\customers.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\dashboard\\dashboard.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\dashboard\\dashboard.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\investor-enrollments\\admin-investor-enrollments-list.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\investor-enrollments\\admin-investor-enrollments-list.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\investor-portal\\investor-portal-admin.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\layout\\layout.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\payment-gateways\\payment-gateway-settings\\payment-gateway-settings.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\admin\\settings\\settings.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\all-investors\\all-investors.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\legal-page\\legal-page.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\pages\\signup\\signup.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\buyback\\buyback.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\sections\\investors\\investors.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\services\\api.service.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\shared\\commission-notes\\commission-notes.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\commission-tracker\\commission-tracker.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\layout\\layout.component.ts",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\my-team\\my-team.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\profile\\profile.component.html",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructions-main\\src\\app\\user\\referral\\referral.component.html"
+    ],
+    "unused": false
+  },
+  "wallet_audit_logs": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\payment.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\wallet.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_wallet_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_wallet_logic.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "wallet_transactions": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\payment.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\wallet.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_wallet_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_wallet_logic.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\server.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "whatsapp_message_logs": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\repositories\\whatsapp.repository.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\whatsapp.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_whatsapp_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "whatsapp_settings": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\repositories\\whatsapp.repository.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_whatsapp_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "whatsapp_templates": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\repositories\\whatsapp.repository.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_whatsapp_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "whatsapp_webhook_logs": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\repositories\\whatsapp.repository.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_whatsapp_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  },
+  "withdrawal_requests": {
+    "backend": [
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\routes\\wallet.routes.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\create_wallet_tables.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\test_wallet_logic.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\scripts\\wipe_database_test_data.js",
+      "D:\\ClientsData\\MMRConstructions\\mmrconstructions-main\\mmrconstructionsApi\\usage_scanner.cjs"
+    ],
+    "frontend": [],
+    "unused": false
+  }
+}

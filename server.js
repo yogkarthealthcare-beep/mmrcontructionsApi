@@ -6928,20 +6928,34 @@ app.delete("/api/admin/customers/:id",
   async (req, res) => {
     try {
       const uid = req.params.id;
-      const [customer] = await sql`
-        UPDATE users SET account_status = 'Blacklisted', is_active = FALSE, updated_at = NOW()
-        WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'
-        RETURNING user_id`;
-      if (!customer) return err(res, "Customer not found", 404);
+      await sql.begin(async tx => {
+        const [user] = await tx`SELECT email FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'`;
+        if (!user) throw new Error("Customer not found");
 
-      await sql`
-        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-        VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
-                'CustomerManagement', 'Deleted', 'users', ${uid})`;
+        await tx`DELETE FROM customer_enrollment_submissions WHERE email = ${user.email}`;
+        await tx`DELETE FROM user_addresses WHERE user_id = ${uid}`;
+        await tx`DELETE FROM otp_log WHERE reference_id = ${uid} AND user_type = 'Customer'`;
+        await tx`DELETE FROM wallet_transactions WHERE user_id = ${uid}`;
+        
+        const bookings = await tx`SELECT plot_id FROM bookings WHERE user_id = ${uid}`;
+        if (bookings.length > 0) {
+          const plotIds = bookings.map(b => b.plot_id);
+          await tx`UPDATE plots SET plot_status = 'Available', is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
+          await tx`DELETE FROM bookings WHERE user_id = ${uid}`;
+        }
+
+        await tx`DELETE FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'`;
+
+        await tx`
+          INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+          VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
+                  'CustomerManagement', 'Deleted', 'users', ${uid})`;
+      });
 
       return ok(res, {}, "Customer deleted successfully");
     } catch (e) {
-      return err(res, e.message);
+      if (e.message === "Customer not found") return err(res, e.message, 404);
+      return err(res, "Failed to delete customer: " + e.message);
     }
   }
 );
@@ -9323,6 +9337,49 @@ app.get("/api/admin/associates",
     } catch (e) {
       console.error("[Associates API Error]:", e);
       return err(res, "Failed to load associates: " + e.message);
+    }
+  }
+);
+
+app.delete("/api/admin/associates/:id",
+  verifyAdminToken,
+  role("SuperAdmin"),
+  async (req, res) => {
+    try {
+      const uid = req.params.id;
+      await sql.begin(async tx => {
+        const [user] = await tx`SELECT email FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'associate'`;
+        if (!user) throw new Error("Associate not found");
+
+        await tx`DELETE FROM associate_sales_tracker WHERE associate_user_id = ${uid}`;
+        await tx`DELETE FROM commission_engine_audit WHERE associate_user_id = ${uid}`;
+        await tx`DELETE FROM mlm_network WHERE associate_user_id = ${uid} OR sponsor_user_id = ${uid}`;
+        await tx`DELETE FROM mlm_tree_closure WHERE ancestor_user_id = ${uid} OR descendant_user_id = ${uid}`;
+        await tx`DELETE FROM referral_registrations WHERE sponsor_user_id = ${uid} OR referred_user_id = ${uid}`;
+        await tx`DELETE FROM otp_log WHERE reference_id = ${uid} AND user_type = 'Associate'`;
+        await tx`DELETE FROM user_addresses WHERE user_id = ${uid}`;
+        await tx`DELETE FROM wallet_transactions WHERE user_id = ${uid}`;
+        await tx`DELETE FROM associate_payout_requests WHERE associate_user_id = ${uid}`;
+
+        const bookings = await tx`SELECT plot_id FROM bookings WHERE user_id = ${uid}`;
+        if (bookings.length > 0) {
+          const plotIds = bookings.map(b => b.plot_id);
+          await tx`UPDATE plots SET plot_status = 'Available', is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
+          await tx`DELETE FROM bookings WHERE user_id = ${uid}`;
+        }
+
+        await tx`DELETE FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'associate'`;
+
+        await tx`
+          INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+          VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
+                  'AssociateManagement', 'Deleted', 'users', ${uid})`;
+      });
+
+      return ok(res, {}, "Associate deleted successfully");
+    } catch (e) {
+      if (e.message === "Associate not found") return err(res, e.message, 404);
+      return err(res, "Failed to delete associate: " + e.message);
     }
   }
 );

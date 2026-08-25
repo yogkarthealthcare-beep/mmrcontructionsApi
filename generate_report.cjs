@@ -92,3 +92,4 @@ if (unusedTables.length > 0) {
 
 fs.writeFileSync('MMR_Constructions_Database_and_Page_Usage_Audit.md', md);
 console.log('Report generated in mmrconstructionsApi folder.');
+
