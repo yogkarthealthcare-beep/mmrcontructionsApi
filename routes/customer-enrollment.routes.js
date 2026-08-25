@@ -174,10 +174,13 @@ const processBase64 = async (dataUrl, filename, userId) => {
   const matches = dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
   if (!matches || matches.length !== 3) return null;
   const buffer = Buffer.from(matches[2], 'base64');
-  return await saveFileToVPS(buffer, filename, "customer", {
+  const result = await saveFileToVPS(buffer, {
+    originalName: filename,
+    module: "customer",
     entityId: userId || "guest",
     subCategory: "enrollments"
   });
+  return result ? result.url : null;
 };
 
 // POST /api/customer-enrollment
