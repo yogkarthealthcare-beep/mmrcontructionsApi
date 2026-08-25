@@ -160,9 +160,7 @@ async function findSponsorByCode(code) {
     LEFT JOIN associate_referral_links l
       ON l.associate_user_id = u.user_id
       AND l.is_active = TRUE
-    WHERE (u.account_status IS NULL OR u.account_status IN ('Active', 'Approved'))
-      AND u.user_type IN ('Admin', 'Employee', 'Associate', 'Customer', 'Investor')
-      AND (
+    WHERE (
         UPPER(COALESCE(u.invitation_code, '')) = ${sponsorCode}
         OR UPPER(COALESCE(u.member_id, '')) = ${sponsorCode}
         OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-[AC]-', 'MMR')) = ${sponsorCode}
