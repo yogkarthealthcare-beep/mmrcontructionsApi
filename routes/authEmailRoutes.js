@@ -154,7 +154,7 @@ async function findSponsorByCode(code) {
 
   await ensureReferralLinkTable();
 
-  const [sponsor] = await sql`
+  let [sponsor] = await sql`
     SELECT DISTINCT u.user_id, u.full_name, u.member_id, u.invitation_code
     FROM users u
     LEFT JOIN associate_referral_links l
@@ -169,6 +169,30 @@ async function findSponsorByCode(code) {
         OR UPPER(COALESCE(l.invite_code, '')) = ${sponsorCode}
       )
     LIMIT 1`;
+
+  if (!sponsor) {
+    let numericId = null;
+    if (/^\d+$/.test(sponsorCode)) {
+      numericId = parseInt(sponsorCode, 10);
+    } else if (/^INV-?\d+$/i.test(sponsorCode)) {
+      numericId = parseInt(sponsorCode.replace(/^INV-?/i, ''), 10);
+    }
+
+    const [invSponsor] = await sql`
+      SELECT id as user_id, full_name, mobile_number as member_id, mobile_number as invitation_code
+      FROM investor_users
+      WHERE deleted_at IS NULL
+        AND (
+          UPPER(mobile_number) = ${sponsorCode}
+          OR UPPER(email) = ${sponsorCode}
+          ${numericId ? sql`OR id = ${numericId}` : sql`OR FALSE`}
+        )
+      LIMIT 1
+    `;
+    if (invSponsor) {
+       sponsor = invSponsor;
+    }
+  }
 
   return sponsor || null;
 }
