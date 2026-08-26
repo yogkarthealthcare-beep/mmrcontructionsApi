@@ -2648,16 +2648,7 @@ app.get("/api/investors", async (_req, res) => {
       WHERE i.is_active = TRUE AND i.is_deleted = FALSE
       ORDER BY COALESCE(i.investment_amount, 0) DESC, i.display_order ASC, i.created_at ASC`;
 
-    const seen = new Set();
-    const unique = [];
-    for (const item of showcase) {
-      const key = (item.name || "").trim().toLowerCase();
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      unique.push(item);
-    }
-
-    const investors = unique.map(item => ({
+    const investors = showcase.map(item => ({
       id: item.id,
       name: item.name,
       profile_image_url: item.profile_image_url,
@@ -6940,15 +6931,35 @@ app.delete("/api/admin/customers/:id",
 
         await tx`DELETE FROM customer_enrollment_submissions WHERE email = ${user.email}`;
         await tx`DELETE FROM user_addresses WHERE user_id = ${uid}`;
-        await tx`DELETE FROM otp_log WHERE reference_id = ${uid} AND user_type = 'Customer'`;
+        await tx`DELETE FROM user_documents WHERE user_id = ${uid}`;
+        await tx`DELETE FROM otp_log WHERE reference_id = ${uid}`;
         await tx`DELETE FROM wallet_transactions WHERE user_id = ${uid}`;
+        await tx`DELETE FROM referral_registrations WHERE referred_user_id = ${uid}`;
         
-        const bookings = await tx`SELECT plot_id FROM bookings WHERE user_id = ${uid}`;
+        const bookings = await tx`SELECT booking_id, plot_id FROM bookings WHERE user_id = ${uid}`;
         if (bookings.length > 0) {
-          const plotIds = bookings.map(b => b.plot_id);
-          await tx`UPDATE plots SET plot_status = 'Available', is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
+          const plotIds = bookings.map(b => b.plot_id).filter(id => id);
+          if (plotIds.length > 0) {
+            await tx`UPDATE plots SET plot_status = 'Available', is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
+          }
+          
+          for (const bk of bookings) {
+             await tx`DELETE FROM invoices WHERE booking_id = ${bk.booking_id}`;
+             await tx`DELETE FROM booking_invoices WHERE booking_id = ${bk.booking_id}`;
+             await tx`DELETE FROM booking_payment_records WHERE booking_id = ${bk.booking_id}`;
+             await tx`DELETE FROM buyback_applications WHERE booking_id = ${bk.booking_id}`;
+             
+             const emiSchedules = await tx`SELECT emi_id FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
+             if (emiSchedules.length > 0) {
+               const emiIds = emiSchedules.map(e => e.emi_id);
+               await tx`DELETE FROM emi_payment_proofs WHERE emi_id IN ${sql(emiIds)}`;
+               await tx`DELETE FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
+             }
+          }
+          
           await tx`DELETE FROM bookings WHERE user_id = ${uid}`;
         }
+        await tx`DELETE FROM invoices WHERE user_id = ${uid}`;
 
         await tx`DELETE FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'`;
 
@@ -9367,12 +9378,31 @@ app.delete("/api/admin/associates/:id",
         await tx`DELETE FROM wallet_transactions WHERE user_id = ${uid}`;
         await tx`DELETE FROM associate_payout_requests WHERE associate_user_id = ${uid}`;
 
-        const bookings = await tx`SELECT plot_id FROM bookings WHERE user_id = ${uid}`;
+        await tx`DELETE FROM user_documents WHERE user_id = ${uid}`;
+        
+        const bookings = await tx`SELECT booking_id, plot_id FROM bookings WHERE user_id = ${uid}`;
         if (bookings.length > 0) {
-          const plotIds = bookings.map(b => b.plot_id);
-          await tx`UPDATE plots SET plot_status = 'Available', is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
+          const plotIds = bookings.map(b => b.plot_id).filter(id => id);
+          if (plotIds.length > 0) {
+            await tx`UPDATE plots SET plot_status = 'Available', is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
+          }
+          
+          for (const bk of bookings) {
+             await tx`DELETE FROM invoices WHERE booking_id = ${bk.booking_id}`;
+             await tx`DELETE FROM booking_invoices WHERE booking_id = ${bk.booking_id}`;
+             await tx`DELETE FROM booking_payment_records WHERE booking_id = ${bk.booking_id}`;
+             await tx`DELETE FROM buyback_applications WHERE booking_id = ${bk.booking_id}`;
+             
+             const emiSchedules = await tx`SELECT emi_id FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
+             if (emiSchedules.length > 0) {
+               const emiIds = emiSchedules.map(e => e.emi_id);
+               await tx`DELETE FROM emi_payment_proofs WHERE emi_id IN ${sql(emiIds)}`;
+               await tx`DELETE FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
+             }
+          }
           await tx`DELETE FROM bookings WHERE user_id = ${uid}`;
         }
+        await tx`DELETE FROM invoices WHERE user_id = ${uid}`;
 
         await tx`DELETE FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'associate'`;
 

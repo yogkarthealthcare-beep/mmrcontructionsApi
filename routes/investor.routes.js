@@ -1687,26 +1687,21 @@ router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
 // DELETE /api/admin/investor-enrollment/:id (Admin - Delete)
 router.delete("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
   try {
-    const { id } = req.params;
+    const { id: investorId } = req.params;
     await sql.begin(async tx => {
-      const [enrollment] = await tx`SELECT investor_id FROM investor_enrollments WHERE id = ${id}`;
-      if (!enrollment) throw new Error("Enrollment not found.");
-
-      const investorId = enrollment.investor_id;
-      
-      if (investorId) {
-        await tx`DELETE FROM investor_documents WHERE investor_id = ${investorId}`;
-      }
-      await tx`DELETE FROM investor_enrollments WHERE id = ${id}`;
-
-      if (investorId) {
-        await tx`DELETE FROM investor_users WHERE id = ${investorId}`;
-      }
+      await tx`DELETE FROM investor_deposits WHERE investor_id = ${investorId}`;
+      await tx`DELETE FROM investor_documents WHERE investor_id = ${investorId}`;
+      await tx`DELETE FROM investor_notifications WHERE investor_id = ${investorId}`;
+      await tx`DELETE FROM investor_settlement_preferences WHERE investor_id = ${investorId}`;
+      await tx`DELETE FROM investor_transactions WHERE investor_id = ${investorId}`;
+      await tx`DELETE FROM investor_withdrawals WHERE investor_id = ${investorId}`;
+      await tx`DELETE FROM investor_enrollments WHERE investor_id = ${investorId}`;
+      await tx`DELETE FROM investor_users WHERE id = ${investorId}`;
 
       await tx`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
         VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
-                'InvestorManagement', 'Deleted', 'investor_users', ${investorId || id})`;
+                'InvestorManagement', 'Deleted', 'investor_users', ${investorId})`;
     });
 
     return ok(res, {}, "Investor deleted successfully.");
