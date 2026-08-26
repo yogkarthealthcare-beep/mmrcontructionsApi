@@ -2640,13 +2640,17 @@ app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "A
 
 app.get("/api/investors", async (_req, res) => {
   try {
-    await ensureHomeExperienceSchema();
     const showcase = await sql`
-      SELECT i.id::text as id, COALESCE(iu.full_name, i.name) as name, i.profile_image_url, COALESCE(i.investment_amount, 0)::numeric as investment_amount, i.display_order, i.created_at
-      FROM investors i
-      LEFT JOIN investor_users iu ON i.user_id = iu.id
-      WHERE i.is_active = TRUE AND i.is_deleted = FALSE
-      ORDER BY COALESCE(i.investment_amount, 0) DESC, i.display_order ASC, i.created_at ASC`;
+      SELECT 
+        u.id::text as id, 
+        u.full_name as name, 
+        u.profile_picture_url as profile_image_url, 
+        COALESCE(u.total_investment, 0)::numeric as investment_amount, 
+        0 as display_order, 
+        u.created_at
+      FROM investor_users u
+      WHERE u.status = 'active' AND u.deleted_at IS NULL
+      ORDER BY COALESCE(u.total_investment, 0) DESC, u.created_at ASC`;
 
     const investors = showcase.map(item => ({
       id: item.id,
