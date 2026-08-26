@@ -1709,7 +1709,13 @@ router.put("/admin/investor-users/:id/status", authAdmin, async (req, res) => {
 // DELETE /api/admin/investor-enrollment/:id (Admin - Delete)
 router.delete("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
   try {
-    const { id: investorId } = req.params;
+    const { id: enrollmentId } = req.params;
+    
+    const [enrollment] = await sql`SELECT investor_id FROM investor_enrollments WHERE id = ${enrollmentId}`;
+    if (!enrollment) return err(res, "Enrollment not found.", 404);
+    
+    const investorId = enrollment.investor_id;
+
     await sql.begin(async tx => {
       await tx`DELETE FROM investor_deposits WHERE investor_id = ${investorId}`;
       await tx`DELETE FROM investor_documents WHERE investor_id = ${investorId}`;
