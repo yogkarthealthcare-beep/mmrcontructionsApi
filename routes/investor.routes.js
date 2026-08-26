@@ -1632,7 +1632,7 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
 router.get("/admin/investor-enrollment", authAdmin, async (req, res) => {
   try {
     const rows = await sql`
-      SELECT e.*, u.full_name as investor_name, u.email as investor_email, u.mobile_number
+      SELECT e.*, u.full_name as investor_name, u.email as investor_email, u.mobile_number, u.status as account_status, u.is_verified
       FROM investor_enrollments e
       LEFT JOIN investor_users u ON e.investor_id = u.id
       ORDER BY e.created_at DESC
@@ -1681,6 +1681,28 @@ router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
   } catch (e) {
     console.error("Update Enrollment Error:", e);
     return err(res, "Failed to update enrollment.");
+  }
+});
+
+// PUT /api/admin/investor-users/:id/status (Admin - Approve/Reject Investor)
+router.put("/admin/investor-users/:id/status", authAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, is_verified } = req.body;
+    
+    if (!status) return err(res, "Status is required.");
+    
+    const [updated] = await sql`
+      UPDATE investor_users
+      SET status = ${status}, is_verified = ${is_verified === true}, updated_at = NOW()
+      WHERE id = ${id}
+      RETURNING *
+    `;
+    
+    if (!updated) return err(res, "Investor user not found.", 404);
+    return ok(res, updated, "Investor status updated successfully.");
+  } catch (e) {
+    return err(res, "Failed to update investor status.");
   }
 });
 
