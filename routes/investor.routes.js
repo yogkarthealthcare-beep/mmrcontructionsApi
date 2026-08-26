@@ -1716,7 +1716,18 @@ router.delete("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
     
     const investorId = enrollment.investor_id;
 
+    let profileImageUrl = null;
+    let profileImagePublicId = null;
+
     await sql.begin(async tx => {
+      // Find and delete the profile image from the investors table if it exists
+      const [investorProfile] = await tx`SELECT profile_image_url, profile_image_public_id FROM investors WHERE user_id = ${investorId}`;
+      if (investorProfile) {
+        profileImageUrl = investorProfile.profile_image_url;
+        profileImagePublicId = investorProfile.profile_image_public_id;
+      }
+      
+      await tx`DELETE FROM investors WHERE user_id = ${investorId}`;
       await tx`DELETE FROM investor_deposits WHERE investor_id = ${investorId}`;
       await tx`DELETE FROM investor_documents WHERE investor_id = ${investorId}`;
       await tx`DELETE FROM investor_notifications WHERE investor_id = ${investorId}`;
@@ -1731,6 +1742,10 @@ router.delete("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
         VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
                 'InvestorManagement', 'Deleted', 'investor_users', ${investorId})`;
     });
+
+    if (profileImageUrl) {
+      await deleteFileFromStorage(profileImageUrl, profileImagePublicId);
+    }
 
     return ok(res, {}, "Investor deleted successfully.");
   } catch (e) {
