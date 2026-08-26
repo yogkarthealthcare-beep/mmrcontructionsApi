@@ -4573,39 +4573,66 @@ app.post("/api/auth/clear-otp-logs", async (req, res) => {
 
 app.post("/api/auth/reset-password", async (req, res) => {
   try {
-    const email = String(req.body.email || "").toLowerCase().trim();
+    const identifier = String(req.body.email || req.body.mobile_no || "").toLowerCase().trim();
     const { otp_code, otp, new_password } = req.body;
     const rawOtp = String(otp_code || otp || "").trim();
 
-    if (!email || !rawOtp || !new_password)
-      return err(res, "email, otp, and new_password required", 400);
+    if (!identifier || !rawOtp || !new_password)
+      return err(res, "Email/Mobile, OTP, and new password required", 400);
     if (String(new_password).length < 8)
       return err(res, "New password minimum 8 characters required", 400);
 
-    const [investor] = await sql`
-      SELECT id, reset_otp, reset_otp_expires FROM investor_users
-      WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`;
+    const isEmail = identifier.includes('@');
+    const cleanMobile = !isEmail ? identifier.replace(/\D/g, "").slice(-10) : null;
+    
+    let verified = false;
+    let userId = null;
+
+    // 1. Check investor OTP
+    const [investor] = isEmail 
+      ? await sql`SELECT id, reset_otp, reset_otp_expires FROM investor_users WHERE LOWER(email) = ${identifier} AND deleted_at IS NULL LIMIT 1`
+      : await sql`SELECT id, reset_otp, reset_otp_expires FROM investor_users WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile} AND deleted_at IS NULL LIMIT 1`;
 
     if (investor && investor.reset_otp === rawOtp && new Date() <= new Date(investor.reset_otp_expires)) {
-      const salt = await bcrypt.genSalt(10);
-      const password_hash = await bcrypt.hash(new_password, salt);
-      await sql`
-        UPDATE investor_users
-        SET password_hash = ${password_hash}, reset_otp = NULL, reset_otp_expires = NULL, updated_at = NOW()
-        WHERE id = ${investor.id}`;
-      return ok(res, {}, "Password reset successfully");
+      verified = true;
+      await sql`UPDATE investor_users SET reset_otp = NULL, reset_otp_expires = NULL WHERE id = ${investor.id}`;
     }
 
-    const [otpRow] = await sql`
-      SELECT * FROM otp_log
-      WHERE mobile = ${email} AND otp_code = ${rawOtp}
-        AND purpose = 'ResetPassword' AND is_used = FALSE AND expires_at > NOW()
-      ORDER BY otp_id DESC LIMIT 1`;
-    if (!otpRow) return err(res, "Invalid or expired OTP", 400);
+    // 2. Check otp_log (for regular users)
+    if (!verified) {
+      const [otpRow] = await sql`
+        SELECT * FROM otp_log
+        WHERE (mobile = ${identifier} OR RIGHT(regexp_replace(mobile, '\\D', '', 'g'), 10) = ${cleanMobile || ''})
+          AND otp_code = ${rawOtp}
+          AND purpose = 'ResetPassword' AND is_used = FALSE AND expires_at > NOW()
+        ORDER BY otp_id DESC LIMIT 1`;
+      
+      if (otpRow) {
+        verified = true;
+        userId = otpRow.reference_id;
+        await sql`UPDATE otp_log SET is_used = TRUE WHERE otp_id = ${otpRow.otp_id}`;
+      }
+    }
 
-    const hash = await bcrypt.hash(new_password, 12);
-    await sql`UPDATE users SET password_hash = ${hash}, updated_at = NOW() WHERE user_id = ${otpRow.reference_id}`;
-    await sql`UPDATE otp_log SET is_used = TRUE WHERE otp_id = ${otpRow.otp_id}`;
+    if (!verified) return err(res, "Invalid or expired OTP", 400);
+
+    const salt = await bcrypt.genSalt(10);
+    const password_hash = await bcrypt.hash(new_password, salt);
+
+    // Sync password to BOTH tables to prevent login issues when an email/mobile is registered in both
+    if (userId) {
+      await sql`UPDATE users SET password_hash = ${password_hash}, updated_at = NOW() WHERE user_id = ${userId}`;
+    } else if (isEmail) {
+      await sql`UPDATE users SET password_hash = ${password_hash}, updated_at = NOW() WHERE LOWER(email) = ${identifier}`;
+    } else if (cleanMobile) {
+      await sql`UPDATE users SET password_hash = ${password_hash}, updated_at = NOW() WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}`;
+    }
+
+    if (isEmail) {
+      await sql`UPDATE investor_users SET password_hash = ${password_hash}, updated_at = NOW() WHERE LOWER(email) = ${identifier}`;
+    } else if (cleanMobile) {
+      await sql`UPDATE investor_users SET password_hash = ${password_hash}, updated_at = NOW() WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile}`;
+    }
 
     return ok(res, {}, "Password reset successfully");
   } catch (e) {
