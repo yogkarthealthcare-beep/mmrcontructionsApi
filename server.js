@@ -1732,6 +1732,15 @@ const requireCommissionEngineSchema = (() => {
               CHECK (commission_model IN ('Upline', 'LevelWise', 'EqualDistribution'));
           END $$;
         `);
+        // Remove duplicates if any before adding constraint (keep highest ID)
+        await sql`
+          DELETE FROM commission_engine_levels a
+          USING commission_engine_levels b
+          WHERE a.id < b.id
+            AND a.settings_id = b.settings_id
+            AND a.commission_model = b.commission_model
+            AND a.level_no = b.level_no`.catch(() => null);
+        await sql`ALTER TABLE commission_engine_levels ADD CONSTRAINT uq_commission_engine_levels_unique UNIQUE (settings_id, commission_model, level_no)`.catch(()=>null);
         await sql`INSERT INTO commission_engine_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`;
         await sql`
           INSERT INTO commission_engine_levels (settings_id, commission_model, level_no, percentage)
