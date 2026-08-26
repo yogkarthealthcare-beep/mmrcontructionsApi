@@ -9369,7 +9369,6 @@ app.delete("/api/admin/associates/:id",
         if (!user) throw new Error("Associate not found");
 
         await tx`DELETE FROM associate_sales_tracker WHERE associate_user_id = ${uid}`;
-        await tx`DELETE FROM commission_engine_audit WHERE associate_user_id = ${uid}`;
         await tx`DELETE FROM mlm_network WHERE associate_user_id = ${uid} OR sponsor_user_id = ${uid}`;
         await tx`DELETE FROM mlm_tree_closure WHERE ancestor_user_id = ${uid} OR descendant_user_id = ${uid}`;
         await tx`DELETE FROM referral_registrations WHERE sponsor_user_id = ${uid} OR referred_user_id = ${uid}`;
