@@ -6926,10 +6926,10 @@ app.delete("/api/admin/customers/:id",
     try {
       const uid = req.params.id;
       await sql.begin(async tx => {
-        const [user] = await tx`SELECT email FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'`;
+        const [user] = await tx`SELECT user_id FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'`;
         if (!user) throw new Error("Customer not found");
 
-        await tx`DELETE FROM customer_enrollment_submissions WHERE email = ${user.email}`;
+        await tx`DELETE FROM customer_enrollment_submissions WHERE user_id = ${uid}`;
         await tx`DELETE FROM user_addresses WHERE user_id = ${uid}`;
         await tx`DELETE FROM user_documents WHERE user_id = ${uid}`;
         await tx`DELETE FROM otp_log WHERE reference_id = ${uid}`;
