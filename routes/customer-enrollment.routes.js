@@ -295,7 +295,8 @@ router.get("/customer-enrollment/me", authUser, async (req, res) => {
     }
     return ok(res, rows);
   } catch (e) {
-    return err(res, "Failed to fetch your enrollments.");
+    console.error("GET /api/customer-enrollment/me error:", e);
+    return err(res, "Failed to fetch your enrollments: " + e.message);
   }
 });
 
@@ -330,7 +331,8 @@ router.get("/customer-enrollment", authAdmin, async (req, res) => {
     const rows = await sql`SELECT * FROM customer_enrollment_submissions ORDER BY created_at DESC`;
     return ok(res, rows);
   } catch (e) {
-    return err(res, "Failed to fetch enrollments.");
+    console.error("GET /api/customer-enrollment error:", e);
+    return err(res, "Failed to fetch enrollments: " + e.message);
   }
 });
 
@@ -343,7 +345,8 @@ router.get("/customer-enrollment/:id", authAdmin, async (req, res) => {
     row.nominees = await sql`SELECT * FROM customer_nominees WHERE submission_id = ${id}`;
     return ok(res, row);
   } catch (e) {
-    return err(res, "Failed to fetch enrollment.");
+    console.error("GET /api/customer-enrollment/:id error:", e);
+    return err(res, "Failed to fetch enrollment: " + e.message);
   }
 });
 
@@ -367,7 +370,8 @@ router.patch("/customer-enrollment/:id/office-use", authAdmin, async (req, res) 
     if (!updated) return err(res, "Enrollment not found.", 404);
     return ok(res, updated, "Office use details updated.");
   } catch (e) {
-    return err(res, "Failed to update enrollment.");
+    console.error("PATCH /api/customer-enrollment/:id/office-use error:", e);
+    return err(res, "Failed to update enrollment: " + e.message);
   }
 });
 
