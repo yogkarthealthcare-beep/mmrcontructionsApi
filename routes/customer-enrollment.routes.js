@@ -57,7 +57,11 @@ let schemaReady;
 async function ensureSchema() {
   if (schemaReady) return schemaReady;
   schemaReady = (async () => {
-    await sql`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`;
+    try {
+      await sql`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`;
+    } catch (e) {
+      console.warn("[ensureSchema] pgcrypto extension warning (ignoring):", e.message);
+    }
     await sql`
       CREATE TABLE IF NOT EXISTS customer_enrollment_submissions (
           id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
