@@ -29,6 +29,7 @@ export async function up(knex) {
     table.boolean("terms_accepted").defaultTo(false).notNullable();
     table.timestamp("terms_accepted_at");
     table.string("status", 20).defaultTo("pending").notNullable(); // pending, approved, rejected
+    table.string("print_pdf_path", 255);
     table.timestamps(true, true); // created_at, updated_at
   });
 

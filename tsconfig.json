@@ -12,6 +12,7 @@
   "include": [
     "controllers/associateEnrollmentController.ts",
     "services/associateEnrollmentService.ts",
+    "services/associatePdfService.ts",
     "routes/associateEnrollmentRoutes.ts"
   ]
 }

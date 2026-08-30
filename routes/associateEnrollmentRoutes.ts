@@ -1,7 +1,7 @@
 import express from "express";
 import multer from "multer";
 import { userAuth } from "../middleware/auth.middleware.js";
-import { createAssociateEnrollment } from "../controllers/associateEnrollmentController.js";
+import { createAssociateEnrollment, printAssociateEnrollment } from "../controllers/associateEnrollmentController.js";
 
 const router = express.Router();
 
@@ -23,6 +23,13 @@ router.post(
     { name: "nomineePhoto", maxCount: 1 }
   ]),
   createAssociateEnrollment
+);
+
+// GET /api/associate-enrollment/:id/print
+router.get(
+  "/associate-enrollment/:id/print",
+  userAuth,
+  printAssociateEnrollment
 );
 
 export default router;

@@ -78,3 +78,52 @@ export async function createAssociateEnrollment(req, res) {
         });
     }
 }
+import { generateAssociatePdf } from "../services/associatePdfService.js";
+import sql from "../db.js";
+import fs from "fs";
+import path from "path";
+/**
+ * Controller to handle GET /api/associate-enrollment/:id/print
+ */
+export async function printAssociateEnrollment(req, res) {
+    try {
+        const id = String(req.params.id);
+        // 1. Generate the PDF
+        const pdfBuffer = await generateAssociatePdf(id);
+        // 2. Query associate row to get the ID and sign_date for naming
+        const [associate] = await sql `SELECT id, sign_date FROM associate_enrollment WHERE id = ${id}`;
+        if (!associate) {
+            res.status(404).json({ success: false, message: "Associate not found." });
+            return;
+        }
+        const dateStr = associate.sign_date
+            ? new Date(associate.sign_date).toISOString().split('T')[0]
+            : new Date().toISOString().split('T')[0];
+        const fileName = `MMR-Associate-${associate.id}-${dateStr}.pdf`;
+        // 3. Save to disk inside uploads/associate/enrollments/pdfs/
+        const dirPath = path.join(process.cwd(), "uploads", "associate", "enrollments", "pdfs");
+        if (!fs.existsSync(dirPath)) {
+            fs.mkdirSync(dirPath, { recursive: true });
+        }
+        const filePath = path.join(dirPath, fileName);
+        fs.writeFileSync(filePath, pdfBuffer);
+        // 4. Update the DB table column print_pdf_path
+        const relativePath = `/uploads/associate/enrollments/pdfs/${fileName}`;
+        await sql `
+      UPDATE associate_enrollment 
+      SET print_pdf_path = ${relativePath} 
+      WHERE id = ${id}
+    `;
+        // 5. Send PDF down as attachment
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+        res.end(pdfBuffer);
+    }
+    catch (error) {
+        console.error("[AssociateEnrollmentController Print Error]:", error);
+        res.status(500).json({
+            success: false,
+            message: error.message || "Failed to generate Associate enrollment PDF."
+        });
+    }
+}
