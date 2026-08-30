@@ -192,7 +192,7 @@ const processBase64 = async (dataUrl, filename, userId) => {
 // Accepts public submission or authenticated customer submission. (Using authUser if we assume customer needs to be logged in to access panel)
 router.post("/customer-enrollment", authUser, async (req, res) => {
   try {
-    const user_id = req.user.id; // From JWT
+    const user_id = req.user.user_id || req.user.id; // From JWT
     const b = req.body;
 
     if (!b.applicantName || !b.mobile1) {
@@ -292,7 +292,7 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
 // GET /api/customer-enrollment/me (Get for logged-in user)
 router.get("/customer-enrollment/me", authUser, async (req, res) => {
   try {
-    const user_id = req.user.id;
+    const user_id = req.user.user_id || req.user.id;
     const rows = await sql`SELECT * FROM customer_enrollment_submissions WHERE user_id = ${user_id} ORDER BY created_at DESC`;
     for (let r of rows) {
       r.nominees = await sql`SELECT * FROM customer_nominees WHERE submission_id = ${r.id}`;
