@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "esModuleInterop": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "rootDir": "./"
+  },
+  "include": [
+    "controllers/associateEnrollmentController.ts",
+    "services/associateEnrollmentService.ts",
+    "routes/associateEnrollmentRoutes.ts"
+  ]
+}
