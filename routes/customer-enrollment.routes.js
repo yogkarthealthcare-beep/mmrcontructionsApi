@@ -169,7 +169,7 @@ router.use(async (_req, res, next) => {
     next();
   } catch (error) {
     console.error("[Customer Enrollment Schema Error]", error);
-    return err(res, "Customer enrollment module is unavailable right now.");
+    return err(res, "Customer enrollment module is unavailable right now. Schema Error: " + error.message);
   }
 });
 
@@ -285,7 +285,7 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
     return ok(res, { id: newSubmissionId, applicationNo: appNo }, "Enrollment submitted successfully.");
   } catch (e) {
     console.error("Customer Enrollment Error:", e);
-    return err(res, "Failed to submit enrollment form.");
+    return err(res, "Failed to submit enrollment form. Details: " + e.message);
   }
 });
 
@@ -376,6 +376,35 @@ router.patch("/customer-enrollment/:id/office-use", authAdmin, async (req, res) 
   } catch (e) {
     console.error("PATCH /api/customer-enrollment/:id/office-use error:", e);
     return err(res, "Failed to update enrollment: " + e.message);
+  }
+});
+
+router.get("/customer-enrollment/debug-db", async (req, res) => {
+  try {
+    const tableExists = await sql`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'customer_enrollment_submissions'
+      );
+    `;
+    
+    let columns = [];
+    if (tableExists[0].exists) {
+      columns = await sql`
+        SELECT column_name, data_type, character_maximum_length 
+        FROM information_schema.columns 
+        WHERE table_name = 'customer_enrollment_submissions';
+      `;
+    }
+    
+    return res.json({ 
+      success: true, 
+      tableExists: tableExists[0].exists, 
+      columns 
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message, stack: e.stack });
   }
 });
 
