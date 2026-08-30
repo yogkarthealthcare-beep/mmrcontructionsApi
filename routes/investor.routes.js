@@ -6,6 +6,7 @@ import multer from "multer";
 import sql from "../db.js";
 import { sendEmail } from "../emailService.js";
 import { saveFileToVPS, deleteFileFromStorage } from "../services/fileStorage.service.js";
+import { generateInvestorPdf } from "../services/investorPdfService.js";
 
 const router = express.Router();
 const upload = multer({
@@ -1628,6 +1629,47 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
     return err(res, "Failed to submit enrollment form.");
   }
 });
+
+// GET /api/investor/enroll/my
+router.get("/investor/enroll/my", authInvestor, async (req, res) => {
+  try {
+    const investor_id = req.investor.id;
+    const [row] = await sql`SELECT * FROM investor_enrollments WHERE investor_id = ${investor_id} ORDER BY created_at DESC LIMIT 1`;
+    if (!row) {
+      return ok(res, null, "No enrollment found.");
+    }
+    return ok(res, row);
+  } catch (e) {
+    console.error("GET /api/investor/enroll/my error:", e);
+    return err(res, "Failed to fetch your enrollment.");
+  }
+});
+
+// GET /api/investor/enrollment/:id/print
+router.get("/investor/enrollment/:id/print", async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const pdfBuffer = await generateInvestorPdf(id);
+
+    const [enrollment] = await sql`SELECT investor_enrollment_id, form_date FROM investor_enrollments WHERE id = ${id}`;
+    if (!enrollment) {
+      return err(res, "Enrollment not found.", 404);
+    }
+
+    const dateStr = enrollment.form_date 
+      ? new Date(enrollment.form_date).toISOString().split('T')[0] 
+      : new Date().toISOString().split('T')[0];
+    const fileName = `MMR-Investor-${enrollment.investor_enrollment_id}-${dateStr}.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.end(pdfBuffer);
+  } catch (error) {
+    console.error("GET /api/investor/enrollment/:id/print error:", error);
+    return err(res, error.message || "Failed to generate PDF.");
+  }
+});
+
 // GET /api/admin/investor-enrollment (Admin - List)
 router.get("/admin/investor-enrollment", authAdmin, async (req, res) => {
   try {

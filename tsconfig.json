@@ -13,6 +13,7 @@
     "controllers/associateEnrollmentController.ts",
     "services/associateEnrollmentService.ts",
     "services/associatePdfService.ts",
+    "services/investorPdfService.ts",
     "routes/associateEnrollmentRoutes.ts"
   ]
 }
