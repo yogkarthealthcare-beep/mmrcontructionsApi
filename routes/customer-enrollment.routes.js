@@ -2,6 +2,7 @@ import express from "express";
 import sql from "../db.js";
 import { saveFileToVPS } from "../services/fileStorage.service.js";
 import jwt from "jsonwebtoken";
+import { generateCustomerPdf } from "../services/customerPdfService.js";
 
 const router = express.Router();
 
@@ -197,6 +198,29 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
       return err(res, "Terms and conditions must be accepted.");
     }
 
+    // Helper functions for safe type parsing
+    const parseDate = (val) => {
+      if (!val || val === "null" || val === "undefined" || String(val).trim() === "") return null;
+      const d = new Date(val);
+      return isNaN(d.getTime()) ? null : val;
+    };
+
+    const parseNum = (val) => {
+      if (val === undefined || val === null || String(val).trim() === "") return null;
+      const n = Number(String(val).replace(/,/g, ''));
+      return isNaN(n) ? null : n;
+    };
+
+    const rateVal = parseNum(b.rate);
+    const bookingAmountVal = parseNum(b.bookingAmount);
+    const ageVal = b.age ? Number(b.age) || null : null;
+    const coAgeVal = b.coAge ? Number(b.coAge) || null : null;
+
+    const formDateVal = parseDate(b.formDate);
+    const dobVal = parseDate(b.dob);
+    const coDobVal = parseDate(b.coDob);
+    const txnDateVal = parseDate(b.txnDate);
+
     // Process files
     const photoFirstUrl = await processBase64(b.photoFirstApplicant, `photo1_${Date.now()}.png`, user_id);
     const photoCoUrl = await processBase64(b.photoCoApplicant, `photo2_${Date.now()}.png`, user_id);
@@ -228,11 +252,11 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
           associate_name, associate_id, associate_mobile, associate_signature_name,
           declaration_accepted, signature_sole_first_applicant_url, signature_co_applicant_url, signature_authorized_signatory_url, terms_accepted, terms_accepted_at
         ) VALUES (
-          ${user_id}, ${b.formDate || null}, ${b.applicationNo || appNo}, ${b.projectName || null}, ${b.propertyType || null}, ${b.propertyTypeOther || null}, ${b.plotFlatNo || null}, ${b.blockTower || null}, ${b.sizeArea || null}, ${b.rate || null}, ${bsp}, ${plc}, ${totalVal},
-          ${b.applicantName}, ${b.fhName || null}, ${b.dob || null}, ${b.age || null}, ${b.gender || null}, ${b.maritalStatus || null}, ${b.nationality || null}, ${b.nationalityOther || null}, ${b.pan || null}, ${b.aadhar || null}, ${b.occupation || null},
+          ${user_id}, ${formDateVal}, ${b.applicationNo || appNo}, ${b.projectName || null}, ${b.propertyType || null}, ${b.propertyTypeOther || null}, ${b.plotFlatNo || null}, ${b.blockTower || null}, ${b.sizeArea || null}, ${rateVal}, ${bsp}, ${plc}, ${totalVal},
+          ${b.applicantName}, ${b.fhName || null}, ${dobVal}, ${ageVal}, ${b.gender || null}, ${b.maritalStatus || null}, ${b.nationality || null}, ${b.nationalityOther || null}, ${b.pan || null}, ${b.aadhar || null}, ${b.occupation || null},
           ${b.presentAddress || null}, ${b.presentCity || null}, ${b.presentStatePin || null}, ${b.permanentAddress || null}, ${b.permanentCity || null}, ${b.permanentStatePin || null}, ${b.mobile1}, ${b.mobile2 || null}, ${b.email1 || null}, ${photoFirstUrl},
-          ${b.coApplicantName || null}, ${b.coFhName || null}, ${b.coRelation || null}, ${b.coDob || null}, ${b.coAge || null}, ${b.coGender || null}, ${b.coPan || null}, ${b.coAadhar || null}, ${b.coPresentAddress || null}, ${b.coMobile || null}, ${b.coEmail || null}, ${photoCoUrl},
-          ${b.bookingAmount || null}, ${b.bookingAmountWords || null}, ${b.paymentMode || null}, ${b.txnNo || null}, ${b.txnDate || null}, ${b.drawnBankBranch || null},
+          ${b.coApplicantName || null}, ${b.coFhName || null}, ${b.coRelation || null}, ${coDobVal}, ${coAgeVal}, ${b.coGender || null}, ${b.coPan || null}, ${b.coAadhar || null}, ${b.coPresentAddress || null}, ${b.coMobile || null}, ${b.coEmail || null}, ${photoCoUrl},
+          ${bookingAmountVal}, ${b.bookingAmountWords || null}, ${b.paymentMode || null}, ${b.txnNo || null}, ${txnDateVal}, ${b.drawnBankBranch || null},
           ${b.accHolderName || null}, ${b.accBankBranch || null}, ${b.accNumber || null}, ${b.ifscCode || null},
           ${b.associateName || null}, ${b.associateId || null}, ${b.associateMobile || null}, ${b.associateSignatureName || null},
           ${b.declarationAccepted || false}, ${sigSoleUrl}, ${sigCoUrl}, ${sigAuthUrl}, ${true}, NOW()
@@ -272,6 +296,31 @@ router.get("/customer-enrollment/me", authUser, async (req, res) => {
     return ok(res, rows);
   } catch (e) {
     return err(res, "Failed to fetch your enrollments.");
+  }
+});
+
+// GET /api/customer-enrollment/:id/print
+router.get("/customer-enrollment/:id/print", async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const pdfBuffer = await generateCustomerPdf(id);
+
+    const [submission] = await sql`SELECT application_no, form_date FROM customer_enrollment_submissions WHERE id = ${id}`;
+    if (!submission) {
+      return err(res, "Submission not found.", 404);
+    }
+
+    const dateStr = submission.form_date 
+      ? new Date(submission.form_date).toISOString().split('T')[0] 
+      : new Date().toISOString().split('T')[0];
+    const fileName = `MMR-Customer-${submission.application_no}-${dateStr}.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.end(pdfBuffer);
+  } catch (error) {
+    console.error("GET /api/customer-enrollment/:id/print error:", error);
+    return err(res, error.message || "Failed to generate PDF.");
   }
 });
 
