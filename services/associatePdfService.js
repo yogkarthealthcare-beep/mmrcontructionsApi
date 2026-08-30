@@ -2,6 +2,7 @@ import PDFDocument from "pdfkit";
 import fs from "fs";
 import path from "path";
 import sql from "../db.js";
+import { getStorageRoot } from "./fileStorage.service.js";
 // Helper to draw MMR header on each page
 function drawHeader(doc, associateId, signDate) {
     const brandColor = "#14532d";
@@ -65,13 +66,18 @@ function drawPhotoBox(doc, label, x, y, photoPath) {
     let loaded = false;
     if (photoPath) {
         try {
-            // Resolve path on VPS local filesystem
-            // Extract filename from URL/relative path
-            const baseName = path.basename(photoPath);
-            const relativePath = path.join(process.cwd(), "uploads", "associate", "enrollments", baseName);
-            if (fs.existsSync(relativePath)) {
-                doc.image(relativePath, x + 2, y + 2, { width: boxWidth - 4, height: boxHeight - 4 });
-                loaded = true;
+            const rootDir = getStorageRoot();
+            const match = photoPath.match(/\/uploads\/(.+)$/);
+            if (match) {
+                const relPath = match[1];
+                const targetFilePath = path.resolve(rootDir, relPath);
+                if (fs.existsSync(targetFilePath)) {
+                    doc.image(targetFilePath, x + 2, y + 2, { width: boxWidth - 4, height: boxHeight - 4 });
+                    loaded = true;
+                }
+                else {
+                    console.warn(`[drawPhotoBox] File does not exist on disk: ${targetFilePath}`);
+                }
             }
         }
         catch (e) {
