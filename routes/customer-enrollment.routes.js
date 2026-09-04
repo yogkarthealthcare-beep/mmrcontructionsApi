@@ -156,6 +156,14 @@ async function ensureSchema() {
     await sql`CREATE INDEX IF NOT EXISTS idx_ces_application_no ON customer_enrollment_submissions(application_no)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_ces_status ON customer_enrollment_submissions(application_status)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_ces_user ON customer_enrollment_submissions(user_id)`;
+
+    try {
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS enrollment_status VARCHAR(20) DEFAULT 'Pending'`;
+      await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS enrollment_status VARCHAR(20) DEFAULT 'Pending'`;
+      await sql`ALTER TABLE associate_enrollment ADD COLUMN IF NOT EXISTS user_id INTEGER`;
+    } catch (colErr) {
+      console.warn("[ensureSchema column warning]", colErr.message);
+    }
   })().catch((error) => {
     schemaReady = null;
     throw error;
@@ -189,7 +197,7 @@ const processBase64 = async (dataUrl, filename, userId) => {
 };
 
 // POST /api/customer-enrollment
-// Accepts public submission or authenticated customer submission. (Using authUser if we assume customer needs to be logged in to access panel)
+// Accepts authenticated customer submission
 router.post("/customer-enrollment", authUser, async (req, res) => {
   try {
     const user_id = req.user.user_id || req.user.id; // From JWT
@@ -280,6 +288,11 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
           }
         }
       }
+
+      // Update user's enrollment_status to Completed
+      if (user_id) {
+        await tx`UPDATE users SET enrollment_status = 'Completed' WHERE user_id = ${user_id}`;
+      }
     });
 
     return ok(res, { id: newSubmissionId, applicationNo: appNo }, "Enrollment submitted successfully.");
@@ -329,7 +342,77 @@ router.get("/customer-enrollment/:id/print", async (req, res) => {
   }
 });
 
-// GET /api/customer-enrollment (Admin - List)
+// GET /api/admin/customer-enrollments (Admin - List all customers with enrollment status & search)
+router.get("/admin/customer-enrollments", authAdmin, async (req, res) => {
+  try {
+    const search = String(req.query.search || "").trim();
+    let rows;
+    if (search) {
+      const s = `%${search}%`;
+      rows = await sql`
+        SELECT 
+          u.user_id,
+          u.full_name,
+          u.email,
+          u.mobile_no,
+          u.member_id,
+          u.user_type,
+          u.registered_at,
+          sp.member_id as sponsor_id,
+          sp.full_name as sponsor_name,
+          ces.id as submission_id,
+          ces.application_no,
+          ces.application_status,
+          ces.project_name,
+          ces.submitted_at,
+          CASE WHEN ces.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END as enrollment_status
+        FROM users u
+        LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
+        LEFT JOIN customer_enrollment_submissions ces ON u.user_id = ces.user_id
+        WHERE u.user_type = 'Customer'
+          AND (
+            u.full_name ILIKE ${s}
+            OR u.mobile_no ILIKE ${s}
+            OR u.email ILIKE ${s}
+            OR u.member_id ILIKE ${s}
+            OR sp.member_id ILIKE ${s}
+            OR ces.application_no ILIKE ${s}
+          )
+        ORDER BY u.registered_at DESC
+      `;
+    } else {
+      rows = await sql`
+        SELECT 
+          u.user_id,
+          u.full_name,
+          u.email,
+          u.mobile_no,
+          u.member_id,
+          u.user_type,
+          u.registered_at,
+          sp.member_id as sponsor_id,
+          sp.full_name as sponsor_name,
+          ces.id as submission_id,
+          ces.application_no,
+          ces.application_status,
+          ces.project_name,
+          ces.submitted_at,
+          CASE WHEN ces.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END as enrollment_status
+        FROM users u
+        LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
+        LEFT JOIN customer_enrollment_submissions ces ON u.user_id = ces.user_id
+        WHERE u.user_type = 'Customer'
+        ORDER BY u.registered_at DESC
+      `;
+    }
+    return ok(res, rows);
+  } catch (e) {
+    console.error("GET /api/admin/customer-enrollments error:", e);
+    return err(res, "Failed to fetch customer enrollments: " + e.message);
+  }
+});
+
+// GET /api/customer-enrollment (Admin - List submissions)
 router.get("/customer-enrollment", authAdmin, async (req, res) => {
   try {
     const rows = await sql`SELECT * FROM customer_enrollment_submissions ORDER BY created_at DESC`;
@@ -344,15 +427,192 @@ router.get("/customer-enrollment", authAdmin, async (req, res) => {
 router.get("/customer-enrollment/:id", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const [row] = await sql`SELECT * FROM customer_enrollment_submissions WHERE id = ${id}`;
-    if (!row) return err(res, "Enrollment not found.", 404);
-    row.nominees = await sql`SELECT * FROM customer_nominees WHERE submission_id = ${id}`;
+    // Check if id is UUID (submission id) or numeric (user_id)
+    let row;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      const [resRow] = await sql`SELECT * FROM customer_enrollment_submissions WHERE id = ${id}`;
+      row = resRow;
+    } else {
+      const [resRow] = await sql`SELECT * FROM customer_enrollment_submissions WHERE user_id = ${Number(id)} ORDER BY created_at DESC LIMIT 1`;
+      row = resRow;
+    }
+
+    if (!row) {
+      // If no submission exists yet, return user profile info so Admin can view/create
+      const [user] = await sql`
+        SELECT u.user_id, u.full_name, u.email, u.mobile_no, u.member_id, u.date_of_birth, u.gender, u.father_name, u.mother_name, u.pan_number, u.aadhar_number,
+               sp.member_id as sponsor_id, sp.full_name as sponsor_name
+        FROM users u
+        LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
+        WHERE u.user_id = ${Number(id) || 0}
+      `;
+      if (user) {
+        return ok(res, {
+          user_id: user.user_id,
+          applicant_name: user.full_name,
+          mobile_1: user.mobile_no,
+          email_1: user.email,
+          pan_no: user.pan_number,
+          aadhar_no: user.aadhar_number,
+          date_of_birth: user.date_of_birth,
+          gender: user.gender,
+          fh_name: user.father_name,
+          associate_id: user.sponsor_id,
+          associate_name: user.sponsor_name,
+          nominees: [],
+          is_new: true
+        });
+      }
+      return err(res, "Enrollment not found.", 404);
+    }
+
+    row.nominees = await sql`SELECT * FROM customer_nominees WHERE submission_id = ${row.id}`;
     return ok(res, row);
   } catch (e) {
     console.error("GET /api/customer-enrollment/:id error:", e);
     return err(res, "Failed to fetch enrollment: " + e.message);
   }
 });
+
+// PUT /api/customer-enrollment/:id and /api/admin/customer-enrollments/:id (Admin - Full Update)
+const handleAdminCustomerUpdate = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const b = req.body;
+
+    const parseDate = (val) => {
+      if (!val || val === "null" || val === "undefined" || String(val).trim() === "") return null;
+      const d = new Date(val);
+      return isNaN(d.getTime()) ? null : val;
+    };
+
+    const parseNum = (val) => {
+      if (val === undefined || val === null || String(val).trim() === "") return null;
+      const n = Number(String(val).replace(/,/g, ''));
+      return isNaN(n) ? null : n;
+    };
+
+    const rateVal = parseNum(b.rate || b.rate_per_unit);
+    const bsp = parseNum(b.bsp || b.basic_sale_price) || 0;
+    const plc = parseNum(b.plcDev || b.plc_dev_charges) || 0;
+    const totalVal = bsp + plc;
+    const bookingAmountVal = parseNum(b.bookingAmount || b.booking_amount);
+    const ageVal = b.age ? Number(b.age) || null : null;
+    const coAgeVal = b.coAge || b.co_age ? Number(b.coAge || b.co_age) || null : null;
+
+    let targetSubmissionId = id;
+
+    // Check if target is UUID or user_id
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+    let existing;
+    if (isUuid) {
+      const [resRow] = await sql`SELECT * FROM customer_enrollment_submissions WHERE id = ${id}`;
+      existing = resRow;
+    } else {
+      const [resRow] = await sql`SELECT * FROM customer_enrollment_submissions WHERE user_id = ${Number(id)} ORDER BY created_at DESC LIMIT 1`;
+      existing = resRow;
+    }
+
+    if (existing) {
+      targetSubmissionId = existing.id;
+      const [updated] = await sql`
+        UPDATE customer_enrollment_submissions
+        SET
+          form_date = COALESCE(${parseDate(b.formDate || b.form_date)}, form_date),
+          project_name = COALESCE(${b.projectName || b.project_name || null}, project_name),
+          property_type = COALESCE(${b.propertyType || b.property_type || null}, property_type),
+          property_type_other = ${b.propertyTypeOther ?? b.property_type_other ?? null},
+          plot_flat_no = ${b.plotFlatNo ?? b.plot_flat_no ?? null},
+          block_tower = ${b.blockTower ?? b.block_tower ?? null},
+          size_area = ${b.sizeArea ?? b.size_area ?? null},
+          rate_per_unit = COALESCE(${rateVal}, rate_per_unit),
+          basic_sale_price = COALESCE(${bsp}, basic_sale_price),
+          plc_dev_charges = COALESCE(${plc}, plc_dev_charges),
+          total_property_value = COALESCE(${totalVal}, total_property_value),
+          applicant_name = COALESCE(${b.applicantName || b.applicant_name || null}, applicant_name),
+          fh_name = ${b.fhName ?? b.fh_name ?? null},
+          date_of_birth = COALESCE(${parseDate(b.dob || b.date_of_birth)}, date_of_birth),
+          age = COALESCE(${ageVal}, age),
+          gender = ${b.gender ?? null},
+          marital_status = ${b.maritalStatus ?? b.marital_status ?? null},
+          nationality = COALESCE(${b.nationality || null}, nationality),
+          nationality_other = ${b.nationalityOther ?? b.nationality_other ?? null},
+          pan_no = ${b.pan ?? b.pan_no ?? null},
+          aadhar_no = ${b.aadhar ?? b.aadhar_no ?? null},
+          occupation = ${b.occupation ?? null},
+          present_address = ${b.presentAddress ?? b.present_address ?? null},
+          present_city = ${b.presentCity ?? b.present_city ?? null},
+          present_state_pin = ${b.presentStatePin ?? b.present_state_pin ?? null},
+          permanent_address = ${b.permanentAddress ?? b.permanent_address ?? null},
+          permanent_city = ${b.permanentCity ?? b.permanent_city ?? null},
+          permanent_state_pin = ${b.permanentStatePin ?? b.permanent_state_pin ?? null},
+          mobile_1 = COALESCE(${b.mobile1 || b.mobile_1 || null}, mobile_1),
+          mobile_2 = ${b.mobile2 ?? b.mobile_2 ?? null},
+          email_1 = ${b.email1 ?? b.email_1 ?? null},
+          co_applicant_name = ${b.coApplicantName ?? b.co_applicant_name ?? null},
+          co_fh_name = ${b.coFhName ?? b.co_fh_name ?? null},
+          co_relation = ${b.coRelation ?? b.co_relation ?? null},
+          co_date_of_birth = ${parseDate(b.coDob || b.co_date_of_birth)},
+          co_age = ${coAgeVal},
+          co_gender = ${b.coGender ?? b.co_gender ?? null},
+          co_pan_no = ${b.coPan ?? b.co_pan_no ?? null},
+          co_aadhar_no = ${b.coAadhar ?? b.co_aadhar_no ?? null},
+          co_present_address = ${b.coPresentAddress ?? b.co_present_address ?? null},
+          co_mobile = ${b.coMobile ?? b.co_mobile ?? null},
+          co_email = ${b.coEmail ?? b.co_email ?? null},
+          booking_amount = COALESCE(${bookingAmountVal}, booking_amount),
+          booking_amount_words = ${b.bookingAmountWords ?? b.booking_amount_words ?? null},
+          payment_mode = ${b.paymentMode ?? b.payment_mode ?? null},
+          txn_cheque_no = ${b.txnNo ?? b.txn_cheque_no ?? null},
+          txn_date = ${parseDate(b.txnDate || b.txn_date)},
+          drawn_bank_branch = ${b.drawnBankBranch ?? b.drawn_bank_branch ?? null},
+          acc_holder_name = ${b.accHolderName ?? b.acc_holder_name ?? null},
+          acc_bank_branch = ${b.accBankBranch ?? b.acc_bank_branch ?? null},
+          acc_number = ${b.accNumber ?? b.acc_number ?? null},
+          ifsc_code = ${b.ifscCode ?? b.ifsc_code ?? null},
+          associate_name = ${b.associateName ?? b.associate_name ?? null},
+          associate_id = ${b.associateId ?? b.associate_id ?? null},
+          associate_mobile = ${b.associateMobile ?? b.associate_mobile ?? null},
+          associate_signature_name = ${b.associateSignatureName ?? b.associate_signature_name ?? null},
+          application_status = COALESCE(${b.applicationStatus || b.application_status || null}, application_status),
+          verified_by = ${b.verifiedBy ?? b.verified_by ?? null},
+          payment_status = ${b.paymentStatus ?? b.payment_status ?? null},
+          payment_status_date = ${parseDate(b.paymentStatusDate || b.payment_status_date)},
+          updated_at = NOW()
+        WHERE id = ${targetSubmissionId}
+        RETURNING *
+      `;
+
+      // Update nominees if provided
+      if (b.nominees && Array.isArray(b.nominees)) {
+        await sql`DELETE FROM customer_nominees WHERE submission_id = ${targetSubmissionId}`;
+        for (const nom of b.nominees) {
+          if (nom.nomineeName || nom.nominee_name) {
+            await sql`
+              INSERT INTO customer_nominees (submission_id, nominee_name, relation, age_dob, aadhar_no)
+              VALUES (${targetSubmissionId}, ${nom.nomineeName || nom.nominee_name}, ${nom.nomineeRelation || nom.relation || null}, ${nom.nomineeAgeDob || nom.age_dob || null}, ${nom.nomineeAadhar || nom.aadhar_no || null})
+            `;
+          }
+        }
+      }
+
+      // Also ensure user's enrollment_status is Completed
+      if (existing.user_id) {
+        await sql`UPDATE users SET enrollment_status = 'Completed' WHERE user_id = ${existing.user_id}`;
+      }
+
+      return ok(res, updated, "Customer enrollment updated successfully.");
+    } else {
+      return err(res, "Customer enrollment submission not found.", 404);
+    }
+  } catch (e) {
+    console.error("PUT /api/customer-enrollment/:id error:", e);
+    return err(res, "Failed to update customer enrollment: " + e.message);
+  }
+};
+
+router.put("/customer-enrollment/:id", authAdmin, handleAdminCustomerUpdate);
+router.put("/admin/customer-enrollments/:id", authAdmin, handleAdminCustomerUpdate);
 
 // PATCH /api/customer-enrollment/:id/office-use (Admin - Update)
 router.patch("/customer-enrollment/:id/office-use", authAdmin, async (req, res) => {

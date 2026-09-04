@@ -1642,6 +1642,11 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
       ) RETURNING id
     `;
 
+    // Mark enrollment_status as Completed in investor_users
+    try {
+      await sql`UPDATE investor_users SET enrollment_status = 'Completed' WHERE id = ${investor_id}`;
+    } catch (e) {}
+
     return ok(res, newRow[0], "Investor enrollment submitted successfully.");
   } catch (e) {
     console.error("Investor Enrollment Error:", e);
@@ -1689,18 +1694,70 @@ router.get("/investor/enrollment/:id/print", async (req, res) => {
   }
 });
 
-// GET /api/admin/investor-enrollment (Admin - List)
-router.get("/admin/investor-enrollment", authAdmin, async (req, res) => {
+// GET /api/admin/investor-enrollment and /api/admin/investor-enrollments (Admin - List all with search)
+router.get(["/admin/investor-enrollment", "/admin/investor-enrollments"], authAdmin, async (req, res) => {
   try {
-    const rows = await sql`
-      SELECT e.*, u.full_name as investor_name, u.email as investor_email, u.mobile_number, u.status as account_status, u.is_verified
-      FROM investor_enrollments e
-      LEFT JOIN investor_users u ON e.investor_id = u.id
-      ORDER BY e.created_at DESC
-    `;
+    const search = String(req.query.search || "").trim();
+    let rows;
+    if (search) {
+      const s = `%${search}%`;
+      rows = await sql`
+        SELECT 
+          u.id as investor_id,
+          u.id as user_id,
+          u.full_name,
+          u.email,
+          u.mobile_number as mobile_no,
+          'Investor' as user_type,
+          u.created_at as registered_at,
+          u.status as account_status,
+          e.id as submission_id,
+          e.investor_enrollment_id,
+          e.form_no,
+          e.project_name,
+          e.app_status,
+          e.created_at as submitted_at,
+          CASE WHEN e.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END as enrollment_status
+        FROM investor_users u
+        LEFT JOIN investor_enrollments e ON u.id = e.investor_id
+        WHERE u.deleted_at IS NULL
+          AND (
+            u.full_name ILIKE ${s}
+            OR u.mobile_number ILIKE ${s}
+            OR u.email ILIKE ${s}
+            OR e.investor_enrollment_id ILIKE ${s}
+            OR e.form_no ILIKE ${s}
+          )
+        ORDER BY u.created_at DESC
+      `;
+    } else {
+      rows = await sql`
+        SELECT 
+          u.id as investor_id,
+          u.id as user_id,
+          u.full_name,
+          u.email,
+          u.mobile_number as mobile_no,
+          'Investor' as user_type,
+          u.created_at as registered_at,
+          u.status as account_status,
+          e.id as submission_id,
+          e.investor_enrollment_id,
+          e.form_no,
+          e.project_name,
+          e.app_status,
+          e.created_at as submitted_at,
+          CASE WHEN e.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END as enrollment_status
+        FROM investor_users u
+        LEFT JOIN investor_enrollments e ON u.id = e.investor_id
+        WHERE u.deleted_at IS NULL
+        ORDER BY u.created_at DESC
+      `;
+    }
     return ok(res, rows);
   } catch (e) {
-    return err(res, "Failed to fetch investor enrollments.");
+    console.error("GET /api/admin/investor-enrollment error:", e);
+    return err(res, "Failed to fetch investor enrollments: " + e.message);
   }
 });
 
@@ -1708,8 +1765,36 @@ router.get("/admin/investor-enrollment", authAdmin, async (req, res) => {
 router.get("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const [row] = await sql`SELECT * FROM investor_enrollments WHERE id = ${id}`;
-    if (!row) return err(res, "Enrollment not found.", 404);
+    let row;
+    if (String(id).includes("-") || isNaN(Number(id))) {
+      const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE id = ${id}`;
+      row = resRow;
+    } else {
+      const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE id = ${id} OR investor_id = ${Number(id)} ORDER BY created_at DESC LIMIT 1`;
+      row = resRow;
+    }
+
+    if (!row) {
+      // Check if user exists in investor_users
+      const [invUser] = await sql`SELECT * FROM investor_users WHERE id = ${Number(id) || 0} AND deleted_at IS NULL`;
+      if (invUser) {
+        return ok(res, {
+          investor_id: invUser.id,
+          inv_first_name: invUser.full_name,
+          email: invUser.email,
+          mobile: invUser.mobile_number,
+          pan: invUser.pan_number,
+          aadhar: invUser.aadhaar_number,
+          address: invUser.address,
+          city: invUser.city,
+          state: invUser.state,
+          pin_code: invUser.pincode,
+          nominees: invUser.nominee_name ? [{ name: invUser.nominee_name, relationship: '', age: '', proportion: 100 }] : [],
+          is_new: true
+        });
+      }
+      return err(res, "Enrollment not found.", 404);
+    }
     return ok(res, row);
   } catch (e) {
     return err(res, "Failed to fetch enrollment.");

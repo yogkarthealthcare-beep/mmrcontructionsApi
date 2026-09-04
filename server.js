@@ -4157,11 +4157,23 @@ app.post("/api/auth/register-quick", async (req, res) => {
 
     let sponsorUserId = null;
     if (sponsor_invite_code && user_type !== "Investor") {
-      const [sponsor] = await sql`
-        SELECT user_id FROM users WHERE invitation_code = ${sponsor_invite_code}
-          AND account_status = 'Active'`;
-      if (!sponsor) return err(res, "Invalid sponsor invitation code", 400);
-      sponsorUserId = sponsor.user_id;
+      const cleanSponsor = String(sponsor_invite_code).trim().toUpperCase();
+      let [sponsor] = await sql`
+        SELECT user_id FROM users 
+        WHERE (
+          UPPER(COALESCE(invitation_code, '')) = ${cleanSponsor}
+          OR UPPER(COALESCE(member_id, '')) = ${cleanSponsor}
+          OR UPPER(regexp_replace(COALESCE(member_id, ''), '^MMR-[AC]-', 'MMR')) = ${cleanSponsor}
+        )
+        AND account_status = 'Active'
+        LIMIT 1`;
+      if (!sponsor && (cleanSponsor === 'MMR3001' || cleanSponsor === 'MMR00001' || cleanSponsor === 'MMR0001')) {
+        sponsorUserId = await getDefaultSponsorUserId();
+      } else if (sponsor) {
+        sponsorUserId = sponsor.user_id;
+      } else {
+        return err(res, "Invalid sponsor invitation code", 400);
+      }
     }
     if (!sponsorUserId && user_type !== "Investor") {
       sponsorUserId = await getDefaultSponsorUserId();
@@ -5084,6 +5096,7 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
              u.mobile_no, u.alternate_mobile, u.email,
              u.pan_number, u.aadhar_number, u.account_status,
              u.email_verified, u.is_otp_verified,
+             COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
              COALESCE(k.status, 'Not Submitted') AS kyc_status,
              k.admin_remarks AS kyc_remarks,
              u.invitation_code, u.registered_at,

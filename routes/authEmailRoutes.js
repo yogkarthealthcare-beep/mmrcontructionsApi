@@ -224,6 +224,34 @@ async function findSponsorByCode(code) {
     }
   }
 
+  // Fallback for default sponsor MMR3001 (Suraj Kumar Verma)
+  if (!sponsor && (sponsorCode === 'MMR3001' || sponsorCode === 'MMR-A-3001' || sponsorCode === 'MMR-C-3001' || sponsorCode === 'MMR00001' || sponsorCode === 'MMR0001')) {
+    const [suraj] = await sql`
+      SELECT user_id, full_name, member_id, invitation_code
+      FROM users
+      WHERE full_name ILIKE '%Suraj%'
+         OR LOWER(email) = 'mmrconstructions@hotmail.com'
+         OR user_id = 1
+      ORDER BY user_id ASC
+      LIMIT 1`;
+    
+    if (suraj) {
+      sponsor = {
+        user_id: suraj.user_id,
+        full_name: suraj.full_name || 'Suraj Kumar Verma',
+        member_id: 'MMR3001',
+        invitation_code: 'MMR3001'
+      };
+    } else {
+      sponsor = {
+        user_id: 1,
+        full_name: 'Suraj Kumar Verma',
+        member_id: 'MMR3001',
+        invitation_code: 'MMR3001'
+      };
+    }
+  }
+
   return sponsor || null;
 }
 
@@ -334,7 +362,7 @@ async function validateSignupInput(body) {
   const userType = body.user_type || 'Customer';
   const email = normalizeEmail(body.email);
   const mobileNo = normalizeMobileNo(body.mobile_no);
-  const DEFAULT_SPONSOR_CODE = 'MMR0001';
+  const DEFAULT_SPONSOR_CODE = 'MMR3001';
   const effectiveSponsorCode = normalizeSponsorCode(body.sponsor_invite_code) || DEFAULT_SPONSOR_CODE;
   const fullName = body.full_name?.trim();
   const validationErrors = [];

@@ -213,6 +213,53 @@ router.post('/auth/register', async (req, res) => {
   }
 });
 
+async function resolveEnrollmentStatus(u, userType) {
+  try {
+    const raw = String(u.enrollment_status || '').toLowerCase();
+    if (raw === 'completed') return 'completed';
+
+    if (userType === 'Customer') {
+      const [sub] = await sql`
+        SELECT id FROM customer_enrollment_submissions 
+        WHERE user_id = ${u.user_id} 
+           OR (mobile_1 IS NOT NULL AND mobile_1 = ${u.mobile_no})
+        LIMIT 1
+      `;
+      if (sub) {
+        try { await sql`UPDATE users SET enrollment_status = 'Completed' WHERE user_id = ${u.user_id}`; } catch {}
+        return 'completed';
+      }
+    } else if (userType === 'Associate') {
+      const [sub] = await sql`
+        SELECT id FROM associate_enrollment 
+        WHERE user_id = ${u.user_id} 
+           OR (contact_no_1 IS NOT NULL AND contact_no_1 = ${u.mobile_no})
+        LIMIT 1
+      `;
+      if (sub) {
+        try { await sql`UPDATE users SET enrollment_status = 'Completed' WHERE user_id = ${u.user_id}`; } catch {}
+        return 'completed';
+      }
+    } else if (userType === 'Investor') {
+      const invId = u.id || u.user_id;
+      const [sub] = await sql`
+        SELECT id FROM investor_enrollments 
+        WHERE investor_id = ${invId} 
+           OR (mobile IS NOT NULL AND mobile = ${u.mobile_number || u.mobile_no})
+        LIMIT 1
+      `;
+      if (sub) {
+        try { await sql`UPDATE investor_users SET enrollment_status = 'Completed' WHERE id = ${invId}`; } catch {}
+        return 'completed';
+      }
+    }
+    return 'pending';
+  } catch (e) {
+    console.error('[resolveEnrollmentStatus Error]', e);
+    return 'pending';
+  }
+}
+
 // ─────────────────────────────────────────────────────────────
 //  5. LOGIN (only verified users)
 //  POST /api/auth/login
@@ -258,6 +305,8 @@ router.post('/auth/login', async (req, res) => {
         if (!valid)
           return res.status(401).json({ success: false, message: "Email ya password galat hai" });
 
+        const investorEnrollmentStatus = await resolveEnrollmentStatus(investor, "Investor");
+
         const payload = {
           id: investor.id,
           user_id: investor.id,
@@ -286,7 +335,8 @@ router.post('/auth/login', async (req, res) => {
               email: investor.email,
               mobile_no: investor.mobile_number,
               account_status: investor.status,
-              email_verified: Boolean(investor.is_verified)
+              email_verified: Boolean(investor.is_verified),
+              enrollment_status: investorEnrollmentStatus
             }
           }
         });
@@ -304,6 +354,8 @@ router.post('/auth/login', async (req, res) => {
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid)
       return res.status(401).json({ success: false, message: 'Email ya password galat hai' });
+
+    const userEnrollmentStatus = await resolveEnrollmentStatus(user, user.user_type);
 
     const payload = {
       user_id: user.user_id,
@@ -334,6 +386,7 @@ router.post('/auth/login', async (req, res) => {
           member_id: user.member_id,
           invitation_code: user.invitation_code,
           account_status: user.account_status,
+          enrollment_status: userEnrollmentStatus
         },
       },
     });
