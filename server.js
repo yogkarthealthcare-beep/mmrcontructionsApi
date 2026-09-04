@@ -2692,52 +2692,131 @@ app.get("/api/investors", async (_req, res) => {
   } catch (e) { return err(res, "Failed to load investors"); }
 });
 
-app.get("/api/admin/investors", verifyAdminToken, role("SuperAdmin", "SiteManager"), async (_req, res) => {
-  try { await ensureHomeExperienceSchema(); return ok(res, await sql`SELECT i.*, COALESCE(iu.full_name, i.name) AS name, iu.email, iu.mobile_number FROM investors i LEFT JOIN investor_users iu ON i.user_id = iu.id WHERE i.is_deleted = FALSE ORDER BY i.display_order, i.created_at`); }
-  catch (e) { return err(res, e.message); }
+app.get("/api/admin/investors", verifyAdminToken, role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"), async (_req, res) => {
+  try {
+    await ensureHomeExperienceSchema();
+    return ok(res, await sql`
+      SELECT i.*, COALESCE(iu.full_name, i.name) AS name, iu.email, iu.mobile_number,
+             COALESCE(iu.sponsor_invite_code, 'MMR00001') AS sponsor_invite_code
+      FROM investors i
+      LEFT JOIN investor_users iu ON i.user_id = iu.id
+      WHERE i.is_deleted = FALSE
+        AND i.profile_image_url IS NOT NULL
+        AND TRIM(i.profile_image_url) <> ''
+      ORDER BY i.display_order, i.created_at
+    `);
+  } catch (e) {
+    return err(res, e.message);
+  }
 });
 
-app.post("/api/admin/investors", verifyAdminToken, role("SuperAdmin", "SiteManager"), upload.single("profile_image"), async (req, res) => {
+app.post("/api/admin/investors", verifyAdminToken, role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"), upload.single("profile_image"), async (req, res) => {
   try {
-    await ensureHomeExperienceSchema(); const name = String(req.body.name || "").trim();
+    await ensureHomeExperienceSchema();
+    const name = String(req.body.name || "").trim();
     if (!name) return err(res, "Investor name is required", 400);
-    if (!req.file || !/^image\/(jpeg|png|webp)$/.test(req.file.mimetype)) return err(res, "Profile image is required (JPG, PNG or WEBP)", 400);
+    if (!req.file || !/^image\/(jpeg|png|webp)$/.test(req.file.mimetype)) {
+      return err(res, "Profile image is required (JPG, PNG or WEBP)", 400);
+    }
     const { url } = await saveFileToVPS(req.file.buffer, { module: "investor", entityId: name, entityType: "Investor", originalName: req.file.originalname });
-    const [user] = await sql`SELECT id FROM investor_users WHERE full_name ILIKE ${name} LIMIT 1`;
-    const userId = user ? user.id : null;
-    const [created] = await sql`INSERT INTO investors(name, profile_image_url, profile_image_public_id, display_order, is_active, user_id)
-      VALUES(${name}, ${url}, ${null}, ${Number(req.body.display_order) || 0}, ${parseBool(req.body.is_active, true)}, ${userId}) RETURNING *`;
+
+    let userId = req.body.user_id ? Number(req.body.user_id) : null;
+    if (!userId || isNaN(userId)) {
+      const [user] = await sql`SELECT id FROM investor_users WHERE full_name ILIKE ${name} LIMIT 1`;
+      userId = user ? user.id : null;
+    }
+
+    const [created] = await sql`
+      INSERT INTO investors(name, profile_image_url, profile_image_public_id, display_order, is_active, user_id)
+      VALUES(${name}, ${url}, ${null}, ${Number(req.body.display_order) || 0}, ${parseBool(req.body.is_active, true)}, ${userId})
+      RETURNING *`;
+
+    if (userId) {
+      await sql`UPDATE investor_users SET profile_picture_url = ${url}, updated_at = NOW() WHERE id = ${userId}`;
+    }
+
     invalidateApiCache("investors");
     return ok(res, created, "Investor added.", 201);
-  } catch (e) { return err(res, e.message); }
+  } catch (e) {
+    return err(res, e.message);
+  }
 });
 
-app.put("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "SiteManager"), upload.single("profile_image"), async (req, res) => {
+app.put("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"), upload.single("profile_image"), async (req, res) => {
   try {
-    await ensureHomeExperienceSchema(); const [current] = await sql`SELECT * FROM investors WHERE id=${req.params.id} AND is_deleted=FALSE`;
+    await ensureHomeExperienceSchema();
+    const [current] = await sql`SELECT * FROM investors WHERE id=${req.params.id} AND is_deleted=FALSE`;
     if (!current) return err(res, "Investor not found", 404);
-    const name = String(req.body.name || "").trim(); if (!name) return err(res, "Investor name is required", 400);
+    const name = String(req.body.name || "").trim();
+    if (!name) return err(res, "Investor name is required", 400);
     let url = current.profile_image_url, publicId = current.profile_image_public_id;
+
     if (req.file) {
-      if (!/^image\/(jpeg|png|webp)$/.test(req.file.mimetype)) return err(res, "Profile image must be JPG, PNG or WEBP", 400);
+      if (!/^image\/(jpeg|png|webp)$/.test(req.file.mimetype)) {
+        return err(res, "Profile image must be JPG, PNG or WEBP", 400);
+      }
       const saved = await saveFileToVPS(req.file.buffer, { module: "investor", entityId: req.params.id, entityType: "Investor", originalName: req.file.originalname });
-      url = saved.url; publicId = null;
+      url = saved.url;
+      publicId = null;
       await deleteFileFromStorage(current.profile_image_url, current.profile_image_public_id);
     }
-    const [user] = await sql`SELECT id FROM investor_users WHERE full_name ILIKE ${name} LIMIT 1`;
-    const userId = user ? user.id : null;
-    const [updated] = await sql`UPDATE investors SET name=${name},profile_image_url=${url},profile_image_public_id=${publicId},display_order=${Number(req.body.display_order) || 0},is_active=${parseBool(req.body.is_active, true)},user_id=${userId},updated_at=NOW() WHERE id=${req.params.id} RETURNING *`;
+
+    let userId = req.body.user_id ? Number(req.body.user_id) : current.user_id;
+    if (!userId) {
+      const [user] = await sql`SELECT id FROM investor_users WHERE full_name ILIKE ${name} LIMIT 1`;
+      userId = user ? user.id : null;
+    }
+
+    const [updated] = await sql`
+      UPDATE investors
+      SET name=${name}, profile_image_url=${url}, profile_image_public_id=${publicId},
+          display_order=${Number(req.body.display_order) || 0}, is_active=${parseBool(req.body.is_active, true)},
+          user_id=${userId}, updated_at=NOW()
+      WHERE id=${req.params.id}
+      RETURNING *`;
+
+    if (userId && url) {
+      await sql`UPDATE investor_users SET profile_picture_url = ${url}, updated_at = NOW() WHERE id = ${userId}`;
+    }
+
     invalidateApiCache("investors");
     return ok(res, updated, "Investor updated.");
-  } catch (e) { return err(res, e.message); }
+  } catch (e) {
+    return err(res, e.message);
+  }
 });
 
-app.patch("/api/admin/investors/:id/status", verifyAdminToken, role("SuperAdmin", "SiteManager"), async (req, res) => {
-  try { await ensureHomeExperienceSchema(); const [row] = await sql`UPDATE investors SET is_active=${parseBool(req.body.is_active, false)},updated_at=NOW() WHERE id=${req.params.id} AND is_deleted=FALSE RETURNING *`; if (!row) return err(res, "Investor not found", 404); invalidateApiCache("investors"); return ok(res, row, "Investor status updated."); } catch (e) { return err(res, e.message); }
+app.patch("/api/admin/investors/:id/status", verifyAdminToken, role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"), async (req, res) => {
+  try {
+    await ensureHomeExperienceSchema();
+    const [row] = await sql`
+      UPDATE investors
+      SET is_active=${parseBool(req.body.is_active, false)}, updated_at=NOW()
+      WHERE id=${req.params.id} AND is_deleted=FALSE
+      RETURNING *`;
+    if (!row) return err(res, "Investor not found", 404);
+    invalidateApiCache("investors");
+    return ok(res, row, "Investor status updated.");
+  } catch (e) {
+    return err(res, e.message);
+  }
 });
 
-app.delete("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "SiteManager"), async (req, res) => {
-  try { await ensureHomeExperienceSchema(); const [row] = await sql`UPDATE investors SET is_deleted=TRUE,is_active=FALSE,updated_at=NOW() WHERE id=${req.params.id} AND is_deleted=FALSE RETURNING id,profile_image_url,profile_image_public_id`; if (!row) return err(res, "Investor not found", 404); await deleteFileFromStorage(row.profile_image_url, row.profile_image_public_id); invalidateApiCache("investors"); return ok(res, {}, "Investor deleted."); } catch (e) { return err(res, e.message); }
+app.delete("/api/admin/investors/:id", verifyAdminToken, role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"), async (req, res) => {
+  try {
+    await ensureHomeExperienceSchema();
+    const [row] = await sql`
+      UPDATE investors
+      SET is_deleted=TRUE, is_active=FALSE, updated_at=NOW()
+      WHERE id=${req.params.id} AND is_deleted=FALSE
+      RETURNING id, profile_image_url, profile_image_public_id`;
+    if (!row) return err(res, "Investor not found", 404);
+    await deleteFileFromStorage(row.profile_image_url, row.profile_image_public_id);
+    invalidateApiCache("investors");
+    return ok(res, {}, "Investor deleted.");
+  } catch (e) {
+    return err(res, e.message);
+  }
 });
 
 app.get("/api/book-plot/backgrounds", async (_req, res) => {
@@ -4873,19 +4952,16 @@ app.post(["/api/admin/change-password", "/api/admin/auth/change-password"], veri
 });
 
 
-/* ==========================
-   ADMIN IMPERSONATION — LOGIN AS USER
-   POST /api/admin/login-as-user
-========================== */
-app.post("/api/admin/login-as-user", verifyAdminToken, async (req, res) => {
+app.post(["/api/admin/login-as-user", "/api/admin/auth/impersonate", "/api/admin/impersonate-user"], verifyAdminToken, async (req, res) => {
   try {
-    const { user_id, user_type } = req.body;
-    if (!user_id || !user_type) {
+    const rawUserId = req.body.user_id || req.body.id || req.body.userId;
+    const rawUserType = req.body.user_type || req.body.role || req.body.type;
+    if (!rawUserId || !rawUserType) {
       return err(res, "user_id and user_type are required", 400);
     }
 
-    const normalizedType = String(user_type).trim();
-    const cleanUserId = Number(user_id);
+    const normalizedType = String(rawUserType).trim();
+    const cleanUserId = Number(rawUserId);
     if (!cleanUserId || isNaN(cleanUserId)) {
       return err(res, "Valid user_id is required", 400);
     }
@@ -4894,7 +4970,7 @@ app.post("/api/admin/login-as-user", verifyAdminToken, async (req, res) => {
     let redirectUrl = "";
     let payload = {};
 
-    if (["Customer", "Associate"].includes(normalizedType)) {
+    if (["Customer", "Associate"].some(t => t.toLowerCase() === normalizedType.toLowerCase())) {
       const [user] = await sql`
         SELECT user_id, full_name, email, mobile_no, user_type, account_status, member_id, invitation_code
         FROM users
@@ -4920,7 +4996,7 @@ app.post("/api/admin/login-as-user", verifyAdminToken, async (req, res) => {
         full_name: user.full_name,
         impersonated_by_admin_id: req.admin?.admin_id || req.admin?.id || 1
       };
-    } else if (normalizedType === "Investor") {
+    } else if (normalizedType.toLowerCase() === "investor") {
       const [investor] = await sql`
         SELECT id, full_name, email, mobile_number, status, is_verified
         FROM investor_users
@@ -4930,8 +5006,9 @@ app.post("/api/admin/login-as-user", verifyAdminToken, async (req, res) => {
         return err(res, "Investor account not found", 404);
       }
 
-      if (investor.status !== "active" || !investor.is_verified) {
-        return err(res, `Investor account is not active or verified (status: ${investor.status}).`, 403);
+      const invStatus = String(investor.status || "").toLowerCase();
+      if (invStatus !== "active" && invStatus !== "approved") {
+        return err(res, `Investor account is not active (status: ${investor.status}).`, 403);
       }
 
       targetUser = {
@@ -4941,6 +5018,7 @@ app.post("/api/admin/login-as-user", verifyAdminToken, async (req, res) => {
         email: investor.email,
         mobile_no: investor.mobile_number,
         user_type: "Investor",
+        role: "Investor",
         account_status: investor.status
       };
       redirectUrl = "/investor/dashboard";

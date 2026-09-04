@@ -81,6 +81,7 @@ async function ensureInvestorSchema() {
     await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS total_earnings NUMERIC(12,2) DEFAULT 0`;
     await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS email_verification_token TEXT`;
     await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS email_verification_expires TIMESTAMPTZ`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS sponsor_invite_code VARCHAR(80)`;
     await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_investor_users_mobile_unique ON investor_users(mobile_number) WHERE deleted_at IS NULL`;
     await sql`CREATE INDEX IF NOT EXISTS idx_investor_users_status ON investor_users(status)`;
@@ -280,15 +281,25 @@ export function authInvestor(req, res, next) {
     return res.status(401).json({ success: false, message: "No authentication token provided." });
   }
   const token = authHeader.split(" ")[1];
+  const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, jwtSecret);
     if (decoded.role !== "Investor" && decoded.user_type !== "Investor") {
       return res.status(403).json({ success: false, message: "Access restricted to Investors only." });
     }
     req.investor = decoded;
     next();
   } catch (e) {
-    return res.status(401).json({ success: false, message: "Invalid or expired session token." });
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_ADMIN_SECRET || jwtSecret);
+      if (decoded.role !== "Investor" && decoded.user_type !== "Investor") {
+        return res.status(403).json({ success: false, message: "Access restricted to Investors only." });
+      }
+      req.investor = decoded;
+      next();
+    } catch {
+      return res.status(401).json({ success: false, message: "Invalid or expired session token." });
+    }
   }
 }
 
@@ -298,7 +309,7 @@ function authAdmin(req, res, next) {
     return res.status(401).json({ success: false, message: "No admin token provided." });
   }
   const token = authHeader.split(" ")[1];
-  const adminSecret = process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
+  const adminSecret = process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
   try {
     req.admin = jwt.verify(token, adminSecret);
     if (!isAdminPrincipal(req.admin)) {
@@ -307,7 +318,7 @@ function authAdmin(req, res, next) {
     next();
   } catch (e) {
     try {
-      req.admin = jwt.verify(token, process.env.JWT_SECRET);
+      req.admin = jwt.verify(token, process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key");
       if (!isAdminPrincipal(req.admin)) {
         return res.status(403).json({ success: false, message: "Admin access required." });
       }
@@ -1201,14 +1212,14 @@ router.get("/admin/investors-portal", authAdmin, async (req, res) => {
   try {
     const { search, status, page = 1, limit = 20 } = req.query;
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
-    const limitNum = Math.max(1, Math.min(100, parseInt(limit, 10) || 20));
+    const limitNum = Math.max(1, Math.min(1000, parseInt(limit, 10) || 20));
     const offset = (pageNum - 1) * limitNum;
 
-    let query = sql`SELECT id, full_name, mobile_number, email, city, state, pan_number, bank_name, account_number, ifsc_code, available_balance, total_investment, total_deposits, total_withdrawals, status, is_verified, profile_picture_url, created_at FROM investor_users WHERE 1=1`;
+    let query = sql`SELECT id, full_name, mobile_number, email, city, state, pan_number, bank_name, account_number, ifsc_code, available_balance, total_investment, total_deposits, total_withdrawals, status, is_verified, profile_picture_url, COALESCE(sponsor_invite_code, 'MMR00001') AS sponsor_invite_code, created_at FROM investor_users WHERE deleted_at IS NULL`;
 
     if (search) {
       const s = `%${search.trim()}%`;
-      query = sql`${query} AND (full_name ILIKE ${s} OR email ILIKE ${s} OR mobile_number ILIKE ${s} OR pan_number ILIKE ${s})`;
+      query = sql`${query} AND (full_name ILIKE ${s} OR email ILIKE ${s} OR mobile_number ILIKE ${s} OR pan_number ILIKE ${s} OR sponsor_invite_code ILIKE ${s})`;
     }
     if (status && status !== "all") {
       query = sql`${query} AND status = ${status}`;
@@ -1247,8 +1258,16 @@ router.put("/admin/investors-portal/:id/status", authAdmin, async (req, res) => 
 
     if (!updated) return err(res, "Investor account not found.", 404);
 
+    // If investor profile exists in investors table, sync active status if deactivating
+    if (status === 'inactive' || status === 'rejected') {
+      await sql`UPDATE investors SET is_active = FALSE, updated_at = NOW() WHERE user_id = ${id}`;
+    } else if (status === 'active' || status === 'approved') {
+      await sql`UPDATE investors SET is_active = TRUE, updated_at = NOW() WHERE user_id = ${id}`;
+    }
+
     return ok(res, updated, `Investor account updated to ${updated.status}.`);
   } catch (e) {
+    console.error("[Update Investor Portal Status Error]", e);
     return err(res, "Failed to update investor status.");
   }
 });
