@@ -3917,14 +3917,18 @@ app.post("/api/auth/register", upload.fields([
       return err(res, "Terms & Conditions must be accepted", 400);
 
     // ── Verify OTP ──
-    const [otpRow] = await sql`
-      SELECT * FROM otp_log
-      WHERE mobile = ${mobile_no} AND otp_code = ${otp_code}
-        AND purpose = 'Registration' AND is_used = FALSE
-        AND expires_at > NOW()
-      ORDER BY otp_id DESC LIMIT 1`;
+    const authSettings = await getAppAuthSettingsRow();
+    if (authSettings.email_otp_enabled !== false) {
+      const [otpRow] = await sql`
+        SELECT * FROM otp_log
+        WHERE mobile = ${mobile_no} AND otp_code = ${otp_code}
+          AND purpose = 'Registration' AND is_used = FALSE
+          AND expires_at > NOW()
+        ORDER BY otp_id DESC LIMIT 1`;
 
-    if (!otpRow) return err(res, "Invalid or expired OTP", 400);
+      if (!otpRow) return err(res, "Invalid or expired OTP", 400);
+      await sql`UPDATE otp_log SET is_used = TRUE WHERE otp_id = ${otpRow.otp_id}`;
+    }
 
     // ── Duplicate checks ──
     const [dupMobile] = await sql`SELECT user_id FROM users WHERE mobile_no = ${mobile_no}`;
@@ -4373,8 +4377,11 @@ app.post("/api/auth/login", async (req, res) => {
         : await sql`SELECT id, full_name, email, mobile_number, password_hash, status, is_verified FROM investor_users WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile} AND deleted_at IS NULL LIMIT 1`;
 
       if (investor) {
-        if (!investor.is_verified || investor.status === "pending_verification") {
-          return err(res, "Please verify your email address before login.", 403);
+        const authSettings = await getAppAuthSettingsRow();
+        if (authSettings.email_otp_enabled !== false) {
+          if (!investor.is_verified || investor.status === "pending_verification") {
+            return err(res, "Please verify your email address before login.", 403);
+          }
         }
         if (investor.status === "inactive" || investor.status === "rejected") {
           return err(res, `Account is currently ${investor.status}. Contact support.`, 403);
@@ -4419,8 +4426,12 @@ app.post("/api/auth/login", async (req, res) => {
       return err(res, "User not found", 404);
     }
 
-    if (!(user.email_verified || user.is_otp_verified)) {
-      return err(res, "Please verify your email address before login.", 403);
+    const authSettings = await getAppAuthSettingsRow();
+
+    if (authSettings.email_otp_enabled !== false) {
+      if (!(user.email_verified || user.is_otp_verified)) {
+        return err(res, "Please verify your email address before login.", 403);
+      }
     }
 
     if (!["Active", "Approved"].includes(String(user.account_status))) {
@@ -4429,8 +4440,6 @@ app.post("/api/auth/login", async (req, res) => {
         : "Account is not active. Contact support.";
       return err(res, message, 403);
     }
-
-    const authSettings = await getAppAuthSettingsRow();
 
     // OTP login
     if (otp_code || (authSettings.email_otp_enabled === false && !password)) {
