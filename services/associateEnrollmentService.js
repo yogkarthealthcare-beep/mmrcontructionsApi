@@ -163,6 +163,110 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
     return { associateId: generatedId };
 }
 
+function formatAssociateEnrollment(master, addresses = [], bankDetails = [], nominee = [], sponsor = []) {
+    const permAddr = addresses.find(a => a.address_type === 'permanent') || {};
+    const localAddr = addresses.find(a => a.address_type === 'local') || {};
+    const bank = bankDetails[0] || {};
+    const nom = nominee[0] || {};
+    const sp = sponsor[0] || {};
+
+    return {
+        ...master,
+        associate_id: master.id,
+        associateId: master.id,
+        
+        // Permanent Address
+        permAddress: permAddr.local_address || '',
+        perm_address: permAddr.local_address || '',
+        permCity: permAddr.city || '',
+        perm_city: permAddr.city || '',
+        permState: permAddr.state || '',
+        perm_state: permAddr.state || '',
+        permCountry: permAddr.country || 'India',
+        perm_country: permAddr.country || 'India',
+        permPin: permAddr.pin_code || '',
+        perm_pin: permAddr.pin_code || '',
+
+        // Local Address
+        localAddress: localAddr.local_address || '',
+        local_address: localAddr.local_address || '',
+        localCity: localAddr.city || '',
+        local_city: localAddr.city || '',
+        localState: localAddr.state || '',
+        local_state: localAddr.state || '',
+        localCountry: localAddr.country || 'India',
+        local_country: localAddr.country || 'India',
+        localPin: localAddr.pin_code || '',
+        local_pin: localAddr.pin_code || '',
+
+        // Bank Details
+        bankName: bank.bank_name || '',
+        bank_name: bank.bank_name || '',
+        accHolder: bank.account_holder_name || '',
+        acc_holder: bank.account_holder_name || '',
+        acc_holder_name: bank.account_holder_name || '',
+        accNo: bank.account_no || '',
+        acc_no: bank.account_no || '',
+        account_no: bank.account_no || '',
+        ifsc: bank.ifsc_code || '',
+        ifsc_code: bank.ifsc_code || '',
+        micr: bank.micr_code || '',
+        micr_code: bank.micr_code || '',
+        branchName: bank.branch_name || '',
+        branch_name: bank.branch_name || '',
+        branchCode: bank.branch_code || '',
+        branch_code: bank.branch_code || '',
+        swift: bank.swift_code || '',
+        swift_code: bank.swift_code || '',
+        branchCountry: bank.branch_country || 'India',
+        branch_country: bank.branch_country || 'India',
+
+        // Nominee Details
+        nomineeName: nom.nominee_name || '',
+        nominee_name: nom.nominee_name || '',
+        nomineeDob: nom.dob || '',
+        nominee_dob: nom.dob || '',
+        nomineeGender: nom.gender || '',
+        nominee_gender: nom.gender || '',
+        nomineeNationality: nom.nationality || 'Indian',
+        nominee_nationality: nom.nationality || 'Indian',
+        nomineeResStatus: nom.residential_status || '',
+        nominee_res_status: nom.residential_status || '',
+        nomineeRelationship: nom.relationship || '',
+        nominee_relationship: nom.relationship || '',
+        nomineePanName: nom.pan_name || '',
+        nominee_pan_name: nom.pan_name || '',
+        nomineePanNo: nom.pan_no || '',
+        nominee_pan_no: nom.pan_no || '',
+        nomineeAadharName: nom.aadhar_name || '',
+        nominee_aadhar_name: nom.aadhar_name || '',
+        nomineeAadharNo: nom.aadhar_no || '',
+        nominee_aadhar_no: nom.aadhar_no || '',
+        nomineeAddress: nom.address || '',
+        nominee_address: nom.address || '',
+        nomineePhotoPath: nom.photo_path || '',
+        nominee_photo_path: nom.photo_path || '',
+        nomineePhotoUrl: nom.photo_path || '',
+        nominee_photo_url: nom.photo_path || '',
+
+        // Sponsor Details
+        sponsorName: sp.sponsor_name || '',
+        sponsor_name: sp.sponsor_name || '',
+        sponsorCode: sp.sponsor_code || '',
+        sponsor_code: sp.sponsor_code || '',
+        sponsorContact: sp.sponsor_contact || '',
+        sponsor_contact: sp.sponsor_contact || '',
+
+        // Contacts & Photos
+        contact1: master.contact_no_1 || '',
+        contact_1: master.contact_no_1 || '',
+        contact2: master.contact_no_2 || '',
+        contact_2: master.contact_no_2 || '',
+        applicantPhotoUrl: master.applicant_photo_path || '',
+        applicant_photo_url: master.applicant_photo_path || '',
+    };
+}
+
 /**
  * Fetch full associate enrollment details for a user (by userId, mobile, or email)
  */
@@ -190,46 +294,7 @@ export async function getAssociateEnrollmentByUserId(userId, mobile = null, emai
     const nominee = await sql`SELECT * FROM associate_nominee WHERE associate_id = ${master.id} LIMIT 1`;
     const sponsor = await sql`SELECT * FROM associate_sponsor WHERE associate_id = ${master.id} LIMIT 1`;
 
-    const permAddr = addresses.find(a => a.address_type === 'permanent') || {};
-    const localAddr = addresses.find(a => a.address_type === 'local') || {};
-
-    return {
-        ...master,
-        permAddress: permAddr.local_address || '',
-        permCity: permAddr.city || '',
-        permState: permAddr.state || '',
-        permCountry: permAddr.country || 'India',
-        permPin: permAddr.pin_code || '',
-        localAddress: localAddr.local_address || '',
-        localCity: localAddr.city || '',
-        localState: localAddr.state || '',
-        localCountry: localAddr.country || 'India',
-        localPin: localAddr.pin_code || '',
-        bankName: bankDetails[0]?.bank_name || '',
-        accHolder: bankDetails[0]?.account_holder_name || '',
-        accNo: bankDetails[0]?.account_no || '',
-        ifsc: bankDetails[0]?.ifsc_code || '',
-        micr: bankDetails[0]?.micr_code || '',
-        branchName: bankDetails[0]?.branch_name || '',
-        branchCode: bankDetails[0]?.branch_code || '',
-        swift: bankDetails[0]?.swift_code || '',
-        branchCountry: bankDetails[0]?.branch_country || 'India',
-        nomineeName: nominee[0]?.nominee_name || '',
-        nomineeDob: nominee[0]?.dob || '',
-        nomineeGender: nominee[0]?.gender || '',
-        nomineeNationality: nominee[0]?.nationality || 'Indian',
-        nomineeResStatus: nominee[0]?.residential_status || '',
-        nomineeRelationship: nominee[0]?.relationship || '',
-        nomineePanName: nominee[0]?.pan_name || '',
-        nomineePanNo: nominee[0]?.pan_no || '',
-        nomineeAadharName: nominee[0]?.aadhar_name || '',
-        nomineeAadharNo: nominee[0]?.aadhar_no || '',
-        nomineeAddress: nominee[0]?.address || '',
-        nomineePhotoPath: nominee[0]?.photo_path || '',
-        sponsorName: sponsor[0]?.sponsor_name || '',
-        sponsorCode: sponsor[0]?.sponsor_code || '',
-        sponsorContact: sponsor[0]?.sponsor_contact || ''
-    };
+    return formatAssociateEnrollment(master, addresses, bankDetails, nominee, sponsor);
 }
 
 /**
@@ -344,46 +409,7 @@ export async function adminGetAssociateEnrollmentById(id) {
     const nominee = await sql`SELECT * FROM associate_nominee WHERE associate_id = ${master.id} LIMIT 1`;
     const sponsor = await sql`SELECT * FROM associate_sponsor WHERE associate_id = ${master.id} LIMIT 1`;
 
-    const permAddr = addresses.find(a => a.address_type === 'permanent') || {};
-    const localAddr = addresses.find(a => a.address_type === 'local') || {};
-
-    return {
-        ...master,
-        permAddress: permAddr.local_address || '',
-        permCity: permAddr.city || '',
-        permState: permAddr.state || '',
-        permCountry: permAddr.country || 'India',
-        permPin: permAddr.pin_code || '',
-        localAddress: localAddr.local_address || '',
-        localCity: localAddr.city || '',
-        localState: localAddr.state || '',
-        localCountry: localAddr.country || 'India',
-        localPin: localAddr.pin_code || '',
-        bankName: bankDetails[0]?.bank_name || '',
-        accHolder: bankDetails[0]?.account_holder_name || '',
-        accNo: bankDetails[0]?.account_no || '',
-        ifsc: bankDetails[0]?.ifsc_code || '',
-        micr: bankDetails[0]?.micr_code || '',
-        branchName: bankDetails[0]?.branch_name || '',
-        branchCode: bankDetails[0]?.branch_code || '',
-        swift: bankDetails[0]?.swift_code || '',
-        branchCountry: bankDetails[0]?.branch_country || 'India',
-        nomineeName: nominee[0]?.nominee_name || '',
-        nomineeDob: nominee[0]?.dob || '',
-        nomineeGender: nominee[0]?.gender || '',
-        nomineeNationality: nominee[0]?.nationality || 'Indian',
-        nomineeResStatus: nominee[0]?.residential_status || '',
-        nomineeRelationship: nominee[0]?.relationship || '',
-        nomineePanName: nominee[0]?.pan_name || '',
-        nomineePanNo: nominee[0]?.pan_no || '',
-        nomineeAadharName: nominee[0]?.aadhar_name || '',
-        nomineeAadharNo: nominee[0]?.aadhar_no || '',
-        nomineeAddress: nominee[0]?.address || '',
-        nomineePhotoPath: nominee[0]?.photo_path || '',
-        sponsorName: sponsor[0]?.sponsor_name || '',
-        sponsorCode: sponsor[0]?.sponsor_code || '',
-        sponsorContact: sponsor[0]?.sponsor_contact || ''
-    };
+    return formatAssociateEnrollment(master, addresses, bankDetails, nominee, sponsor);
 }
 
 /**
@@ -435,43 +461,51 @@ export async function adminUpdateAssociateEnrollment(id, data, applicantPhotoPat
         `;
 
         // Update permanent address
-        if (data.permAddress !== undefined) {
+        const pAddr = data.permAddress !== undefined ? data.permAddress : data.perm_address;
+        if (pAddr !== undefined) {
             await tx`DELETE FROM associate_address WHERE associate_id = ${targetId} AND address_type = 'permanent'`;
             await tx`
               INSERT INTO associate_address (associate_id, address_type, local_address, city, state, country, pin_code)
-              VALUES (${targetId}, 'permanent', ${data.permAddress || null}, ${data.permCity || null}, ${data.permState || null}, ${data.permCountry || 'India'}, ${data.permPin || null})
+              VALUES (${targetId}, 'permanent', ${pAddr || null}, ${data.permCity || data.perm_city || null}, ${data.permState || data.perm_state || null}, ${data.permCountry || data.perm_country || 'India'}, ${data.permPin || data.perm_pin || null})
             `;
         }
         // Update local address
-        if (data.localAddress !== undefined) {
+        const lAddr = data.localAddress !== undefined ? data.localAddress : data.local_address;
+        if (lAddr !== undefined) {
             await tx`DELETE FROM associate_address WHERE associate_id = ${targetId} AND address_type = 'local'`;
             await tx`
               INSERT INTO associate_address (associate_id, address_type, local_address, city, state, country, pin_code)
-              VALUES (${targetId}, 'local', ${data.localAddress || null}, ${data.localCity || null}, ${data.localState || null}, ${data.localCountry || 'India'}, ${data.localPin || null})
+              VALUES (${targetId}, 'local', ${lAddr || null}, ${data.localCity || data.local_city || null}, ${data.localState || data.local_state || null}, ${data.localCountry || data.local_country || 'India'}, ${data.localPin || data.local_pin || null})
             `;
         }
         // Update bank details
-        if (data.bankName !== undefined || data.accNo !== undefined || data.ifsc !== undefined) {
+        const bName = data.bankName !== undefined ? data.bankName : data.bank_name;
+        const aNo = data.accNo !== undefined ? data.accNo : (data.acc_no !== undefined ? data.acc_no : data.account_no);
+        const ifscVal = data.ifsc !== undefined ? data.ifsc : data.ifsc_code;
+        if (bName !== undefined || aNo !== undefined || ifscVal !== undefined) {
             await tx`DELETE FROM associate_bank_details WHERE associate_id = ${targetId}`;
             await tx`
               INSERT INTO associate_bank_details (associate_id, bank_name, account_holder_name, account_no, ifsc_code, micr_code, branch_name, branch_code, swift_code, branch_country)
-              VALUES (${targetId}, ${data.bankName || null}, ${data.accHolder || null}, ${data.accNo || null}, ${data.ifsc || null}, ${data.micr || null}, ${data.branchName || null}, ${data.branchCode || null}, ${data.swift || null}, ${data.branchCountry || 'India'})
+              VALUES (${targetId}, ${bName || null}, ${data.accHolder || data.acc_holder || data.acc_holder_name || null}, ${aNo || null}, ${ifscVal || null}, ${data.micr || data.micr_code || null}, ${data.branchName || data.branch_name || null}, ${data.branchCode || data.branch_code || null}, ${data.swift || data.swift_code || null}, ${data.branchCountry || data.branch_country || 'India'})
             `;
         }
         // Update nominee
-        if (data.nomineeName !== undefined) {
+        const nomName = data.nomineeName !== undefined ? data.nomineeName : data.nominee_name;
+        if (nomName !== undefined) {
             await tx`DELETE FROM associate_nominee WHERE associate_id = ${targetId}`;
             await tx`
               INSERT INTO associate_nominee (associate_id, nominee_name, dob, gender, nationality, residential_status, relationship, pan_name, pan_no, aadhar_name, aadhar_no, address, photo_path)
-              VALUES (${targetId}, ${data.nomineeName || null}, ${data.nomineeDob || null}, ${data.nomineeGender || null}, ${data.nomineeNationality || 'Indian'}, ${data.nomineeResStatus || null}, ${data.nomineeRelationship || null}, ${data.nomineePanName || null}, ${data.nomineePanNo || null}, ${data.nomineeAadharName || null}, ${data.nomineeAadharNo || null}, ${data.nomineeAddress || null}, ${nomineePhotoPath || null})
+              VALUES (${targetId}, ${nomName || null}, ${data.nomineeDob || data.nominee_dob || null}, ${data.nomineeGender || data.nominee_gender || null}, ${data.nomineeNationality || data.nominee_nationality || 'Indian'}, ${data.nomineeResStatus || data.nominee_res_status || null}, ${data.nomineeRelationship || data.nominee_relationship || null}, ${data.nomineePanName || data.nominee_pan_name || null}, ${data.nomineePanNo || data.nominee_pan_no || null}, ${data.nomineeAadharName || data.nominee_aadhar_name || null}, ${data.nomineeAadharNo || data.nominee_aadhar_no || null}, ${data.nomineeAddress || data.nominee_address || null}, ${nomineePhotoPath || null})
             `;
         }
         // Update sponsor
-        if (data.sponsorName !== undefined || data.sponsorCode !== undefined) {
+        const spName = data.sponsorName !== undefined ? data.sponsorName : data.sponsor_name;
+        const spCode = data.sponsorCode !== undefined ? data.sponsorCode : data.sponsor_code;
+        if (spName !== undefined || spCode !== undefined) {
             await tx`DELETE FROM associate_sponsor WHERE associate_id = ${targetId}`;
             await tx`
               INSERT INTO associate_sponsor (associate_id, sponsor_name, sponsor_code, sponsor_contact)
-              VALUES (${targetId}, ${data.sponsorName || null}, ${data.sponsorCode || null}, ${data.sponsorContact || null})
+              VALUES (${targetId}, ${spName || null}, ${spCode || null}, ${data.sponsorContact || data.sponsor_contact || null})
             `;
         }
 
