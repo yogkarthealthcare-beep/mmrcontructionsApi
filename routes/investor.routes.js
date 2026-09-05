@@ -970,8 +970,8 @@ router.patch("/investor/notifications/:id/read", authInvestor, async (req, res) 
   }
 });
 
-// PUT /api/investor/change-password
-router.put("/investor/change-password", authInvestor, async (req, res) => {
+// PUT & POST /api/investor/change-password
+const handleInvestorChangePassword = async (req, res) => {
   try {
     const { current_password, new_password } = req.body;
     if (!current_password || !new_password) {
@@ -979,6 +979,9 @@ router.put("/investor/change-password", authInvestor, async (req, res) => {
     }
 
     const [user] = await sql`SELECT password_hash FROM investor_users WHERE id = ${req.investor.id}`;
+    if (!user || !user.password_hash) {
+      return err(res, "User not found.", 404);
+    }
     const match = await bcrypt.compare(current_password, user.password_hash);
     if (!match) {
       return err(res, "Current password is incorrect.", 400);
@@ -992,7 +995,9 @@ router.put("/investor/change-password", authInvestor, async (req, res) => {
   } catch (e) {
     return err(res, "Failed to change password.");
   }
-});
+};
+router.put("/investor/change-password", authInvestor, handleInvestorChangePassword);
+router.post("/investor/change-password", authInvestor, handleInvestorChangePassword);
 
 // PUT /api/investor/bank-details
 router.put("/investor/bank-details", authInvestor, async (req, res) => {
