@@ -6396,7 +6396,7 @@ app.patch("/api/notifications/read-all", verifyUserToken, async (req, res) => {
    ─────────────────────────
 ========================== */
 
-app.get("/api/buyback/terms", async (req, res) => {
+app.get(["/api/buyback/terms", "/api/buyback-terms"], async (req, res) => {
   try {
     return ok(res, await getBuybackTermsRow(), "Buyback terms fetched.");
   } catch (e) {
@@ -6405,7 +6405,7 @@ app.get("/api/buyback/terms", async (req, res) => {
   }
 });
 
-app.get("/api/admin/buyback/terms", verifyAdminToken, async (req, res) => {
+app.get(["/api/admin/buyback/terms", "/api/admin/buyback-terms"], verifyAdminToken, async (req, res) => {
   try {
     return ok(res, await getBuybackTermsRow(), "Buyback terms fetched.");
   } catch (e) {
@@ -6414,7 +6414,7 @@ app.get("/api/admin/buyback/terms", verifyAdminToken, async (req, res) => {
   }
 });
 
-app.put("/api/admin/buyback/terms", verifyAdminToken, async (req, res) => {
+app.put(["/api/admin/buyback/terms", "/api/admin/buyback-terms"], verifyAdminToken, async (req, res) => {
   try {
     const title = String(req.body?.title || "").trim();
     const summary = String(req.body?.summary || "").trim();
