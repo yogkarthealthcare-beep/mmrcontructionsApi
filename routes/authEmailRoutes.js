@@ -501,7 +501,7 @@ router.post('/register-quick', async (req, res) => {
         };
         const jwtSecret = process.env.JWT_SECRET || 'mmr_constructions_jwt_secret_2026_key';
         const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
-        const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '7d' });
+        const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '4h' });
         const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: '30d' });
 
         return ok(res, {
@@ -724,7 +724,7 @@ router.post('/register-quick', async (req, res) => {
       };
       const jwtSecret = process.env.JWT_SECRET || 'mmr_constructions_jwt_secret_2026_key';
       const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
-      const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '7d' });
+      const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '4h' });
       const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: '30d' });
 
       return ok(res, {
@@ -919,7 +919,7 @@ router.post('/verify-email-otp', async (req, res) => {
       };
       const jwtSecret = process.env.JWT_SECRET || 'mmr_constructions_jwt_secret_2026_key';
       const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
-      const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '7d' });
+      const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '4h' });
       const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: '30d' });
 
       return ok(res, {
@@ -1128,7 +1128,7 @@ router.post('/verify-email-otp', async (req, res) => {
     const jwtSecret = process.env.JWT_SECRET || 'mmr_constructions_jwt_secret_2026_key';
     const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
     const token = jwt.sign(payload, jwtSecret, {
-      expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+      expiresIn: process.env.JWT_EXPIRES_IN || '4h',
     });
     const refreshToken = jwt.sign(payload, jwtRefreshSecret, {
       expiresIn: '30d',

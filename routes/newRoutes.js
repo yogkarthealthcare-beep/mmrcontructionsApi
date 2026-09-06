@@ -318,7 +318,7 @@ router.post('/auth/login', async (req, res) => {
 
         const secret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
         const refreshSecret = process.env.JWT_REFRESH_SECRET || secret;
-        const token = jwt.sign(payload, secret, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
+        const token = jwt.sign(payload, secret, { expiresIn: process.env.JWT_EXPIRES_IN || "4h" });
         const refreshToken = jwt.sign(payload, refreshSecret, { expiresIn: "30d" });
 
         return res.json({
@@ -365,7 +365,7 @@ router.post('/auth/login', async (req, res) => {
       email: user.email,
     };
     const token = jwt.sign(payload, process.env.JWT_SECRET, {
-      expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+      expiresIn: process.env.JWT_EXPIRES_IN || '4h',
     });
     const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, {
       expiresIn: '30d',
