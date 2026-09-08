@@ -1,7 +1,7 @@
 import express from "express";
 import multer from "multer";
 import { userAuth } from "../middleware/auth.middleware.js";
-import { createAssociateEnrollment, printAssociateEnrollment } from "../controllers/associateEnrollmentController.js";
+import { createAssociateEnrollment, printAssociateEnrollment, getMyAssociateEnrollment } from "../controllers/associateEnrollmentController.js";
 
 const router = express.Router();
 
@@ -12,6 +12,14 @@ const upload = multer({
     fileSize: 5 * 1024 * 1024 // 5 MB limit per photo
   }
 });
+
+// GET /api/associate-enrollment/me
+// Returns current authenticated associate's enrollment details if submitted
+router.get(
+  "/associate-enrollment/me",
+  userAuth,
+  getMyAssociateEnrollment
+);
 
 // POST /api/associate-enrollment
 // Authenticated route, handles multipart form uploads

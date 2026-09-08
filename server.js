@@ -5156,7 +5156,10 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
              COALESCE(k.status, 'Not Submitted') AS kyc_status,
              k.admin_remarks AS kyc_remarks,
              u.invitation_code, u.registered_at,
-             sp.full_name AS sponsor_name, sp.member_id AS sponsor_id,
+             u.sponsor_invite_code,
+             COALESCE(sp.full_name, 'MMR Constructions') AS sponsor_name,
+             COALESCE(sp.member_id, sp.invitation_code, u.sponsor_invite_code, 'MMR0001') AS sponsor_id,
+             COALESCE(sp.mobile_no, '9511119879') AS sponsor_contact,
              pa.city, pa.state, pa.pin_code,
              b.bank_name, b.account_number, b.ifsc_code,
              n.nominee_name, n.relationship AS nominee_relationship
