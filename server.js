@@ -3377,7 +3377,7 @@ app.put("/api/admin/company-documents/:id",
       const documentName = String(req.body.document_name || "").trim();
       if (!documentName) return err(res, "Document name is required", 400);
       let fileUrl = existing.file_url;
-      let filePublicId = null;
+      let filePublicId = existing.file_public_id;
       let fileData = existing.file_data;
       let fileType = existing.file_type;
       let mimeType = existing.mime_type;
@@ -3385,7 +3385,16 @@ app.put("/api/admin/company-documents/:id",
       let fileSizeBytes = existing.file_size_bytes;
 
       if (req.file) {
+        // 1. Delete previous file from VPS disk / Cloudinary if applicable
+        if (existing.file_url || existing.file_public_id) {
+          await deleteFileFromStorage(existing.file_url, existing.file_public_id).catch((err) => {
+            console.warn("[Company Document Update] Old file deletion warning:", err.message);
+          });
+        }
+
+        // 2. Set new file data & metadata
         fileUrl = `/api/company-documents/${existing.id}/file`;
+        filePublicId = null;
         fileData = req.file.buffer;
         fileType = path.extname(req.file.originalname || "").toLowerCase() === ".pdf" ? "pdf" : "image";
         mimeType = req.file.mimetype || null;
@@ -3413,7 +3422,7 @@ app.put("/api/admin/company-documents/:id",
           updated_by_admin_id = ${req.admin.admin_id || null},
           updated_at = NOW()
         WHERE id = ${req.params.id}`;
-      await logAdminAudit(req, "CompanyDocuments", "UpdateDocument", "company_documents", req.params.id, sql.json({ document_name: documentName }));
+      await logAdminAudit(req, "CompanyDocuments", "UpdateDocument", "company_documents", req.params.id, sql.json({ document_name: documentName, file_replaced: !!req.file }));
       return ok(res, {}, "Company document updated.");
     } catch (e) {
       return err(res, e.message);
@@ -3450,13 +3459,24 @@ app.delete("/api/admin/company-documents/:id",
   async (req, res) => {
     try {
       await ensureCompanyDocumentsSchema();
-      const [document] = await sql`
+      const [existing] = await sql`
+        SELECT * FROM company_documents WHERE id = ${req.params.id}`;
+      if (!existing) return err(res, "Company document not found", 404);
+
+      // 1. Delete associated physical / cloud file from VPS disk or Cloudinary
+      if (existing.file_url || existing.file_public_id) {
+        await deleteFileFromStorage(existing.file_url, existing.file_public_id).catch((err) => {
+          console.warn("[Company Document Delete Warning] Failed to delete external file:", err.message);
+        });
+      }
+
+      // 2. Delete database record & binary file_data
+      await sql`
         DELETE FROM company_documents
-        WHERE id = ${req.params.id}
-        RETURNING id, document_name`;
-      if (!document) return err(res, "Company document not found", 404);
-      await logAdminAudit(req, "CompanyDocuments", "DeleteDocument", "company_documents", req.params.id, sql.json({ document_name: document.document_name }));
-      return ok(res, {}, "Company document deleted successfully.");
+        WHERE id = ${req.params.id}`;
+
+      await logAdminAudit(req, "CompanyDocuments", "DeleteDocument", "company_documents", req.params.id, sql.json({ document_name: existing.document_name, original_file_name: existing.original_file_name }));
+      return ok(res, {}, "Company document and associated file deleted successfully.");
     } catch (e) {
       return err(res, e.message);
     }
