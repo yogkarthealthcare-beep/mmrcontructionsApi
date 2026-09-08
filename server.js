@@ -26,6 +26,7 @@ import investorRoutes from './routes/investor.routes.js';
 import invoiceModuleRoutes from './routes/invoice-module.routes.js';
 import customerEnrollmentRoutes from './routes/customer-enrollment.routes.js';
 import associateEnrollmentRoutes from './routes/associateEnrollmentRoutes.js';
+import teamMemberRoutes from './routes/teamMemberRoutes.js';
 import fileStorageService, { saveFileToVPS, deleteFileFromStorage, getStorageRoot } from "./services/fileStorage.service.js";
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
@@ -227,6 +228,7 @@ app.use('/api', investorRoutes);
 app.use('/api', invoiceModuleRoutes);
 app.use('/api', customerEnrollmentRoutes);
 app.use('/api', associateEnrollmentRoutes);
+app.use('/api', teamMemberRoutes);
 // ─── Cloudinary Config ────────────────────────────────────────
 const envValue = (key) => (process.env[key] || "").trim();
 cloudinary.config({

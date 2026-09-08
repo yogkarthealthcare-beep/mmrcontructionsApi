@@ -15,6 +15,9 @@
     "services/associatePdfService.ts",
     "services/investorPdfService.ts",
     "services/customerPdfService.ts",
-    "routes/associateEnrollmentRoutes.ts"
+    "routes/associateEnrollmentRoutes.ts",
+    "controllers/teamMemberController.ts",
+    "services/teamMemberService.ts",
+    "routes/teamMemberRoutes.ts"
   ]
 }
