@@ -514,6 +514,12 @@ function ensureCompanyDocumentsSchema() {
       await sql`ALTER TABLE company_documents ADD COLUMN IF NOT EXISTS document_description_hi TEXT`;
       await sql`ALTER TABLE company_documents ADD COLUMN IF NOT EXISTS document_type_hi VARCHAR(100)`;
       await sql`ALTER TABLE company_documents ALTER COLUMN file_url DROP NOT NULL`;
+      await sql`
+        SELECT setval(
+          pg_get_serial_sequence('company_documents', 'id'),
+          COALESCE((SELECT MAX(id) FROM company_documents), 1),
+          (SELECT MAX(id) FROM company_documents) IS NOT NULL
+        )`.catch(() => {});
     })().catch((error) => {
       companyDocumentsSchemaPromise = null;
       throw error;
@@ -3313,6 +3319,14 @@ app.post("/api/admin/company-documents",
       if (!documentName) return err(res, "Document name is required", 400);
       if (!req.file) return err(res, "Document file is required", 400);
 
+      // Resync sequence before insert to avoid unique constraint violations
+      await sql`
+        SELECT setval(
+          pg_get_serial_sequence('company_documents', 'id'),
+          COALESCE((SELECT MAX(id) FROM company_documents), 1),
+          (SELECT MAX(id) FROM company_documents) IS NOT NULL
+        )`.catch(() => {});
+
       const extension = path.extname(req.file.originalname || "").toLowerCase();
       const fileType = extension === ".pdf" ? "pdf" : "image";
       const [document] = await sql`
@@ -3407,6 +3421,29 @@ app.put("/api/admin/company-documents/:id",
   }
 );
 
+app.patch("/api/admin/company-documents/:id/status",
+  verifyAdminToken,
+  role("SuperAdmin", "SiteManager"),
+  async (req, res) => {
+    try {
+      await ensureCompanyDocumentsSchema();
+      const isActive = req.body.is_active !== false && req.body.is_active !== "false";
+      const [document] = await sql`
+        UPDATE company_documents
+        SET is_active = ${isActive},
+            updated_by_admin_id = ${req.admin.admin_id || null},
+            updated_at = NOW()
+        WHERE id = ${req.params.id}
+        RETURNING id, document_name, is_active`;
+      if (!document) return err(res, "Company document not found", 404);
+      await logAdminAudit(req, "CompanyDocuments", "ToggleStatus", "company_documents", req.params.id, sql.json({ is_active: isActive }));
+      return ok(res, document, `Company document ${isActive ? 'activated' : 'deactivated'} successfully.`);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
 app.delete("/api/admin/company-documents/:id",
   verifyAdminToken,
   role("SuperAdmin", "SiteManager"),
@@ -3414,15 +3451,12 @@ app.delete("/api/admin/company-documents/:id",
     try {
       await ensureCompanyDocumentsSchema();
       const [document] = await sql`
-        UPDATE company_documents
-        SET is_active = FALSE,
-            updated_by_admin_id = ${req.admin.admin_id || null},
-            updated_at = NOW()
+        DELETE FROM company_documents
         WHERE id = ${req.params.id}
-        RETURNING id`;
+        RETURNING id, document_name`;
       if (!document) return err(res, "Company document not found", 404);
-      await logAdminAudit(req, "CompanyDocuments", "DeactivateDocument", "company_documents", req.params.id, sql.json({ is_active: false }));
-      return ok(res, {}, "Company document deactivated.");
+      await logAdminAudit(req, "CompanyDocuments", "DeleteDocument", "company_documents", req.params.id, sql.json({ document_name: document.document_name }));
+      return ok(res, {}, "Company document deleted successfully.");
     } catch (e) {
       return err(res, e.message);
     }
