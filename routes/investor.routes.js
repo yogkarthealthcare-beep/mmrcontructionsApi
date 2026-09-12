@@ -1689,17 +1689,27 @@ router.get("/investor/enroll/my", authInvestor, async (req, res) => {
 router.get("/investor/enrollment/:id/print", async (req, res) => {
   try {
     const id = String(req.params.id);
-    const pdfBuffer = await generateInvestorPdf(id);
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id.trim());
 
-    const [enrollment] = await sql`SELECT investor_enrollment_id, form_date FROM investor_enrollments WHERE id = ${id}`;
+    let enrollment;
+    if (isUuid) {
+      const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE id = ${id}`;
+      enrollment = resRow;
+    } else {
+      const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE investor_id = ${Number(id) || 0} OR investor_enrollment_id = ${id} ORDER BY created_at DESC LIMIT 1`;
+      enrollment = resRow;
+    }
+
     if (!enrollment) {
       return err(res, "Enrollment not found.", 404);
     }
 
+    const pdfBuffer = await generateInvestorPdf(enrollment.id);
+
     const dateStr = enrollment.form_date 
       ? new Date(enrollment.form_date).toISOString().split('T')[0] 
       : new Date().toISOString().split('T')[0];
-    const fileName = `MMR-Investor-${enrollment.investor_enrollment_id}-${dateStr}.pdf`;
+    const fileName = `MMR-Investor-${enrollment.investor_enrollment_id || 'Form'}-${dateStr}.pdf`;
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
@@ -1781,12 +1791,13 @@ router.get(["/admin/investor-enrollment", "/admin/investor-enrollments"], authAd
 router.get("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id).trim());
     let row;
-    if (String(id).includes("-") || isNaN(Number(id))) {
+    if (isUuid) {
       const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE id = ${id}`;
       row = resRow;
     } else {
-      const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE id = ${id} OR investor_id = ${Number(id)} ORDER BY created_at DESC LIMIT 1`;
+      const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE investor_id = ${Number(id) || 0} OR investor_enrollment_id = ${String(id)} ORDER BY created_at DESC LIMIT 1`;
       row = resRow;
     }
 
@@ -1991,49 +2002,97 @@ router.put("/admin/investor-users/:id/status", authAdmin, async (req, res) => {
 });
 
 // DELETE /api/admin/investor-enrollment/:id (Admin - Delete)
-router.delete("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
+router.delete(["/admin/investor-enrollment/:id", "/admin/investor-enrollments/:id", "/admin/investor-users/:id", "/admin/investors-portal/:id"], authAdmin, async (req, res) => {
   try {
-    const { id: enrollmentId } = req.params;
-    
-    const [enrollment] = await sql`SELECT investor_id FROM investor_enrollments WHERE id = ${enrollmentId}`;
-    if (!enrollment) return err(res, "Enrollment not found.", 404);
-    
-    const investorId = enrollment.investor_id;
+    const { id: rawId } = req.params;
+    if (!rawId) return err(res, "Invalid ID provided.", 400);
+
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(rawId).trim());
+    let investorId = null;
+    let enrollmentId = isUuid ? rawId : null;
+
+    if (isUuid) {
+      const [enrollment] = await sql`SELECT id, investor_id FROM investor_enrollments WHERE id = ${rawId}`;
+      if (enrollment) {
+        enrollmentId = enrollment.id;
+        investorId = enrollment.investor_id;
+      }
+    } else if (!isNaN(Number(rawId))) {
+      const numId = Number(rawId);
+      // Check if user exists in investor_users
+      const [invUser] = await sql`SELECT id FROM investor_users WHERE id = ${numId}`;
+      if (invUser) {
+        investorId = invUser.id;
+      } else {
+        // Check if there is an enrollment with investor_id = numId
+        const [enrollment] = await sql`SELECT id, investor_id FROM investor_enrollments WHERE investor_id = ${numId} LIMIT 1`;
+        if (enrollment) {
+          enrollmentId = enrollment.id;
+          investorId = enrollment.investor_id || numId;
+        } else {
+          // Check showcase investors table
+          const [inv] = await sql`SELECT id, user_id FROM investors WHERE id = ${numId} OR user_id = ${numId} LIMIT 1`;
+          if (inv) {
+            investorId = inv.user_id || inv.id;
+          } else {
+            investorId = numId;
+          }
+        }
+      }
+    }
+
+    if (!investorId && !enrollmentId) {
+      return err(res, "Investor or enrollment not found.", 404);
+    }
 
     let profileImageUrl = null;
     let profileImagePublicId = null;
 
     await sql.begin(async tx => {
-      // Find and delete the profile image from the investors table if it exists
-      const [investorProfile] = await tx`SELECT profile_image_url, profile_image_public_id FROM investors WHERE user_id = ${investorId}`;
-      if (investorProfile) {
-        profileImageUrl = investorProfile.profile_image_url;
-        profileImagePublicId = investorProfile.profile_image_public_id;
-      }
-      
-      await tx`DELETE FROM investors WHERE user_id = ${investorId}`;
-      await tx`DELETE FROM investor_deposits WHERE investor_id = ${investorId}`;
-      await tx`DELETE FROM investor_documents WHERE investor_id = ${investorId}`;
-      await tx`DELETE FROM investor_notifications WHERE investor_id = ${investorId}`;
-      await tx`DELETE FROM investor_settlement_preferences WHERE investor_id = ${investorId}`;
-      await tx`DELETE FROM investor_transactions WHERE investor_id = ${investorId}`;
-      await tx`DELETE FROM investor_withdrawals WHERE investor_id = ${investorId}`;
-      await tx`DELETE FROM investor_enrollments WHERE investor_id = ${investorId}`;
-      await tx`DELETE FROM investor_users WHERE id = ${investorId}`;
+      if (investorId) {
+        // Find and delete profile image from the investors table if it exists
+        try {
+          const [investorProfile] = await tx`SELECT profile_image_url, profile_image_public_id FROM investors WHERE user_id = ${investorId} OR id = ${investorId}`;
+          if (investorProfile) {
+            profileImageUrl = investorProfile.profile_image_url;
+            profileImagePublicId = investorProfile.profile_image_public_id;
+          }
+        } catch (e) {}
 
-      await tx`
-        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-        VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
-                'InvestorManagement', 'Deleted', 'investor_users', ${investorId})`;
+        try { await tx`DELETE FROM investors WHERE user_id = ${investorId} OR id = ${investorId}`; } catch (e) {}
+        try { await tx`DELETE FROM investor_deposits WHERE investor_id = ${investorId}`; } catch (e) {}
+        try { await tx`DELETE FROM investor_documents WHERE investor_id = ${investorId}`; } catch (e) {}
+        try { await tx`DELETE FROM investor_notifications WHERE investor_id = ${investorId}`; } catch (e) {}
+        try { await tx`DELETE FROM investor_settlement_preferences WHERE investor_id = ${investorId}`; } catch (e) {}
+        try { await tx`DELETE FROM investor_transactions WHERE investor_id = ${investorId}`; } catch (e) {}
+        try { await tx`DELETE FROM investor_withdrawals WHERE investor_id = ${investorId}`; } catch (e) {}
+        try { await tx`DELETE FROM investor_wallet WHERE investor_id = ${investorId}`; } catch (e) {}
+        try { await tx`DELETE FROM investor_enrollments WHERE investor_id = ${investorId}`; } catch (e) {}
+        try { await tx`DELETE FROM investor_users WHERE id = ${investorId}`; } catch (e) {}
+      }
+
+      if (enrollmentId) {
+        try { await tx`DELETE FROM investor_enrollments WHERE id = ${enrollmentId}`; } catch (e) {}
+      }
+
+      try {
+        await tx`
+          INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+          VALUES ('Admin', ${req.admin?.admin_id || 0}, ${req.admin?.full_name || 'Admin'},
+                  'InvestorManagement', 'Deleted', 'investor_users', ${String(investorId || enrollmentId)})`;
+      } catch (e) {}
     });
 
     if (profileImageUrl) {
-      await deleteFileFromStorage(profileImageUrl, profileImagePublicId);
+      try {
+        await deleteFileFromStorage(profileImageUrl, profileImagePublicId);
+      } catch (e) {}
     }
 
     return ok(res, {}, "Investor deleted successfully.");
   } catch (e) {
-    if (e.message === "Enrollment not found.") return err(res, e.message, 404);
+    console.error("Failed to delete investor:", e);
+    if (e.message === "Enrollment not found." || e.message === "Investor not found.") return err(res, e.message, 404);
     return err(res, "Failed to delete investor: " + e.message);
   }
 });

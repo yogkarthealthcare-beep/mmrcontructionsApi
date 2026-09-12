@@ -1291,7 +1291,7 @@ const requireMlmSchema = (() => {
           CREATE TABLE IF NOT EXISTS associate_referral_links (
             id SERIAL PRIMARY KEY,
             associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-            invite_code VARCHAR(80) NOT NULL UNIQUE,
+            invite_code VARCHAR(80) NOT NULL,
             referral_url TEXT,
             total_clicks INTEGER NOT NULL DEFAULT 0,
             total_registrations INTEGER NOT NULL DEFAULT 0,
@@ -1303,7 +1303,7 @@ const requireMlmSchema = (() => {
           CREATE TABLE IF NOT EXISTS referral_registrations (
             id SERIAL PRIMARY KEY,
             sponsor_user_id INTEGER REFERENCES users(user_id),
-            referred_user_id INTEGER UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
+            referred_user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
             sponsor_invite_code VARCHAR(80),
             registration_source VARCHAR(80) DEFAULT 'ReferralLink',
             referral_level INTEGER NOT NULL DEFAULT 1,
@@ -1312,18 +1312,25 @@ const requireMlmSchema = (() => {
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
         await sql`
+          CREATE TABLE IF NOT EXISTS mlm_network (
+            id SERIAL PRIMARY KEY,
+            associate_user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+            sponsor_user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+            level INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )`;
+        await sql`
           CREATE TABLE IF NOT EXISTS mlm_tree_closure (
             id SERIAL PRIMARY KEY,
             ancestor_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
             descendant_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
             depth INTEGER NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            UNIQUE (ancestor_user_id, descendant_user_id)
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
         await sql`
           CREATE TABLE IF NOT EXISTS associate_ranks (
             rank_id SERIAL PRIMARY KEY,
-            rank_name VARCHAR(80) NOT NULL UNIQUE,
+            rank_name VARCHAR(80) NOT NULL,
             min_direct_sales_gaj NUMERIC(12,2) NOT NULL DEFAULT 0,
             min_total_network_sales_gaj NUMERIC(12,2) NOT NULL DEFAULT 0,
             commission_multiplier NUMERIC(8,2) NOT NULL DEFAULT 1,
@@ -1342,7 +1349,7 @@ const requireMlmSchema = (() => {
         await sql`
           CREATE TABLE IF NOT EXISTS associate_sales_tracker (
             tracker_id SERIAL PRIMARY KEY,
-            associate_user_id INTEGER NOT NULL UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
+            associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
             total_gaj_sold NUMERIC(14,2) NOT NULL DEFAULT 0,
             total_commission_earned NUMERIC(14,2) NOT NULL DEFAULT 0,
             current_rank_id INTEGER REFERENCES associate_ranks(rank_id) ON DELETE SET NULL,
@@ -1354,23 +1361,67 @@ const requireMlmSchema = (() => {
         
         try {
           await sql`DELETE FROM associate_ranks WHERE rank_id NOT IN (SELECT MIN(rank_id) FROM associate_ranks GROUP BY rank_name)`;
-          await sql`ALTER TABLE associate_ranks ADD UNIQUE (rank_name)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_associate_ranks_name ON associate_ranks(rank_name)`;
         } catch(e) {}
         try {
           await sql`DELETE FROM associate_referral_links WHERE id NOT IN (SELECT MIN(id) FROM associate_referral_links GROUP BY invite_code)`;
-          await sql`ALTER TABLE associate_referral_links ADD UNIQUE (invite_code)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc_ref_links_code ON associate_referral_links(invite_code)`;
+        } catch(e) {}
+        try {
+          await sql`DELETE FROM associate_sales_tracker WHERE tracker_id NOT IN (SELECT MIN(tracker_id) FROM associate_sales_tracker GROUP BY associate_user_id)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_associate_sales_tracker_user ON associate_sales_tracker(associate_user_id)`;
+        } catch(e) {}
+        try {
+          await sql`DELETE FROM mlm_network WHERE id NOT IN (SELECT MIN(id) FROM mlm_network GROUP BY associate_user_id)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_mlm_network_assoc ON mlm_network(associate_user_id)`;
         } catch(e) {}
         try {
           await sql`DELETE FROM referral_registrations WHERE id NOT IN (SELECT MIN(id) FROM referral_registrations GROUP BY referred_user_id)`;
-          await sql`ALTER TABLE referral_registrations ADD UNIQUE (referred_user_id)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_referral_registrations_user ON referral_registrations(referred_user_id)`;
         } catch(e) {}
         try {
           await sql`DELETE FROM mlm_tree_closure WHERE id NOT IN (SELECT MIN(id) FROM mlm_tree_closure GROUP BY ancestor_user_id, descendant_user_id)`;
-          await sql`ALTER TABLE mlm_tree_closure ADD UNIQUE (ancestor_user_id, descendant_user_id)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_mlm_tree_closure_pair ON mlm_tree_closure(ancestor_user_id, descendant_user_id)`;
         } catch(e) {}
         try {
           await sql`DELETE FROM commission_monthly_schedule WHERE schedule_id NOT IN (SELECT MIN(schedule_id) FROM commission_monthly_schedule GROUP BY commission_id, month_no)`;
-          await sql`ALTER TABLE commission_monthly_schedule ADD UNIQUE (commission_id, month_no)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_comm_sched_comm_month ON commission_monthly_schedule(commission_id, month_no)`;
+        } catch(e) {}
+
+        try {
+          await sql`
+            CREATE OR REPLACE FUNCTION fn_on_user_approved()
+            RETURNS TRIGGER AS $$
+            BEGIN
+                IF NEW.account_status = 'Active' AND (OLD.account_status IS NULL OR OLD.account_status <> 'Active') THEN
+                    IF NEW.member_id IS NULL THEN
+                        NEW.member_id := fn_generate_member_id(NEW.user_type);
+                    END IF;
+
+                    IF NEW.user_type = 'Associate' AND NEW.invitation_code IS NULL THEN
+                        NEW.invitation_code := fn_generate_invite_code();
+                    END IF;
+
+                    IF NEW.user_type = 'Associate' THEN
+                        INSERT INTO associate_sales_tracker (associate_user_id)
+                        VALUES (NEW.user_id)
+                        ON CONFLICT (associate_user_id) DO NOTHING;
+
+                        INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
+                        VALUES (
+                            NEW.user_id,
+                            NEW.sponsor_user_id,
+                            CASE WHEN NEW.sponsor_user_id IS NULL THEN 1
+                                 ELSE COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = NEW.sponsor_user_id), 0) + 1
+                            END
+                        )
+                        ON CONFLICT (associate_user_id) DO NOTHING;
+                    END IF;
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+          `;
         } catch(e) {}
         
         await sql`
@@ -1396,8 +1447,7 @@ const requireMlmSchema = (() => {
             status VARCHAR(30) NOT NULL DEFAULT 'Pending',
             paid_at TIMESTAMPTZ,
             payment_reference TEXT,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            UNIQUE (commission_id, month_no)
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
         await sql`
           CREATE TABLE IF NOT EXISTS associate_status_history (
@@ -1549,37 +1599,57 @@ const ensureAssociateReferralLink = async (req, associate) => {
 
 const syncMlmTreeAndReferrals = async () => {
   try {
+    await requireMlmSchema();
     await sql`
       INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
       SELECT user_id, user_id, 0 FROM users
-      ON CONFLICT DO NOTHING`;
+      ON CONFLICT (ancestor_user_id, descendant_user_id) DO NOTHING`;
 
     const sponsoredUsers = await sql`
       SELECT user_id, sponsor_user_id, invitation_code FROM users WHERE sponsor_user_id IS NOT NULL`;
 
     for (const u of sponsoredUsers) {
-      await sql`
-        INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
-        VALUES (${u.sponsor_user_id}, ${u.user_id}, 'Approved', NOW())
-        ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
+      try {
+        const [existingRef] = await sql`SELECT id FROM referral_registrations WHERE referred_user_id = ${u.user_id} LIMIT 1`;
+        if (existingRef) {
+          await sql`
+            UPDATE referral_registrations
+            SET status = 'Approved', approved_at = NOW(), sponsor_user_id = COALESCE(sponsor_user_id, ${u.sponsor_user_id})
+            WHERE referred_user_id = ${u.user_id}`;
+        } else {
+          await sql`
+            INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
+            VALUES (${u.sponsor_user_id}, ${u.user_id}, 'Approved', NOW())
+            ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
+        }
+      } catch (e) {}
 
-      await sql`
-        INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
-        VALUES (${u.user_id}, ${u.sponsor_user_id},
-          COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${u.sponsor_user_id}), 0) + 1)
-        ON CONFLICT (associate_user_id) DO NOTHING`;
+      try {
+        const [existingNet] = await sql`SELECT id FROM mlm_network WHERE associate_user_id = ${u.user_id} LIMIT 1`;
+        if (!existingNet) {
+          await sql`
+            INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
+            VALUES (${u.user_id}, ${u.sponsor_user_id},
+              COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${u.sponsor_user_id}), 0) + 1)
+            ON CONFLICT (associate_user_id) DO NOTHING`;
+        }
+      } catch (e) {}
 
-      await sql`
-        INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-        VALUES (${u.sponsor_user_id}, ${u.user_id}, 1)
-        ON CONFLICT DO NOTHING`;
+      try {
+        await sql`
+          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+          VALUES (${u.sponsor_user_id}, ${u.user_id}, 1)
+          ON CONFLICT (ancestor_user_id, descendant_user_id) DO NOTHING`;
+      } catch (e) {}
 
-      await sql`
-        INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-        SELECT ancestor_user_id, ${u.user_id}, depth + 1
-        FROM mlm_tree_closure
-        WHERE descendant_user_id = ${u.sponsor_user_id}
-        ON CONFLICT DO NOTHING`;
+      try {
+        await sql`
+          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+          SELECT ancestor_user_id, ${u.user_id}, depth + 1
+          FROM mlm_tree_closure
+          WHERE descendant_user_id = ${u.sponsor_user_id}
+          ON CONFLICT (ancestor_user_id, descendant_user_id) DO NOTHING`;
+      } catch (e) {}
     }
   } catch (err) {
     console.error('[syncMlmTreeAndReferrals] Error syncing tree closure:', err);
@@ -1589,36 +1659,90 @@ const syncMlmTreeAndReferrals = async () => {
 const linkApprovedReferral = async (userId) => {
   await requireMlmSchema();
   const [user] = await sql`SELECT user_id, sponsor_user_id, invitation_code FROM users WHERE user_id = ${userId}`;
-  if (!user?.sponsor_user_id) {
-    await sql`
-      INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-      VALUES (${userId}, ${userId}, 0)
-      ON CONFLICT DO NOTHING`;
+  if (!user) return;
+
+  if (!user.sponsor_user_id) {
+    try {
+      const [existingClosure] = await sql`
+        SELECT 1 FROM mlm_tree_closure WHERE ancestor_user_id = ${userId} AND descendant_user_id = ${userId} LIMIT 1`;
+      if (!existingClosure) {
+        await sql`
+          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+          VALUES (${userId}, ${userId}, 0)
+          ON CONFLICT (ancestor_user_id, descendant_user_id) DO NOTHING`;
+      }
+    } catch (e) {
+      console.warn('[linkApprovedReferral] Self closure warning:', e.message);
+    }
     return;
   }
-  await sql`
-    INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, status, approved_at)
-    VALUES (${user.sponsor_user_id}, ${user.user_id}, ${user.invitation_code || null}, 'Approved', NOW())
-    ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
-  await sql`
-    INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
-    VALUES (${user.user_id}, ${user.sponsor_user_id},
-      COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${user.sponsor_user_id}), 0) + 1)
-    ON CONFLICT (associate_user_id) DO NOTHING`;
-  await sql`
-    INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-    VALUES (${user.user_id}, ${user.user_id}, 0)
-    ON CONFLICT DO NOTHING`;
-  await sql`
-    INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-    SELECT ancestor_user_id, ${user.user_id}, depth + 1
-    FROM mlm_tree_closure
-    WHERE descendant_user_id = ${user.sponsor_user_id}
-    ON CONFLICT DO NOTHING`;
-  await sql`
-    INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-      VALUES (${user.sponsor_user_id}, ${user.user_id}, 1)
-    ON CONFLICT DO NOTHING`;
+
+  try {
+    const [existingRef] = await sql`SELECT id FROM referral_registrations WHERE referred_user_id = ${user.user_id} LIMIT 1`;
+    if (existingRef) {
+      await sql`
+        UPDATE referral_registrations
+        SET status = 'Approved', approved_at = NOW(), sponsor_user_id = COALESCE(sponsor_user_id, ${user.sponsor_user_id})
+        WHERE referred_user_id = ${user.user_id}`;
+    } else {
+      await sql`
+        INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, status, approved_at)
+        VALUES (${user.sponsor_user_id}, ${user.user_id}, ${user.invitation_code || null}, 'Approved', NOW())
+        ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
+    }
+  } catch (e) {
+    console.warn('[linkApprovedReferral] referral_registrations warning:', e.message);
+  }
+
+  try {
+    const [existingNet] = await sql`SELECT id FROM mlm_network WHERE associate_user_id = ${user.user_id} LIMIT 1`;
+    if (!existingNet) {
+      await sql`
+        INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
+        VALUES (${user.user_id}, ${user.sponsor_user_id},
+          COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${user.sponsor_user_id}), 0) + 1)
+        ON CONFLICT (associate_user_id) DO NOTHING`;
+    }
+  } catch (e) {
+    console.warn('[linkApprovedReferral] mlm_network warning:', e.message);
+  }
+
+  try {
+    const [selfClosure] = await sql`
+      SELECT 1 FROM mlm_tree_closure WHERE ancestor_user_id = ${user.user_id} AND descendant_user_id = ${user.user_id} LIMIT 1`;
+    if (!selfClosure) {
+      await sql`
+        INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+        VALUES (${user.user_id}, ${user.user_id}, 0)
+        ON CONFLICT (ancestor_user_id, descendant_user_id) DO NOTHING`;
+    }
+  } catch (e) {
+    console.warn('[linkApprovedReferral] mlm_tree_closure self warning:', e.message);
+  }
+
+  try {
+    await sql`
+      INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+      SELECT ancestor_user_id, ${user.user_id}, depth + 1
+      FROM mlm_tree_closure
+      WHERE descendant_user_id = ${user.sponsor_user_id}
+      ON CONFLICT (ancestor_user_id, descendant_user_id) DO NOTHING`;
+  } catch (e) {
+    console.warn('[linkApprovedReferral] mlm_tree_closure upline warning:', e.message);
+  }
+
+  try {
+    const [directClosure] = await sql`
+      SELECT 1 FROM mlm_tree_closure WHERE ancestor_user_id = ${user.sponsor_user_id} AND descendant_user_id = ${user.user_id} LIMIT 1`;
+    if (!directClosure) {
+      await sql`
+        INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+        VALUES (${user.sponsor_user_id}, ${user.user_id}, 1)
+        ON CONFLICT (ancestor_user_id, descendant_user_id) DO NOTHING`;
+    }
+  } catch (e) {
+    console.warn('[linkApprovedReferral] mlm_tree_closure direct warning:', e.message);
+  }
 };
 
 const requireCommissionEngineSchema = (() => {
@@ -7378,6 +7502,7 @@ app.post("/api/admin/users/:id/approve",
   role("SuperAdmin"),
   async (req, res) => {
     try {
+      await requireMlmSchema();
       const uid = req.params.id;
       const { verify_note } = req.body;
       const [user] = await sql`
@@ -7401,24 +7526,45 @@ app.post("/api/admin/users/:id/approve",
 
       // For associate: insert tracker + MLM node
       if (user.user_type === "Associate") {
-        await sql`
-          INSERT INTO associate_sales_tracker (associate_user_id)
-          VALUES (${uid}) ON CONFLICT (associate_user_id) DO NOTHING`;
+        try {
+          const [existingTracker] = await sql`
+            SELECT tracker_id FROM associate_sales_tracker WHERE associate_user_id = ${uid} LIMIT 1`;
+          if (!existingTracker) {
+            await sql`
+              INSERT INTO associate_sales_tracker (associate_user_id)
+              VALUES (${uid}) ON CONFLICT (associate_user_id) DO NOTHING`;
+          }
+        } catch (trackerErr) {
+          console.warn("[Approve Associate] associate_sales_tracker warning:", trackerErr.message);
+        }
 
-        const [sponsor] = await sql`SELECT sponsor_user_id FROM users WHERE user_id = ${uid}`;
-        const sponsorId = sponsor?.sponsor_user_id || null;
-        await sql`
-          INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
-          VALUES (${uid}, ${sponsorId},
-                  CASE WHEN ${sponsorId}::int IS NULL THEN 1
-                       ELSE COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${sponsorId}), 0) + 1
-                  END) ON CONFLICT (associate_user_id) DO NOTHING`;
-        await linkApprovedReferral(uid);
+        try {
+          const [sponsor] = await sql`SELECT sponsor_user_id FROM users WHERE user_id = ${uid}`;
+          const sponsorId = sponsor?.sponsor_user_id || null;
+          const [existingNetwork] = await sql`
+            SELECT id FROM mlm_network WHERE associate_user_id = ${uid} LIMIT 1`;
+          if (!existingNetwork) {
+            await sql`
+              INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
+              VALUES (${uid}, ${sponsorId},
+                      CASE WHEN ${sponsorId}::int IS NULL THEN 1
+                           ELSE COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${sponsorId}), 0) + 1
+                      END) ON CONFLICT (associate_user_id) DO NOTHING`;
+          }
+        } catch (netErr) {
+          console.warn("[Approve Associate] mlm_network warning:", netErr.message);
+        }
+
+        try {
+          await linkApprovedReferral(uid);
+        } catch (linkErr) {
+          console.warn("[Approve Associate] linkApprovedReferral warning:", linkErr.message);
+        }
       }
 
       await sql`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action,
-                               target_table, target_record_id, new_value)
+                                target_table, target_record_id, new_value)
         VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
                 'UserApproval', 'Approved', 'users', ${uid},
                 ${JSON.stringify({ member_id: memberId, note: verify_note || "" })})`;
@@ -11618,6 +11764,8 @@ if (shouldStartServer) {
         await requirePlotManagementSchema().catch((e) => console.warn("[MMR API] Plot schema warning:", e.message));
       }
       await Promise.all([
+        requireMlmSchema().catch((e) => console.warn("[MMR API] MLM schema warning:", e.message)),
+        requireCommissionEngineSchema().catch((e) => console.warn("[MMR API] Commission schema warning:", e.message)),
         ensureHomeExperienceSchema().catch(() => { }),
         ensureHomeSlidersSchema().catch(() => { }),
         ensureSiteHtmlMapSchema().catch(() => { }),
