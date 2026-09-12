@@ -891,7 +891,7 @@ router.get("/investor/wallet", authInvestor, async (req, res) => {
   }
 });
 
-router.get("/investor/settlement-preference", authInvestor, async (req, res) => {
+router.get(["/investor/settlement-preference", "/investor/settlement"], authInvestor, async (req, res) => {
   try {
     const [preference] = await sql`
       SELECT * FROM investor_settlement_preferences WHERE investor_id = ${req.investor.id}`;
@@ -905,9 +905,9 @@ router.get("/investor/settlement-preference", authInvestor, async (req, res) => 
   }
 });
 
-router.post("/investor/settlement-preference", authInvestor, async (req, res) => {
+router.post(["/investor/settlement-preference", "/investor/settlement"], authInvestor, async (req, res) => {
   try {
-    const frequency = String(req.body.frequency || "").trim();
+    const frequency = String(req.body.frequency || req.body.preference || "").trim();
     if (!["monthly", "half_yearly", "yearly"].includes(frequency)) return err(res, "Invalid settlement frequency.", 400);
     const [created] = await sql`
       INSERT INTO investor_settlement_preferences (investor_id, frequency)
@@ -922,9 +922,9 @@ router.post("/investor/settlement-preference", authInvestor, async (req, res) =>
   }
 });
 
-router.post("/investor/settlement-change-request", authInvestor, async (req, res) => {
+router.post(["/investor/settlement-change-request", "/investor/settlement/request"], authInvestor, async (req, res) => {
   try {
-    const requested = String(req.body.requested_frequency || "").trim();
+    const requested = String(req.body.requested_frequency || req.body.requestedFrequency || "").trim();
     const reason = String(req.body.reason || "").trim();
     if (!["monthly", "half_yearly", "yearly"].includes(requested)) return err(res, "Invalid requested frequency.", 400);
     const [preference] = await sql`SELECT frequency FROM investor_settlement_preferences WHERE investor_id = ${req.investor.id}`;
@@ -1220,7 +1220,7 @@ router.get("/admin/investors-portal", authAdmin, async (req, res) => {
     const limitNum = Math.max(1, Math.min(1000, parseInt(limit, 10) || 20));
     const offset = (pageNum - 1) * limitNum;
 
-    let query = sql`SELECT id, full_name, mobile_number, email, city, state, pan_number, bank_name, account_number, ifsc_code, available_balance, total_investment, total_deposits, total_withdrawals, status, is_verified, profile_picture_url, COALESCE(sponsor_invite_code, 'MMR00001') AS sponsor_invite_code, created_at FROM investor_users WHERE deleted_at IS NULL`;
+    let query = sql`SELECT id, full_name, mobile_number, email, city, state, pan_number, bank_name, account_number, ifsc_code, available_balance, total_investment, total_deposits, total_withdrawals, status, is_verified, COALESCE(enrollment_status, 'Pending') AS enrollment_status, profile_picture_url, COALESCE(sponsor_invite_code, 'MMR00001') AS sponsor_invite_code, created_at FROM investor_users WHERE deleted_at IS NULL`;
 
     if (search) {
       const s = `%${search.trim()}%`;

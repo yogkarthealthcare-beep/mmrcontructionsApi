@@ -5153,6 +5153,7 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
              u.pan_number, u.aadhar_number, u.account_status,
              u.email_verified, u.is_otp_verified,
              COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
+             CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted') THEN TRUE ELSE FALSE END AS is_verified,
              COALESCE(k.status, 'Not Submitted') AS kyc_status,
              k.admin_remarks AS kyc_remarks,
              u.invitation_code, u.registered_at,
@@ -6659,6 +6660,8 @@ const getAdminUsersPage = async (query, defaults = {}) => {
   const rows = await sql.unsafe(`
     SELECT u.user_id, u.member_id, u.user_type, u.full_name, u.mobile_no,
            u.email, u.account_status, u.registered_at, u.updated_at,
+           COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
+           CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted') THEN TRUE ELSE FALSE END AS is_verified,
            pa.address_line1 AS address, pa.city, pa.state, pa.pin_code,
            u.invitation_code, sp.full_name AS sponsor_name,
            COALESCE(doc.doc_count, 0)::int AS doc_count
