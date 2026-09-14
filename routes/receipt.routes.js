@@ -199,6 +199,7 @@ router.get("/admin/receipts", adminAuth, async (req, res) => {
       limit = 25,
       search = "",
       receipt_no = "",
+      invoice_no = "",
       customer_name = "",
       mobile_no = "",
       plot_no = "",
@@ -207,6 +208,9 @@ router.get("/admin/receipts", adminAuth, async (req, res) => {
       payment_mode = "",
       date_from = "",
       date_to = "",
+      min_amount = "",
+      max_amount = "",
+      amount = "",
       plotting_place = "",
       status = "",
     } = req.query;
@@ -226,11 +230,13 @@ router.get("/admin/receipts", adminAuth, async (req, res) => {
         LOWER(COALESCE(plot_no, '')) LIKE ${q} OR
         LOWER(COALESCE(advisor_name, '')) LIKE ${q} OR
         LOWER(COALESCE(amount_depositor_name, '')) LIKE ${q} OR
-        CAST(serial_no AS TEXT) LIKE ${q}
+        CAST(serial_no AS TEXT) LIKE ${q} OR
+        CAST(paid_amount AS TEXT) LIKE ${q}
       )`;
     }
 
-    let receiptNoCond = receipt_no && receipt_no.trim() ? sql`LOWER(receipt_no) LIKE ${`%${receipt_no.trim().toLowerCase()}%`}` : sql`TRUE`;
+    const recQuery = (receipt_no || invoice_no || "").trim();
+    let receiptNoCond = recQuery ? sql`LOWER(receipt_no) LIKE ${`%${recQuery.toLowerCase()}%`}` : sql`TRUE`;
     let customerNameCond = customer_name && customer_name.trim() ? sql`LOWER(customer_name) LIKE ${`%${customer_name.trim().toLowerCase()}%`}` : sql`TRUE`;
     let mobileCond = mobile_no && mobile_no.trim() ? sql`mobile_no LIKE ${`%${mobile_no.trim()}%`}` : sql`TRUE`;
     let plotCond = plot_no && plot_no.trim() ? sql`LOWER(plot_no) LIKE ${`%${plot_no.trim().toLowerCase()}%`}` : sql`TRUE`;
@@ -241,6 +247,9 @@ router.get("/admin/receipts", adminAuth, async (req, res) => {
     let statusCond = status && status.trim() ? sql`LOWER(status) = ${status.trim().toLowerCase()}` : sql`status != 'Deleted'`;
     let dateFromCond = date_from && date_from.trim() ? sql`receipt_date >= ${date_from.trim()}::date` : sql`TRUE`;
     let dateToCond = date_to && date_to.trim() ? sql`receipt_date <= ${date_to.trim()}::date` : sql`TRUE`;
+    let minAmtCond = min_amount && !isNaN(Number(min_amount)) ? sql`paid_amount >= ${Number(min_amount)}` : sql`TRUE`;
+    let maxAmtCond = max_amount && !isNaN(Number(max_amount)) ? sql`paid_amount <= ${Number(max_amount)}` : sql`TRUE`;
+    let exactAmtCond = amount && !isNaN(Number(amount)) ? sql`(paid_amount = ${Number(amount)} OR receipt_amount = ${Number(amount)})` : sql`TRUE`;
 
     // Fetch Receipts
     const receipts = await sql`
@@ -258,6 +267,9 @@ router.get("/admin/receipts", adminAuth, async (req, res) => {
         AND ${statusCond}
         AND ${dateFromCond}
         AND ${dateToCond}
+        AND ${minAmtCond}
+        AND ${maxAmtCond}
+        AND ${exactAmtCond}
       ORDER BY id DESC
       LIMIT ${limitNum} OFFSET ${offset}
     `;
@@ -278,6 +290,9 @@ router.get("/admin/receipts", adminAuth, async (req, res) => {
         AND ${statusCond}
         AND ${dateFromCond}
         AND ${dateToCond}
+        AND ${minAmtCond}
+        AND ${maxAmtCond}
+        AND ${exactAmtCond}
     `;
 
     const total = parseInt(countRow?.total || "0", 10);
