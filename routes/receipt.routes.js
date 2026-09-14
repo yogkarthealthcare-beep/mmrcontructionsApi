@@ -306,7 +306,10 @@ router.get("/admin/receipts", adminAuth, async (req, res) => {
         COALESCE(SUM(CASE WHEN receipt_date = CURRENT_DATE AND status != 'Cancelled' AND status != 'Deleted' THEN 1 ELSE 0 END), 0) AS today_receipts,
         COALESCE(SUM(CASE WHEN receipt_date = CURRENT_DATE AND status != 'Cancelled' AND status != 'Deleted' THEN paid_amount ELSE 0 END), 0) AS today_collection,
         COALESCE(SUM(CASE WHEN status = 'Active' THEN 1 ELSE 0 END), 0) AS active_receipts,
-        COALESCE(SUM(CASE WHEN status = 'Cancelled' THEN 1 ELSE 0 END), 0) AS cancelled_receipts
+        COALESCE(SUM(CASE WHEN status = 'Cancelled' THEN 1 ELSE 0 END), 0) AS cancelled_receipts,
+        COALESCE(SUM(CASE WHEN LOWER(payment_type) = 'cash' AND status != 'Deleted' THEN 1 ELSE 0 END), 0) AS cash_receipts,
+        COALESCE(SUM(CASE WHEN LOWER(payment_type) = 'cheque' AND status != 'Deleted' THEN 1 ELSE 0 END), 0) AS cheque_receipts,
+        COALESCE(SUM(CASE WHEN (LOWER(payment_type) LIKE '%upi%' OR LOWER(payment_type) LIKE '%online%') AND status != 'Deleted' THEN 1 ELSE 0 END), 0) AS upi_receipts
       FROM receipts
       WHERE status != 'Deleted'
     `;
