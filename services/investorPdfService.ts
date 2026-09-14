@@ -135,7 +135,10 @@ function drawSignatureBox(doc: any, label: string, x: number, y: number, sigPath
 }
 
 export async function generateInvestorPdf(id: string): Promise<Buffer> {
-  const [enrollment] = await sql`SELECT * FROM investor_enrollments WHERE id = ${id}`;
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id).trim());
+  const [enrollment] = isUuid
+    ? await sql`SELECT * FROM investor_enrollments WHERE id = ${id}`
+    : await sql`SELECT * FROM investor_enrollments WHERE investor_id = ${Number(id) || 0} OR investor_enrollment_id = ${String(id)} ORDER BY created_at DESC LIMIT 1`;
   if (!enrollment) {
     throw new Error(`Investor enrollment with ID ${id} not found.`);
   }

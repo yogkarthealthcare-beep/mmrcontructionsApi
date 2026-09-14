@@ -2059,28 +2059,33 @@ router.delete(["/admin/investor-enrollment/:id", "/admin/investor-enrollments/:i
           }
         } catch (e) {}
 
-        try { await tx`DELETE FROM investors WHERE user_id = ${investorId} OR id = ${investorId}`; } catch (e) {}
-        try { await tx`DELETE FROM investor_deposits WHERE investor_id = ${investorId}`; } catch (e) {}
-        try { await tx`DELETE FROM investor_documents WHERE investor_id = ${investorId}`; } catch (e) {}
-        try { await tx`DELETE FROM investor_notifications WHERE investor_id = ${investorId}`; } catch (e) {}
-        try { await tx`DELETE FROM investor_settlement_preferences WHERE investor_id = ${investorId}`; } catch (e) {}
-        try { await tx`DELETE FROM investor_transactions WHERE investor_id = ${investorId}`; } catch (e) {}
-        try { await tx`DELETE FROM investor_withdrawals WHERE investor_id = ${investorId}`; } catch (e) {}
-        try { await tx`DELETE FROM investor_wallet WHERE investor_id = ${investorId}`; } catch (e) {}
-        try { await tx`DELETE FROM investor_enrollments WHERE investor_id = ${investorId}`; } catch (e) {}
-        try { await tx`DELETE FROM investor_users WHERE id = ${investorId}`; } catch (e) {}
+        await tx`DELETE FROM investors WHERE user_id = ${investorId} OR id = ${investorId}`;
+        await tx`DELETE FROM investor_deposits WHERE investor_id = ${investorId}`;
+        await tx`DELETE FROM investor_documents WHERE investor_id = ${investorId}`;
+        await tx`DELETE FROM investor_notifications WHERE investor_id = ${investorId}`;
+        await tx`DELETE FROM investor_settlement_preferences WHERE investor_id = ${investorId}`;
+        await tx`DELETE FROM settlement_change_requests WHERE investor_id = ${investorId}`;
+        await tx`DELETE FROM investor_transactions WHERE investor_id = ${investorId}`;
+        await tx`DELETE FROM investor_withdrawals WHERE investor_id = ${investorId}`;
+        await tx`DELETE FROM investor_enrollments WHERE investor_id = ${investorId}`;
+        await tx`DELETE FROM investor_users WHERE id = ${investorId}`;
       }
 
       if (enrollmentId) {
-        try { await tx`DELETE FROM investor_enrollments WHERE id = ${enrollmentId}`; } catch (e) {}
+        await tx`DELETE FROM investor_enrollments WHERE id = ${enrollmentId}`;
       }
 
       try {
+        const actorId = Number(req.admin?.admin_id || req.admin?.id) || 1;
+        const actorName = String(req.admin?.full_name || req.admin?.username || 'Admin');
+        const targetIdNum = investorId && !isNaN(Number(investorId)) ? Number(investorId) : null;
         await tx`
           INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-          VALUES ('Admin', ${req.admin?.admin_id || 0}, ${req.admin?.full_name || 'Admin'},
-                  'InvestorManagement', 'Deleted', 'investor_users', ${String(investorId || enrollmentId)})`;
-      } catch (e) {}
+          VALUES ('Admin', ${actorId}, ${actorName},
+                  'InvestorManagement', 'Deleted', 'investor_users', ${targetIdNum})`;
+      } catch (e) {
+        console.warn("[Investor Delete] audit_log insert error:", e.message);
+      }
     });
 
     if (profileImageUrl) {
