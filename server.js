@@ -11773,6 +11773,7 @@ if (shouldStartServer) {
         ensureHomeSlidersSchema().catch(() => { }),
         ensureSiteHtmlMapSchema().catch(() => { }),
         ensureAnalyticsSchema().catch(() => { }),
+        ensureReceiptsTable().catch((e) => console.warn("[MMR API] Receipts schema warning:", e.message)),
       ]).catch(() => { });
     } catch (error) {
       console.warn("[MMR API] Schema initialization warning:", error.message);

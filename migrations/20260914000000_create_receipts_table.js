@@ -29,7 +29,7 @@ export async function up(knex) {
       table.string("advisor_mobile", 25).nullable();
       table.timestamp("full_payment_time", { useTz: true }).nullable();
       table.date("receipt_date").notNullable().defaultTo(knex.raw("CURRENT_DATE"));
-      table.string("plotting_place", 255).notNullable().defaultTo("NEW M.M.R. CITY, Kanpur Lucknow Road, N.H.-27 Road Near Jajmau Tribhuwan Kheda (Unnao)");
+      table.string("plotting_place", 255).notNullable().defaultTo("00, TRIBHUVAN KHEDA, SHESHPUR, Unnao, Uttar Pradesh - 209801, India");
       table.text("depositor_signature").nullable();
       table.text("authorized_signature").nullable();
       table.text("notes").nullable();

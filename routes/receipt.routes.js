@@ -40,7 +40,7 @@ export async function ensureReceiptsTable() {
         advisor_mobile VARCHAR(25),
         full_payment_time TIMESTAMPTZ,
         receipt_date DATE NOT NULL DEFAULT CURRENT_DATE,
-        plotting_place VARCHAR(255) NOT NULL DEFAULT 'NEW M.M.R. CITY, Kanpur Lucknow Road, N.H.-27 Road Near Jajmau Tribhuwan Kheda (Unnao)',
+        plotting_place VARCHAR(255) NOT NULL DEFAULT '00, TRIBHUVAN KHEDA, SHESHPUR, Unnao, Uttar Pradesh - 209801, India',
         depositor_signature TEXT,
         authorized_signature TEXT,
         notes TEXT,
@@ -150,7 +150,7 @@ router.get("/admin/receipts/next-number", adminAuth, async (req, res) => {
       serial_no: nextSerial,
       receipt_no: formattedNo,
       receipt_date: new Date().toISOString().split("T")[0],
-      plotting_place: "NEW M.M.R. CITY, Kanpur Lucknow Road, N.H.-27 Road Near Jajmau Tribhuwan Kheda (Unnao)",
+      plotting_place: "00, TRIBHUVAN KHEDA, SHESHPUR, Unnao, Uttar Pradesh - 209801, India",
     });
   } catch (err) {
     console.error("GET /api/admin/receipts/next-number error:", err);
@@ -363,7 +363,7 @@ router.post("/admin/receipts", adminAuth, async (req, res) => {
       advisor_mobile,
       full_payment_time,
       receipt_date,
-      plotting_place = "NEW M.M.R. CITY, Kanpur Lucknow Road, N.H.-27 Road Near Jajmau Tribhuwan Kheda (Unnao)",
+      plotting_place = "00, TRIBHUVAN KHEDA, SHESHPUR, Unnao, Uttar Pradesh - 209801, India",
       depositor_signature,
       authorized_signature,
       notes,
@@ -513,9 +513,15 @@ router.get("/admin/receipts/:id", adminAuth, async (req, res) => {
       return fail(res, "Receipt not found", 404);
     }
 
-    const auditLogs = await sql`
-      SELECT * FROM receipt_audit_log WHERE receipt_id = ${receipt.id} ORDER BY id DESC
-    `;
+    let auditLogs = [];
+    try {
+      auditLogs = await sql`
+        SELECT * FROM receipt_audit_log WHERE receipt_id = ${receipt.id} ORDER BY id DESC
+      `;
+    } catch (auditErr) {
+      console.warn("Receipt audit log query warning:", auditErr.message);
+      auditLogs = [];
+    }
 
     const amountInWords = numberToWords(receipt.paid_amount);
 
@@ -610,9 +616,10 @@ router.get("/admin/receipts/:id/print", adminAuth, async (req, res) => {
       receipt,
       amountInWords: numberToWords(receipt.paid_amount),
       companyHeader: {
-        title: "NEW M.M.R. CITY",
-        addressLine1: "Kanpur Lucknow Road, N.H.-27 Road",
-        addressLine2: "Near Jajmau Tribhuwan Kheda (Unnao)",
+        title: "MMRCONSTRUCTION AND DEVELOPERS PRIVATE LIMITED",
+        addressLine1: "00, TRIBHUVAN KHEDA, SHESHPUR, Unnao, Uttar Pradesh - 209801, India",
+        email: "support@mmrconstructions.in",
+        contact: "9511119879",
       },
     });
   } catch (err) {
@@ -622,7 +629,7 @@ router.get("/admin/receipts/:id/print", adminAuth, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// 9. GET /api/admin/receipts/:id/pdf (Server-side PDFkit generation)
+// 9. GET /api/admin/receipts/:id/pdf (Server-side PDFkit generation: A4 Landscape Dual-Copy)
 // ─────────────────────────────────────────────────────────────
 router.get("/admin/receipts/:id/pdf", adminAuth, async (req, res) => {
   try {
@@ -640,12 +647,14 @@ router.get("/admin/receipts/:id/pdf", adminAuth, async (req, res) => {
       return res.status(404).send("Receipt not found");
     }
 
+    // A4 Landscape Dimensions: 841.89 x 595.28 points
     const doc = new PDFDocument({
       size: "A4",
-      margin: 36,
+      layout: "landscape",
+      margin: 16,
       info: {
         Title: `Receipt-${receipt.receipt_no}`,
-        Author: "MMR Constructions & Developers",
+        Author: "MMRCONSTRUCTION AND DEVELOPERS PRIVATE LIMITED",
       },
     });
 
@@ -655,121 +664,259 @@ router.get("/admin/receipts/:id/pdf", adminAuth, async (req, res) => {
 
     doc.pipe(res);
 
-    // Outer Decorative Border
-    doc.rect(20, 20, 555, 802).lineWidth(2).strokeColor("#123d2d").stroke();
-    doc.rect(24, 24, 547, 794).lineWidth(0.5).strokeColor("#d4af37").stroke();
+    const formatDate = (d) => {
+      if (!d) return "—";
+      const dt = new Date(d);
+      if (isNaN(dt.getTime())) return String(d);
+      const day = String(dt.getDate()).padStart(2, "0");
+      const month = String(dt.getMonth() + 1).padStart(2, "0");
+      const year = dt.getFullYear();
+      return `${day}/${month}/${year}`;
+    };
 
-    // Watermark if Cancelled
-    if (receipt.status === "Cancelled") {
-      doc.save();
-      doc.fontSize(60).fillColor("#ff0000").opacity(0.12);
-      doc.rotate(-30, { origin: [297, 420] });
-      doc.text("CANCELLED", 150, 400);
-      doc.restore();
-    }
+    const formatCurrency = (val) => {
+      const num = Number(val) || 0;
+      return num.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
 
-    // Header Section
-    doc.fontSize(22).font("Helvetica-Bold").fillColor("#123d2d").text("NEW M.M.R. CITY", { align: "center" });
-    doc.fontSize(10).font("Helvetica").fillColor("#4a5568").text("Kanpur Lucknow Road, N.H.-27 Road", { align: "center" });
-    doc.fontSize(10).text("Near Jajmau Tribhuwan Kheda (Unnao)", { align: "center" });
-    doc.moveDown(0.5);
+    const isCancelled = receipt.status === "Cancelled";
 
-    // Divider
-    doc.moveTo(35, doc.y).lineTo(560, doc.y).lineWidth(1.5).strokeColor("#123d2d").stroke();
-    doc.moveDown(0.6);
+    // Helper to render one copy card on the landscape page
+    const renderCopyCard = (startX, startY, cardWidth, cardHeight, copyType) => {
+      const isCustomer = copyType === "CUSTOMER COPY";
+      const contentX = startX + 10;
+      const contentW = cardWidth - 20;
 
-    // Title Badge
-    doc.fontSize(14).font("Helvetica-Bold").fillColor("#123d2d").text("PAYMENT RECEIPT", { align: "center" });
-    doc.moveDown(0.8);
+      // Card Border & Background
+      if (isCancelled) {
+        doc.roundedRect(startX, startY, cardWidth, cardHeight, 6)
+           .fillAndStroke("#fffafa", "#ef4444");
+      } else {
+        doc.roundedRect(startX, startY, cardWidth, cardHeight, 6)
+           .lineWidth(1.5)
+           .strokeColor("#064e3b")
+           .stroke();
+      }
 
-    // Top Meta Grid (Receipt No, Serial No, Date, Plotting Place)
-    const startY = doc.y;
-    doc.fontSize(10).font("Helvetica-Bold").fillColor("#2d3748");
-    doc.text(`Receipt No: `, 40, startY, { continued: true }).font("Helvetica").text(receipt.receipt_no);
-    doc.font("Helvetica-Bold").text(`Date: `, 380, startY, { continued: true }).font("Helvetica").text(new Date(receipt.receipt_date).toLocaleDateString("en-IN"));
+      // Watermark if Cancelled
+      if (isCancelled) {
+        doc.save();
+        doc.fontSize(36).font("Helvetica-Bold").fillColor("#ef4444").opacity(0.12);
+        doc.rotate(-25, { origin: [startX + cardWidth / 2, startY + cardHeight / 2] });
+        doc.text("CANCELLED", startX + cardWidth / 2 - 100, startY + cardHeight / 2 - 15);
+        doc.restore();
+      }
 
-    doc.font("Helvetica-Bold").text(`Serial No: `, 40, startY + 18, { continued: true }).font("Helvetica").text(String(receipt.serial_no));
-    doc.font("Helvetica-Bold").text(`Plotting Place: `, 380, startY + 18, { continued: true }).font("Helvetica").text(receipt.plotting_place || "NEW M.M.R. CITY", { width: 170 });
+      // 1. Header
+      let y = startY + 8;
+      doc.fontSize(10).font("Helvetica-Bold").fillColor("#064e3b")
+         .text("MMRCONSTRUCTION AND DEVELOPERS PRIVATE LIMITED", contentX, y, { width: contentW, align: "center" });
+      y += 13;
 
-    doc.y = startY + 45;
-    doc.moveTo(35, doc.y).lineTo(560, doc.y).lineWidth(0.5).strokeColor("#cbd5e1").stroke();
-    doc.moveDown(0.8);
+      doc.fontSize(6.8).font("Helvetica").fillColor("#475569")
+         .text("00, TRIBHUVAN KHEDA, SHESHPUR, Unnao, Uttar Pradesh - 209801, India", contentX, y, { width: contentW, align: "center" });
+      y += 9;
 
-    // Customer & Plot Details
-    const custY = doc.y;
-    doc.fontSize(11).font("Helvetica-Bold").fillColor("#123d2d").text("CUSTOMER & PROPERTY PARTICULARS", 40, custY);
-    doc.moveDown(0.5);
+      doc.fontSize(6.8).font("Helvetica").fillColor("#475569")
+         .text("Email: support@mmrconstructions.in | Contact: 9511119879", contentX, y, { width: contentW, align: "center" });
+      y += 11;
 
-    const tableY = doc.y;
-    const rowHeight = 22;
+      // 2. Badges (Payment Receipt + Copy Badge)
+      const b1W = 86;
+      const b2W = isCustomer ? 82 : 112;
+      const totalBadgesW = b1W + 6 + b2W;
+      const b1X = startX + (cardWidth - totalBadgesW) / 2;
+      const b2X = b1X + b1W + 6;
 
-    const fields = [
-      ["Customer Name", receipt.customer_name || "N/A", "Mobile No", receipt.mobile_no || "N/A"],
-      ["R.O.P. (S/o, D/o, W/o)", receipt.r_o_p || "N/A", "Plot No", receipt.plot_no || "N/A"],
-      ["Plot Area", receipt.plot_area || "N/A", "Payment Mode", receipt.payment_mode || "Full Payment"],
-      ["Payment Type", receipt.payment_type || "Cash", "Amount Depositor", receipt.amount_depositor_name || "N/A"],
-    ];
+      // Payment Receipt Badge
+      doc.roundedRect(b1X, y, b1W, 13, 3).fill("#064e3b");
+      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#ffffff")
+         .text("PAYMENT RECEIPT", b1X, y + 3, { width: b1W, align: "center" });
 
-    if (receipt.payment_type === "Cheque") {
-      fields.push([
-        "Cheque No", receipt.cheque_no || "N/A",
-        "Bank Name", receipt.bank_name || "N/A"
+      // Copy Badge
+      if (isCustomer) {
+        doc.roundedRect(b2X, y, b2W, 13, 3).fillAndStroke("#ecfdf5", "#10b981");
+        doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#065f46")
+           .text("CUSTOMER COPY", b2X, y + 3, { width: b2W, align: "center" });
+      } else {
+        doc.roundedRect(b2X, y, b2W, 13, 3).fillAndStroke("#eff6ff", "#3b82f6");
+        doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#1e40af")
+           .text("COMPANY / OFFICE COPY", b2X, y + 3, { width: b2W, align: "center" });
+      }
+      y += 18;
+
+      // 3. Meta Grid
+      // Row 1: Receipt No & Date
+      doc.fontSize(7.5).font("Helvetica-Bold").fillColor("#1e293b")
+         .text("Receipt No: ", contentX, y, { continued: true })
+         .font("Helvetica").text(receipt.receipt_no || "—");
+
+      doc.fontSize(7.5).font("Helvetica-Bold").fillColor("#1e293b")
+         .text("Date: ", contentX + 210, y, { continued: true })
+         .font("Helvetica").text(formatDate(receipt.receipt_date));
+      y += 12;
+
+      // Row 2: Serial No & Plotting Place
+      doc.roundedRect(contentX, y, 68, 12, 2).fill("#e0f2fe");
+      doc.fontSize(6.8).font("Helvetica-Bold").fillColor("#0284c7")
+         .text(`Serial No: ${receipt.serial_no || 1}`, contentX, y + 2, { width: 68, align: "center" });
+
+      doc.fontSize(6.8).font("Helvetica-Bold").fillColor("#1e293b")
+         .text("Plotting Place: ", contentX + 76, y + 1, { continued: true })
+         .font("Helvetica").fillColor("#334155")
+         .text(receipt.plotting_place || "00, TRIBHUVAN KHEDA, SHESHPUR, Unnao, Uttar Pradesh - 209801, India", { width: contentW - 76, height: 20 });
+      y += 17;
+
+      // Divider Line
+      doc.moveTo(contentX, y).lineTo(contentX + contentW, y).lineWidth(0.7).strokeColor("#064e3b").opacity(0.4).stroke();
+      doc.opacity(1.0);
+      y += 5;
+
+      // 4. Particulars Table (4 columns)
+      const c1 = 88;
+      const c2 = 98;
+      const c3 = 88;
+      const c4 = 98;
+      const rowHeight = 17;
+
+      const rows = [
+        [
+          { label: "Customer Name:", val: receipt.customer_name || "—", bold: true },
+          { label: "Mobile No:", val: receipt.mobile_no || "—", bold: false }
+        ],
+        [
+          { label: "R.O.P. (S/o, D/o):", val: receipt.r_o_p || "—", bold: false },
+          { label: "Plot No:", val: receipt.plot_no || "—", bold: true }
+        ],
+        [
+          { label: "Plot Area:", val: receipt.plot_area || "—", bold: false },
+          { label: "Payment Mode:", val: receipt.payment_mode || "Full Payment", bold: false }
+        ],
+        [
+          { label: "Payment Type:", val: receipt.payment_type || "Cash", bold: false },
+          { label: "Amount Depositor:", val: receipt.amount_depositor_name || "—", bold: false }
+        ],
+      ];
+
+      if (receipt.payment_type === "Cheque") {
+        rows.push([
+          { label: "Cheque No & Date:", val: `${receipt.cheque_no || "—"} (${formatDate(receipt.cheque_date)})`, bold: false },
+          { label: "Bank Name:", val: receipt.bank_name || "—", bold: false }
+        ]);
+      }
+
+      rows.push([
+        { label: "Advisor Name:", val: receipt.advisor_name || "—", bold: false },
+        { label: "Advisor Mobile:", val: receipt.advisor_mobile || "—", bold: false }
       ]);
-    }
 
-    fields.push([
-      "Advisor Name", receipt.advisor_name || "N/A",
-      "Advisor Mobile", receipt.advisor_mobile || "N/A"
-    ]);
+      rows.forEach((r) => {
+        // Backgrounds
+        doc.rect(contentX, y, contentW, rowHeight).fillAndStroke("#ffffff", "#cbd5e1");
+        doc.rect(contentX, y, c1, rowHeight).fillAndStroke("#f8fafc", "#cbd5e1");
+        doc.rect(contentX + c1 + c2, y, c3, rowHeight).fillAndStroke("#f8fafc", "#cbd5e1");
 
-    let currY = tableY;
-    fields.forEach((r, idx) => {
-      doc.rect(40, currY, 515, rowHeight).fillAndStroke(idx % 2 === 0 ? "#f8fafc" : "#ffffff", "#e2e8f0");
-      doc.fontSize(9).font("Helvetica-Bold").fillColor("#334155").text(r[0] + ":", 45, currY + 6, { width: 120 });
-      doc.font("Helvetica").fillColor("#0f172a").text(r[1], 170, currY + 6, { width: 120 });
-      doc.font("Helvetica-Bold").fillColor("#334155").text(r[2] + ":", 300, currY + 6, { width: 110 });
-      doc.font("Helvetica").fillColor("#0f172a").text(r[3], 415, currY + 6, { width: 135 });
-      currY += rowHeight;
-    });
+        // Cell 1
+        doc.fontSize(6.8).font("Helvetica-Bold").fillColor("#334155")
+           .text(r[0].label, contentX + 4, y + 4.5, { width: c1 - 6 });
+        doc.fontSize(6.8).font(r[0].bold ? "Helvetica-Bold" : "Helvetica").fillColor("#0f172a")
+           .text(r[0].val, contentX + c1 + 4, y + 4.5, { width: c2 - 6 });
 
-    doc.y = currY + 15;
+        // Cell 2
+        doc.fontSize(6.8).font("Helvetica-Bold").fillColor("#334155")
+           .text(r[1].label, contentX + c1 + c2 + 4, y + 4.5, { width: c3 - 6 });
+        doc.fontSize(6.8).font(r[1].bold ? "Helvetica-Bold" : "Helvetica").fillColor("#0f172a")
+           .text(r[1].val, contentX + c1 + c2 + c3 + 4, y + 4.5, { width: c4 - 6 });
 
-    // Financial Figures Box
-    doc.rect(40, doc.y, 515, 65).fillAndStroke("#f0fdf4", "#16a34a");
-    const boxY = doc.y + 8;
+        y += rowHeight;
+      });
 
-    doc.fontSize(10).font("Helvetica-Bold").fillColor("#166534");
-    doc.text("Receipt Amount: ", 50, boxY, { continued: true }).font("Helvetica").text(`Rs. ${Number(receipt.receipt_amount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}`);
-    doc.font("Helvetica-Bold").text("Paid Amount: ", 220, boxY, { continued: true }).font("Helvetica-Bold").fillColor("#15803d").text(`Rs. ${Number(receipt.paid_amount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}`);
-    doc.font("Helvetica-Bold").fillColor("#166534").text("Inward Amount: ", 400, boxY, { continued: true }).font("Helvetica").text(`Rs. ${Number(receipt.inward_amount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}`);
+      y += 5;
 
-    doc.font("Helvetica-Bold").fillColor("#1e293b").text("Amount in Words: ", 50, boxY + 22, { continued: true }).font("Helvetica-Oblique").fillColor("#0f172a").text(numberToWords(receipt.paid_amount), { width: 440 });
+      // 5. Financial Figures Box
+      const boxH = 50;
+      doc.roundedRect(contentX, y, contentW, boxH, 4).fillAndStroke("#f0fdf4", "#86efac");
 
-    doc.y = boxY + 70;
+      const colW = contentW / 3;
+      // Col 1: Receipt Amount
+      doc.fontSize(6.2).font("Helvetica-Bold").fillColor("#64748b")
+         .text("Receipt Amount", contentX, y + 4, { width: colW, align: "center" });
+      doc.fontSize(8).font("Helvetica-Bold").fillColor("#334155")
+         .text(`Rs. ${formatCurrency(receipt.receipt_amount)}`, contentX, y + 12.5, { width: colW, align: "center" });
 
-    if (receipt.notes) {
-      doc.fontSize(9).font("Helvetica-Bold").fillColor("#475569").text("Notes / Remarks:", 40, doc.y);
-      doc.fontSize(8.5).font("Helvetica").fillColor("#334155").text(receipt.notes, 40, doc.y + 12, { width: 515 });
-      doc.y += 28;
-    }
+      // Col 2: Paid Amount
+      doc.fontSize(6.2).font("Helvetica-Bold").fillColor("#166534")
+         .text("Paid Amount", contentX + colW, y + 4, { width: colW, align: "center" });
+      doc.fontSize(8.5).font("Helvetica-Bold").fillColor("#16a34a")
+         .text(`Rs. ${formatCurrency(receipt.paid_amount)}`, contentX + colW, y + 12.5, { width: colW, align: "center" });
 
-    // Terms / Conditions text
-    doc.fontSize(8).font("Helvetica-Oblique").fillColor("#64748b").text(
-      "* This receipt is a verified computer-generated acknowledgment of payment for NEW M.M.R. CITY, Unnao. All payments made via cheque are subject to clearance.",
-      40,
-      doc.y + 10,
-      { width: 515 }
-    );
+      // Col 3: Inward Amount
+      doc.fontSize(6.2).font("Helvetica-Bold").fillColor("#64748b")
+         .text("Inward Amount", contentX + colW * 2, y + 4, { width: colW, align: "center" });
+      doc.fontSize(8).font("Helvetica-Bold").fillColor("#0284c7")
+         .text(`Rs. ${formatCurrency(receipt.inward_amount)}`, contentX + colW * 2, y + 12.5, { width: colW, align: "center" });
 
-    // Signature Area
-    const sigY = 730;
-    doc.moveTo(40, sigY).lineTo(220, sigY).strokeColor("#94a3b8").stroke();
-    doc.moveTo(375, sigY).lineTo(555, sigY).strokeColor("#94a3b8").stroke();
+      // Divider inside amount box
+      doc.save();
+      doc.moveTo(contentX + 6, y + 25).lineTo(contentX + contentW - 6, y + 25).dash(2, { space: 2 }).lineWidth(0.5).strokeColor("#86efac").stroke();
+      doc.restore();
 
-    doc.fontSize(9).font("Helvetica-Bold").fillColor("#1e293b");
-    doc.text("Depositor's Signature", 75, sigY + 6);
-    doc.text("Authorized Signatory", 420, sigY + 6);
-    doc.fontSize(8).font("Helvetica").fillColor("#64748b").text("MMR Constructions & Developers", 395, sigY + 18);
+      // Amount in Words
+      doc.fontSize(6.2).font("Helvetica-Bold").fillColor("#166534")
+         .text("Amount in Words: ", contentX + 8, y + 29, { continued: true })
+         .font("Helvetica-Oblique").fillColor("#15803d")
+         .text(numberToWords(receipt.paid_amount), { width: contentW - 16 });
+
+      y += boxH + 5;
+
+      // 6. Notes if present
+      if (receipt.notes) {
+        doc.fontSize(5.8).font("Helvetica-Bold").fillColor("#475569")
+           .text("Notes / Terms: ", contentX, y, { continued: true })
+           .font("Helvetica").fillColor("#334155")
+           .text(receipt.notes, { width: contentW });
+        y += 10;
+      }
+
+      // 7. Terms Disclaimer
+      doc.fontSize(5.5).font("Helvetica-Oblique").fillColor("#64748b")
+         .text("* This receipt is a verified acknowledgment of payment for MMRCONSTRUCTION AND DEVELOPERS PRIVATE LIMITED. All payments via cheque are subject to clearance.", contentX, y, { width: contentW });
+
+      // 8. Signatures Section (at bottom of card)
+      const sigY = startY + cardHeight - 38;
+
+      // Left Signature (Depositor)
+      doc.moveTo(contentX + 8, sigY).lineTo(contentX + 115, sigY).lineWidth(0.8).strokeColor("#334155").stroke();
+      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#0f172a")
+         .text("Depositor's Signature", contentX + 8, sigY + 3, { width: 107, align: "center" });
+
+      // Right Signature (Authorized Signatory)
+      doc.moveTo(contentX + contentW - 150, sigY).lineTo(contentX + contentW - 8, sigY).lineWidth(0.8).strokeColor("#334155").stroke();
+      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#0f172a")
+         .text("Authorized Signatory", contentX + contentW - 150, sigY + 3, { width: 142, align: "center" });
+      doc.fontSize(5.4).font("Helvetica").fillColor("#64748b")
+         .text("MMRCONSTRUCTION AND DEVELOPERS PRIVATE LIMITED", contentX + contentW - 150, sigY + 12, { width: 142, align: "center" });
+    };
+
+    const cardWidth = 394;
+    const cardHeight = 563;
+    const topY = 16;
+    const leftCardX = 16;
+    const rightCardX = 431.89;
+
+    // Render Left Copy: CUSTOMER COPY
+    renderCopyCard(leftCardX, topY, cardWidth, cardHeight, "CUSTOMER COPY");
+
+    // Render Center Cut Divider
+    const cutX = 420.94;
+    doc.save();
+    doc.moveTo(cutX, 22).lineTo(cutX, 275).dash(3, { space: 3 }).lineWidth(1).strokeColor("#94a3b8").stroke();
+    doc.fontSize(7.5).font("Helvetica-Bold").fillColor("#64748b").text("- - [ CUT HERE ] - -", cutX - 45, 286, { width: 90, align: "center" });
+    doc.moveTo(cutX, 305).lineTo(cutX, 570).dash(3, { space: 3 }).lineWidth(1).strokeColor("#94a3b8").stroke();
+    doc.restore();
+
+    // Render Right Copy: COMPANY / OFFICE COPY
+    renderCopyCard(rightCardX, topY, cardWidth, cardHeight, "COMPANY / OFFICE COPY");
 
     doc.end();
   } catch (err) {
