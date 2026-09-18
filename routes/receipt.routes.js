@@ -1,6 +1,6 @@
 import express from "express";
 import sql from "../db.js";
-import { adminAuth } from "../middleware/auth.middleware.js";
+import { adminAuth, userAuth } from "../middleware/auth.middleware.js";
 import PDFDocument from "pdfkit";
 
 const router = express.Router();
@@ -629,9 +629,9 @@ router.get("/admin/receipts/:id/print", adminAuth, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// 9. GET /api/admin/receipts/:id/pdf (Server-side PDFkit generation: A4 Landscape Dual-Copy)
+// 9. GET /api/admin/receipts/:id/pdf & /api/receipts/:id/pdf (Server-side PDFkit generation: A4 Landscape Dual-Copy)
 // ─────────────────────────────────────────────────────────────
-router.get("/admin/receipts/:id/pdf", adminAuth, async (req, res) => {
+router.get(["/admin/receipts/:id/pdf", "/receipts/:id/pdf", "/customer/receipts/:id/pdf"], userAuth, async (req, res) => {
   try {
     const idOrNo = req.params.id;
     const isNumeric = /^\d+$/.test(idOrNo);

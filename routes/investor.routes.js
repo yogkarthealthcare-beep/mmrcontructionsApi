@@ -427,11 +427,10 @@ async function handleInvestorRegistration(req, res) {
   }
 }
 
-router.post("/investor/register", handleInvestorRegistration);
-router.post("/investor/signup", handleInvestorRegistration);
+router.post(["/investor/register", "/investor/signup", "/investor/auth/register", "/investor/auth/signup"], handleInvestorRegistration);
 
 // POST /api/investor/send-otp
-router.post("/investor/send-otp", async (req, res) => {
+router.post(["/investor/send-otp", "/investor/auth/send-otp"], async (req, res) => {
   try {
     const { email } = req.body;
     if (!email || !/^\S+@\S+\.\S+$/.test(String(email))) {
@@ -461,7 +460,7 @@ router.post("/investor/send-otp", async (req, res) => {
 });
 
 // POST /api/investor/verify-otp
-router.post("/investor/verify-otp", async (req, res) => {
+router.post(["/investor/verify-otp", "/investor/auth/verify-otp"], async (req, res) => {
   try {
     const { email, otp } = req.body;
     if (!email || !otp) return err(res, "Email and OTP are required.", 400);
@@ -495,7 +494,7 @@ router.post("/investor/verify-otp", async (req, res) => {
 });
 
 // POST /api/investor/login
-router.post("/investor/login", async (req, res) => {
+router.post(["/investor/login", "/investor/auth/login"], async (req, res) => {
   try {
     const { identifier, email, password } = req.body;
     const loginId = (identifier || email || "").trim().toLowerCase();
@@ -557,9 +556,9 @@ router.post("/investor/login", async (req, res) => {
   }
 });
 
-router.get("/investor/verify-email", async (req, res) => {
+const handleInvestorVerifyEmail = async (req, res) => {
   try {
-    const token = String(req.query.token || "").trim();
+    const token = String(req.query.token || req.body?.token || "").trim();
     if (!token) return err(res, "Verification token is required.", 400);
     const [investor] = await sql`
       SELECT id FROM investor_users
@@ -580,10 +579,12 @@ router.get("/investor/verify-email", async (req, res) => {
     console.error("Investor Verify Email Error:", e);
     return err(res, "Failed to verify email.");
   }
-});
+};
+router.get(["/investor/verify-email", "/investor/auth/verify-email"], handleInvestorVerifyEmail);
+router.post(["/investor/verify-email", "/investor/auth/verify-email"], handleInvestorVerifyEmail);
 
 // POST /api/investor/forgot-password
-router.post("/investor/forgot-password", async (req, res) => {
+router.post(["/investor/forgot-password", "/investor/auth/forgot-password"], async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return err(res, "Email address is required.", 400);
@@ -623,7 +624,7 @@ router.post("/investor/forgot-password", async (req, res) => {
 });
 
 // POST /api/investor/reset-password
-router.post("/investor/reset-password", async (req, res) => {
+router.post(["/investor/reset-password", "/investor/auth/reset-password"], async (req, res) => {
   try {
     const { email, otp, new_password } = req.body;
     if (!email || !otp || !new_password) {
@@ -1000,7 +1001,7 @@ router.put("/investor/change-password", authInvestor, handleInvestorChangePasswo
 router.post("/investor/change-password", authInvestor, handleInvestorChangePassword);
 
 // PUT /api/investor/bank-details
-router.put("/investor/bank-details", authInvestor, async (req, res) => {
+router.put(["/investor/bank-details", "/investor/profile/bank"], authInvestor, async (req, res) => {
   try {
     const { bank_name, account_number, ifsc_code } = req.body;
 
@@ -1097,7 +1098,7 @@ router.get("/investor/deposits", authInvestor, async (req, res) => {
 });
 
 // POST /api/investor/withdraw
-router.post("/investor/withdraw", authInvestor, async (req, res) => {
+router.post(["/investor/withdraw", "/investor/withdrawals"], authInvestor, async (req, res) => {
   try {
     const { amount, bank_name, account_number, ifsc_code, remarks } = req.body;
     const numAmount = Number(amount);
@@ -1297,7 +1298,7 @@ router.get("/admin/investors-portal/deposits", authAdmin, async (req, res) => {
 });
 
 // PUT /api/admin/investors-portal/deposits/:id/status
-router.put("/admin/investors-portal/deposits/:id/status", authAdmin, async (req, res) => {
+router.put(["/admin/investors-portal/deposits/:id", "/admin/investors-portal/deposits/:id/status"], authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, admin_remarks } = req.body;
@@ -1519,7 +1520,7 @@ router.get("/admin/investors-portal/withdrawals", authAdmin, async (req, res) =>
 });
 
 // PUT /api/admin/investors-portal/withdrawals/:id/status
-router.put("/admin/investors-portal/withdrawals/:id/status", authAdmin, async (req, res) => {
+router.put(["/admin/investors-portal/withdrawals/:id", "/admin/investors-portal/withdrawals/:id/status"], authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, admin_remarks } = req.body;
