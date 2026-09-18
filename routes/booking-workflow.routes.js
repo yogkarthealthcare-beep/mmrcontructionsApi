@@ -771,6 +771,8 @@ router.patch("/admin/bookings/:id/appointment", adminAuth, async (req, res) => {
 
 async function ensureAllocationSchema() {
   try {
+    await sql`ALTER TABLE bookings ALTER COLUMN booking_status TYPE VARCHAR(60) USING booking_status::text`.catch(() => {});
+    await sql`ALTER TYPE booking_status_enum ADD VALUE IF NOT EXISTS 'Allocated'`.catch(() => {});
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS site_id INTEGER`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(12,2) DEFAULT 0`;

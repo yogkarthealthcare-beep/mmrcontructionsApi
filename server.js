@@ -7671,6 +7671,8 @@ app.post("/api/admin/users/:id/blacklist",
 
 async function ensurePlotAllocationSchema() {
   try {
+    await sql`ALTER TABLE bookings ALTER COLUMN booking_status TYPE VARCHAR(60) USING booking_status::text`.catch(() => {});
+    await sql`ALTER TYPE booking_status_enum ADD VALUE IF NOT EXISTS 'Allocated'`.catch(() => {});
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS site_id INTEGER`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(12,2) DEFAULT 0`;
@@ -7709,7 +7711,7 @@ app.get("/api/admin/bookings",
       const searchFilter = search ? String(search) : null;
 
       const conds = [];
-      if (statusFilter) conds.push(sql`b.booking_status = ${statusFilter}`);
+      if (statusFilter) conds.push(sql`b.booking_status::text = ${statusFilter}`);
       if (siteIdFilter) conds.push(sql`COALESCE(b.site_id, p.site_id, s.site_id) = ${siteIdFilter}`);
       if (fromDateFilter) conds.push(sql`COALESCE(b.booking_date, b.created_at)::date >= ${fromDateFilter}::date`);
       if (toDateFilter) conds.push(sql`COALESCE(b.booking_date, b.created_at)::date <= ${toDateFilter}::date`);
