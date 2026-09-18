@@ -7684,9 +7684,9 @@ app.get("/api/admin/bookings",
 
       const conds = [];
       if (statusFilter) conds.push(sql`b.booking_status = ${statusFilter}`);
-      if (siteIdFilter) conds.push(sql`s.site_id = ${siteIdFilter}`);
-      if (fromDateFilter) conds.push(sql`b.booking_date::date >= ${fromDateFilter}::date`);
-      if (toDateFilter) conds.push(sql`b.booking_date::date <= ${toDateFilter}::date`);
+      if (siteIdFilter) conds.push(sql`COALESCE(b.site_id, p.site_id, s.site_id) = ${siteIdFilter}`);
+      if (fromDateFilter) conds.push(sql`COALESCE(b.booking_date, b.created_at)::date >= ${fromDateFilter}::date`);
+      if (toDateFilter) conds.push(sql`COALESCE(b.booking_date, b.created_at)::date <= ${toDateFilter}::date`);
       if (paymentStatusFilter) {
         conds.push(sql`(
           CASE
@@ -7711,22 +7711,28 @@ app.get("/api/admin/bookings",
       }
 
       const bookings = await sql`
-        SELECT b.booking_id, b.booking_serial, b.booking_date, b.booking_status,
-               b.advance_amount, b.payment_type, b.payment_method, b.workflow_status,
+        SELECT b.booking_id, b.booking_serial,
+               COALESCE(b.booking_date, b.created_at) AS booking_date,
+               b.booking_status, b.advance_amount, b.payment_type, b.payment_method, b.workflow_status,
                b.required_booking_amount, b.remaining_balance,
+               COALESCE(b.base_price, p.base_price, 0) AS base_price,
                CASE
                  WHEN b.booking_status = 'Confirmed' THEN 'Paid'
                  WHEN b.advance_amount > 0 THEN 'Partial'
                  ELSE 'Unpaid'
                END AS payment_status,
                u.full_name AS customer_name, u.member_id, u.mobile_no,
-               p.plot_number, p.plot_area, s.site_name, s.city,
+               COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+               COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+               COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name,
+               COALESCE(s.city, s2.city, '') AS city,
                ap.appointment_date, ap.start_time, ap.end_time, ap.status AS appointment_status,
                proof.file_path AS proof_url
         FROM bookings b
         JOIN users u  ON b.user_id  = u.user_id
-        JOIN plots p  ON b.plot_id  = p.plot_id
-        JOIN sites s  ON p.site_id  = s.site_id
+        LEFT JOIN plots p  ON b.plot_id  = p.plot_id
+        LEFT JOIN sites s  ON p.site_id  = s.site_id
+        LEFT JOIN sites s2 ON b.site_id  = s2.site_id
         LEFT JOIN LATERAL (
           SELECT file_path
           FROM booking_payment_proofs
@@ -7740,6 +7746,7 @@ app.get("/api/admin/bookings",
 
       return ok(res, bookings);
     } catch (e) {
+      console.error("[Admin Bookings Error]:", e);
       return err(res, e.message);
     }
   }
@@ -7761,53 +7768,68 @@ app.get("/api/admin/bookings/:id",
                  'user_type', u.user_type
                ) AS customer,
                json_build_object(
-                 'id', p.plot_id,
-                 'plot_number', p.plot_number,
-                 'plot_area', p.plot_area,
-                 'plot_category', p.plot_category,
-                 'base_price', p.base_price,
-                 'down_payment', p.down_payment,
-                 'monthly_emi', p.monthly_emi,
-                 'emi_tenure_months', p.emi_tenure_months,
-                 'file_charge', p.file_charge,
-                 'plot_status', p.plot_status,
-                 'site_name', s.site_name
+                 'id', COALESCE(p.plot_id, 0),
+                 'plot_number', COALESCE(b.plot_number, p.plot_number, 'Plot'),
+                 'plot_area', COALESCE(b.plot_area, p.plot_area, 0),
+                 'plot_category', COALESCE(p.plot_category, 'Residential'),
+                 'base_price', COALESCE(b.base_price, p.base_price, 0),
+                 'down_payment', COALESCE(p.down_payment, 0),
+                 'monthly_emi', COALESCE(p.monthly_emi, 0),
+                 'emi_tenure_months', COALESCE(p.emi_tenure_months, 60),
+                 'file_charge', COALESCE(p.file_charge, 0),
+                 'plot_status', COALESCE(p.plot_status, 'Booked'),
+                 'site_name', COALESCE(s.site_name, s2.site_name, 'Project Site')
                ) AS plot,
                json_build_object(
-                 'id', s.site_id,
-                 'site_name', s.site_name,
-                 'city', s.city,
-                 'address', s.full_address
+                 'id', COALESCE(b.site_id, s.site_id, s2.site_id, 0),
+                 'site_name', COALESCE(s.site_name, s2.site_name, 'Project Site'),
+                 'city', COALESCE(s.city, s2.city, ''),
+                 'address', COALESCE(s.full_address, s2.full_address, '')
                ) AS site
         FROM bookings b
         JOIN users u ON u.user_id = b.user_id
-        JOIN plots p ON p.plot_id = b.plot_id
-        JOIN sites s ON s.site_id = p.site_id
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        LEFT JOIN sites s ON s.site_id = p.site_id
+        LEFT JOIN sites s2 ON s2.site_id = b.site_id
         WHERE b.booking_id = ${req.params.id}`;
       if (!booking) return err(res, "Booking not found", 404);
 
-      const payment_proofs = await sql`
-        SELECT *
-        FROM booking_payment_proofs
-        WHERE booking_id = ${req.params.id}`;
-      const emi_schedule = await sql`
-        SELECT emi_id, installment_no, due_date, emi_amount, late_fee_amount,
-               total_due, paid_amount, paid_date, emi_status
-        FROM emi_schedules
-        WHERE booking_id = ${req.params.id}
-        ORDER BY installment_no`;
-      const history = await sql`
-        SELECT event_type, event_note, plot_status_at_time, created_at
-        FROM plot_booking_history
-        WHERE booking_id = ${req.params.id}
-        ORDER BY created_at DESC`;
-      const [appointment] = await sql`
-        SELECT * FROM booking_appointments WHERE booking_id = ${req.params.id}`;
-      const payments = await sql`
-        SELECT * FROM booking_payment_records WHERE booking_id = ${req.params.id} ORDER BY created_at DESC`;
+      let payment_proofs = [];
+      try {
+        payment_proofs = await sql`SELECT * FROM booking_payment_proofs WHERE booking_id = ${req.params.id}`;
+      } catch (_) {}
+
+      let emi_schedule = [];
+      try {
+        emi_schedule = await sql`SELECT emi_id, installment_no, due_date, emi_amount, late_fee_amount, total_due, paid_amount, paid_date, emi_status FROM emi_schedules WHERE booking_id = ${req.params.id} ORDER BY installment_no`;
+      } catch (_) {}
+
+      let history = [];
+      try {
+        history = await sql`SELECT event_type, event_note, plot_status_at_time, created_at FROM plot_booking_history WHERE booking_id = ${req.params.id} ORDER BY created_at ASC`;
+      } catch (_) {}
+
+      let appointment = null;
+      try {
+        const [ap] = await sql`SELECT * FROM booking_appointments WHERE booking_id = ${req.params.id} LIMIT 1`;
+        appointment = ap || null;
+      } catch (_) {}
+
+      let payments = [];
+      try {
+        payments = await sql`SELECT * FROM payment_ledger WHERE booking_id = ${req.params.id} ORDER BY created_at DESC`;
+        if (!payments || payments.length === 0) {
+          payments = await sql`SELECT * FROM booking_payment_records WHERE booking_id = ${req.params.id} ORDER BY created_at DESC`;
+        }
+      } catch (_) {
+        try {
+          payments = await sql`SELECT * FROM booking_payment_records WHERE booking_id = ${req.params.id} ORDER BY created_at DESC`;
+        } catch (_) {}
+      }
 
       return ok(res, { ...booking, payment_proofs, emi_schedule, history, appointment, payments });
     } catch (e) {
+      console.error("[Admin Booking Detail Error]:", e);
       return err(res, e.message);
     }
   }
