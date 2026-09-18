@@ -29,6 +29,9 @@ import associateEnrollmentRoutes from './routes/associateEnrollmentRoutes.js';
 import teamMemberRoutes from './routes/teamMemberRoutes.js';
 import receiptRoutes, { ensureReceiptsTable } from './routes/receipt.routes.js';
 import siteGalleryRoutes, { ensureSiteGalleryTable } from './routes/site-gallery.routes.js';
+import unifiedPaymentRoutes from './routes/unified-payment.routes.js';
+import { ensureUnifiedPaymentSchema } from './services/unifiedPaymentSchema.service.js';
+import { runHistoricalPaymentMigration } from './services/unifiedPaymentMigration.service.js';
 import fileStorageService, { saveFileToVPS, deleteFileFromStorage, getStorageRoot } from "./services/fileStorage.service.js";
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
@@ -235,6 +238,10 @@ app.use('/api', receiptRoutes);
 ensureReceiptsTable();
 app.use('/api', siteGalleryRoutes);
 ensureSiteGalleryTable();
+app.use(unifiedPaymentRoutes);
+ensureUnifiedPaymentSchema().then(() => {
+  runHistoricalPaymentMigration();
+}).catch(err => console.error("[UnifiedPayment] Initialization error:", err));
 // ─── Cloudinary Config ────────────────────────────────────────
 const envValue = (key) => (process.env[key] || "").trim();
 cloudinary.config({
