@@ -5013,13 +5013,15 @@ app.post("/api/admin/auth/login", async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) return err(res, "email & password required", 400);
 
+    const cleanEmail = String(email).trim().toLowerCase();
+
     const [admin] = await sql`
       SELECT a.admin_id, a.full_name, a.email, a.password_hash,
              a.is_active, a.is_locked, a.failed_login_attempts,
              r.role_name AS role
       FROM admin_users a
       JOIN admin_roles r ON a.role_id = r.role_id
-      WHERE a.email = ${email}`;
+      WHERE LOWER(TRIM(a.email)) = ${cleanEmail}`;
 
     if (!admin) return err(res, "Invalid credentials", 401);
     if (!admin.is_active) return err(res, "Account deactivated", 403);
