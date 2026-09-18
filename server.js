@@ -7667,11 +7667,35 @@ app.post("/api/admin/users/:id/blacklist",
    ─────────────────────────
 ========================== */
 
+async function ensurePlotAllocationSchema() {
+  try {
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS site_id INTEGER`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(12,2) DEFAULT 0`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS base_price NUMERIC(14,2) DEFAULT 0`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_type VARCHAR(50) DEFAULT 'Full'`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50)`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS workflow_status VARCHAR(80) DEFAULT 'Booking Initiated'`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS required_booking_amount NUMERIC(14,2) DEFAULT 0`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS remaining_balance NUMERIC(14,2) DEFAULT 0`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_date TIMESTAMPTZ DEFAULT NOW()`;
+    await sql`ALTER TABLE bookings ALTER COLUMN plot_id DROP NOT NULL`;
+
+    await sql`ALTER TABLE payment_ledger ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
+    await sql`ALTER TABLE payment_ledger ADD COLUMN IF NOT EXISTS site_id INTEGER`;
+    await sql`ALTER TABLE payment_ledger ALTER COLUMN plot_id DROP NOT NULL`;
+  } catch (e) {
+    // Non-blocking schema fallback
+  }
+}
+
 app.get("/api/admin/bookings",
   verifyAdminToken,
   role("SuperAdmin", "SiteManager", "FinanceManager"),
   async (req, res) => {
     try {
+      await ensurePlotAllocationSchema().catch(() => {});
       const { status, site_id, payment_status, from_date, to_date, search, page = 1, limit = 20 } = req.query;
       const safeLimit = Math.min(Number(limit) || 20, 100);
       const offset = ((Number(page) || 1) - 1) * safeLimit;
@@ -7691,7 +7715,7 @@ app.get("/api/admin/bookings",
         conds.push(sql`(
           CASE
             WHEN b.booking_status = 'Confirmed' THEN 'Paid'
-            WHEN b.advance_amount > 0 THEN 'Partial'
+            WHEN COALESCE(b.advance_amount, 0) > 0 THEN 'Partial'
             ELSE 'Unpaid'
           END
         ) = ${paymentStatusFilter}`);
@@ -7699,9 +7723,10 @@ app.get("/api/admin/bookings",
       if (searchFilter) {
         const q = `%${searchFilter}%`;
         conds.push(sql`(
-          b.booking_serial ILIKE ${q} OR
-          u.full_name ILIKE ${q} OR
-          u.mobile_no ILIKE ${q}
+          COALESCE(b.booking_serial, '') ILIKE ${q} OR
+          COALESCE(u.full_name, '') ILIKE ${q} OR
+          COALESCE(u.mobile_no, '') ILIKE ${q} OR
+          COALESCE(b.plot_number, p.plot_number, '') ILIKE ${q}
         )`);
       }
 
@@ -7711,17 +7736,25 @@ app.get("/api/admin/bookings",
       }
 
       const bookings = await sql`
-        SELECT b.booking_id, b.booking_serial,
+        SELECT b.booking_id,
+               COALESCE(b.booking_serial, CONCAT('MMR-', b.booking_id)) AS booking_serial,
                COALESCE(b.booking_date, b.created_at) AS booking_date,
-               b.booking_status, b.advance_amount, b.payment_type, b.payment_method, b.workflow_status,
-               b.required_booking_amount, b.remaining_balance,
+               COALESCE(b.booking_status, 'Pending') AS booking_status,
+               COALESCE(b.advance_amount, 0) AS advance_amount,
+               COALESCE(b.payment_type, 'Full') AS payment_type,
+               COALESCE(b.payment_method, b.payment_type, 'Cash') AS payment_method,
+               COALESCE(b.workflow_status, 'Booking Initiated') AS workflow_status,
+               COALESCE(b.required_booking_amount, 0) AS required_booking_amount,
+               COALESCE(b.remaining_balance, 0) AS remaining_balance,
                COALESCE(b.base_price, p.base_price, 0) AS base_price,
                CASE
                  WHEN b.booking_status = 'Confirmed' THEN 'Paid'
-                 WHEN b.advance_amount > 0 THEN 'Partial'
+                 WHEN COALESCE(b.advance_amount, 0) > 0 THEN 'Partial'
                  ELSE 'Unpaid'
                END AS payment_status,
-               u.full_name AS customer_name, u.member_id, u.mobile_no,
+               COALESCE(u.full_name, 'Customer') AS customer_name,
+               COALESCE(u.member_id, '') AS member_id,
+               COALESCE(u.mobile_no, '') AS mobile_no,
                COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
                COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
                COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name,
@@ -7729,7 +7762,7 @@ app.get("/api/admin/bookings",
                ap.appointment_date, ap.start_time, ap.end_time, ap.status AS appointment_status,
                proof.file_path AS proof_url
         FROM bookings b
-        JOIN users u  ON b.user_id  = u.user_id
+        LEFT JOIN users u  ON b.user_id  = u.user_id
         LEFT JOIN plots p  ON b.plot_id  = p.plot_id
         LEFT JOIN sites s  ON p.site_id  = s.site_id
         LEFT JOIN sites s2 ON b.site_id  = s2.site_id
@@ -7747,7 +7780,21 @@ app.get("/api/admin/bookings",
       return ok(res, bookings);
     } catch (e) {
       console.error("[Admin Bookings Error]:", e);
-      return err(res, e.message);
+      try {
+        const fallback = await sql`
+          SELECT b.booking_id, b.booking_serial, b.booking_status, b.advance_amount,
+                 b.created_at AS booking_date, u.full_name AS customer_name, u.mobile_no,
+                 COALESCE(p.plot_number, 'Plot') AS plot_number,
+                 COALESCE(s.site_name, 'Project Site') AS site_name
+          FROM bookings b
+          LEFT JOIN users u ON b.user_id = u.user_id
+          LEFT JOIN plots p ON b.plot_id = p.plot_id
+          LEFT JOIN sites s ON p.site_id = s.site_id
+          ORDER BY b.created_at DESC LIMIT 50`;
+        return ok(res, fallback);
+      } catch (e2) {
+        return err(res, e.message);
+      }
     }
   }
 );
@@ -7757,15 +7804,16 @@ app.get("/api/admin/bookings/:id",
   role("SuperAdmin", "SiteManager", "FinanceManager"),
   async (req, res) => {
     try {
+      await ensurePlotAllocationSchema().catch(() => {});
       const [booking] = await sql`
         SELECT b.*,
                json_build_object(
-                 'id', u.user_id,
-                 'full_name', u.full_name,
-                 'member_id', u.member_id,
-                 'mobile_no', u.mobile_no,
-                 'email', u.email,
-                 'user_type', u.user_type
+                 'id', COALESCE(u.user_id, 0),
+                 'full_name', COALESCE(u.full_name, 'Customer'),
+                 'member_id', COALESCE(u.member_id, ''),
+                 'mobile_no', COALESCE(u.mobile_no, ''),
+                 'email', COALESCE(u.email, ''),
+                 'user_type', COALESCE(u.user_type, 'Customer')
                ) AS customer,
                json_build_object(
                  'id', COALESCE(p.plot_id, 0),
@@ -7787,7 +7835,7 @@ app.get("/api/admin/bookings/:id",
                  'address', COALESCE(s.full_address, s2.full_address, '')
                ) AS site
         FROM bookings b
-        JOIN users u ON u.user_id = b.user_id
+        LEFT JOIN users u ON u.user_id = b.user_id
         LEFT JOIN plots p ON p.plot_id = b.plot_id
         LEFT JOIN sites s ON s.site_id = p.site_id
         LEFT JOIN sites s2 ON s2.site_id = b.site_id

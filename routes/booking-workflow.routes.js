@@ -802,8 +802,19 @@ async function ensureAllocationSchema() {
   try {
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS site_id INTEGER`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(12,2) DEFAULT 0`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS base_price NUMERIC(14,2) DEFAULT 0`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_type VARCHAR(50) DEFAULT 'Full'`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50)`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS workflow_status VARCHAR(80) DEFAULT 'Booking Initiated'`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS required_booking_amount NUMERIC(14,2) DEFAULT 0`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS remaining_balance NUMERIC(14,2) DEFAULT 0`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_date TIMESTAMPTZ DEFAULT NOW()`;
     await sql`ALTER TABLE bookings ALTER COLUMN plot_id DROP NOT NULL`;
+
     await sql`ALTER TABLE payment_ledger ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
+    await sql`ALTER TABLE payment_ledger ADD COLUMN IF NOT EXISTS site_id INTEGER`;
     await sql`ALTER TABLE payment_ledger ALTER COLUMN plot_id DROP NOT NULL`;
   } catch (e) {
     // Non-blocking schema fallback
