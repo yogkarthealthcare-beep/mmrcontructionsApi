@@ -798,18 +798,26 @@ router.get("/admin/plots/validate-availability", adminAuth, async (req, res) => 
       });
     }
 
-    const isAvailable = plot.plot_status === "Vacant";
-    return ok(res, {
-      exists: true,
-      is_available: isAvailable,
-      plot,
-      message: isAvailable
-        ? `Plot #${plot.plot_number} is Available (Vacant).`
-        : `Plot #${plot.plot_number} is currently ${plot.plot_status} and unavailable for allocation.`
-    });
-  } catch (error) {
-    return fail(res, error.message, 400);
+async function ensureAllocationSchema() {
+  try {
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS site_id INTEGER`;
+    await sql`ALTER TABLE bookings ALTER COLUMN plot_id DROP NOT NULL`;
+    await sql`ALTER TABLE payment_ledger ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
+    await sql`ALTER TABLE payment_ledger ALTER COLUMN plot_id DROP NOT NULL`;
+  } catch (e) {
+    // Non-blocking schema fallback
   }
+}
+ensureAllocationSchema();
+
+router.get("/admin/plots/validate-availability", adminAuth, async (req, res) => {
+  // Always allow manual plot numbers without blocking
+  return ok(res, {
+    exists: true,
+    is_available: true,
+    message: "Manual plot entry enabled."
+  });
 });
 
 router.post("/admin/bookings/allocate-plot", adminAuth, async (req, res) => {
@@ -826,9 +834,11 @@ router.post("/admin/bookings/allocate-plot", adminAuth, async (req, res) => {
 
     if (!userId) return fail(res, "Customer selection is required.", 400);
     if (!siteId) return fail(res, "Site selection is required.", 400);
-    if (!plotNumber) return fail(res, "Plot number is required.", 400);
+    if (!plotNumber) return fail(res, "Plot number / name is required.", 400);
+    if (plotNumber.length > 150) return fail(res, "Plot number exceeds maximum allowed length of 150 characters.", 400);
     if (totalPrice <= 0) return fail(res, "Total plot price must be greater than 0.", 400);
     if (initialPayment < 0) return fail(res, "Initial payment cannot be negative.", 400);
+    if (initialPayment > totalPrice) return fail(res, "Initial payment cannot exceed total plot price.", 400);
 
     const [user] = await sql`SELECT user_id, full_name, mobile_no, email, member_id FROM users WHERE user_id = ${userId}`;
     if (!user) return fail(res, "Selected customer was not found.", 404);
@@ -836,34 +846,20 @@ router.post("/admin/bookings/allocate-plot", adminAuth, async (req, res) => {
     const [site] = await sql`SELECT site_id, site_name FROM sites WHERE site_id = ${siteId}`;
     if (!site) return fail(res, "Selected site was not found.", 404);
 
-    const cleanNum = plotNumber.replace(/^plot\s*/i, "").trim();
     const result = await sql.begin(async (db) => {
-      const [plot] = await db`
-        SELECT p.plot_id, p.plot_number, p.plot_status, p.base_price
-        FROM plots p
-        WHERE p.site_id = ${siteId}
+      // Optional: check if matching plot exists in plots table to link plot_id if available
+      const cleanNum = plotNumber.replace(/^plot\s*/i, "").trim();
+      const [matchedPlot] = await db`
+        SELECT plot_id, plot_number, plot_status
+        FROM plots
+        WHERE site_id = ${siteId}
           AND (
-            LOWER(TRIM(p.plot_number)) = LOWER(TRIM(${plotNumber}))
-            OR LOWER(TRIM(p.plot_number)) = LOWER(TRIM(${cleanNum}))
-            OR LOWER(TRIM(p.plot_number)) = LOWER('plot ' || TRIM(${cleanNum}))
+            LOWER(TRIM(plot_number)) = LOWER(TRIM(${plotNumber}))
+            OR LOWER(TRIM(plot_number)) = LOWER(TRIM(${cleanNum}))
           )
-        FOR UPDATE LIMIT 1`;
-
-      if (!plot) {
-        throw Object.assign(new Error(`Plot '${plotNumber}' does not exist in ${site.site_name}. Please verify plot number in Site Management.`), { status: 404 });
-      }
-
-      if (plot.plot_status !== "Vacant") {
-        throw Object.assign(new Error(`Plot #${plot.plot_number} is currently '${plot.plot_status}' and cannot be allocated.`), { status: 409 });
-      }
-
-      const [existingBooking] = await db`
-        SELECT booking_id FROM bookings
-        WHERE plot_id = ${plot.plot_id} AND booking_status NOT IN ('Cancelled', 'Rejected')
         LIMIT 1`;
-      if (existingBooking) {
-        throw Object.assign(new Error(`Plot #${plot.plot_number} already has an active booking (#${existingBooking.booking_id}).`), { status: 409 });
-      }
+
+      const matchedPlotId = matchedPlot ? matchedPlot.plot_id : null;
 
       const [seq] = await db`SELECT nextval('bookings_booking_id_seq') AS booking_id`;
       const bookingId = Number(seq.booking_id);
@@ -877,11 +873,11 @@ router.post("/admin/bookings/allocate-plot", adminAuth, async (req, res) => {
 
       const [booking] = await db`
         INSERT INTO bookings (
-          booking_id, booking_serial, user_id, plot_id, payment_type, advance_amount,
+          booking_id, booking_serial, user_id, site_id, plot_id, plot_number, payment_type, advance_amount,
           booking_status, workflow_status, payment_method, required_booking_amount,
           remaining_balance, notes, base_price, created_at, updated_at
         ) VALUES (
-          ${bookingId}, ${serial}, ${userId}, ${plot.plot_id}, ${paymentMode}, ${initialPayment},
+          ${bookingId}, ${serial}, ${userId}, ${siteId}, ${matchedPlotId}, ${plotNumber}, ${paymentMode}, ${initialPayment},
           ${(isOnlineApproved && remainingBalance === 0) ? 'Confirmed' : 'Allocated'},
           'Plot Allocated by Admin', ${paymentMode}, ${initialPayment},
           ${remainingBalance}, ${remarks}, ${totalPrice}, NOW(), NOW()
@@ -894,13 +890,13 @@ router.post("/admin/bookings/allocate-plot", adminAuth, async (req, res) => {
 
         const [createdPayment] = await db`
           INSERT INTO payment_ledger (
-            payment_serial, user_id, booking_id, plot_id, site_id,
+            payment_serial, user_id, booking_id, plot_id, plot_number, site_id,
             payment_mode, payment_purpose, gross_amount, net_allocated_amount,
             payment_date, payment_status, verification_status, utr_number,
             submitted_by_user_id, submitted_by_role, approved_by_admin_id,
             admin_notes, created_at, updated_at
           ) VALUES (
-            ${paymentSerial}, ${userId}, ${bookingId}, ${plot.plot_id}, ${siteId},
+            ${paymentSerial}, ${userId}, ${bookingId}, ${matchedPlotId}, ${plotNumber}, ${siteId},
             ${paymentMode}, 'BookingAdvance', ${initialPayment}, ${initialPayment},
             CURRENT_DATE, ${paymentStatus}, ${verificationStatus}, ${paymentRef || null},
             ${userId}, 'Admin', ${isOnlineApproved ? req.admin.admin_id : null},
@@ -909,10 +905,9 @@ router.post("/admin/bookings/allocate-plot", adminAuth, async (req, res) => {
         paymentRecord = createdPayment;
       }
 
-      await db`UPDATE plots SET plot_status = 'Booked', updated_at = NOW() WHERE plot_id = ${plot.plot_id}`;
-      await db`
-        INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_admin_id, reason)
-        VALUES (${plot.plot_id}, 'Vacant', 'Booked', ${req.admin.admin_id}, ${'Allocated to ' + user.full_name + ' (Booking ' + serial + ')'})`;
+      if (matchedPlotId && matchedPlot.plot_status === 'Vacant') {
+        await db`UPDATE plots SET plot_status = 'Booked', updated_at = NOW() WHERE plot_id = ${matchedPlotId}`;
+      }
 
       if (inquiryId) {
         await db`
@@ -927,17 +922,17 @@ router.post("/admin/bookings/allocate-plot", adminAuth, async (req, res) => {
           VALUES (
             ${userId},
             'Plot Payment Reminder',
-            ${'Your plot payment for ' + site.site_name + ', Plot No. ' + plot.plot_number + ' is pending. Total outstanding amount: ₹' + remainingBalance.toLocaleString('en-IN') + '. Please complete the remaining payment.'},
+            ${'Your plot payment for ' + site.site_name + ', Plot No. ' + plotNumber + ' is pending. Total outstanding amount: ₹' + remainingBalance.toLocaleString('en-IN') + '. Please complete the remaining payment.'},
             'InApp',
             FALSE,
             NOW()
           )`;
       }
 
-      return { booking, payment: paymentRecord, plot_number: plot.plot_number, site_name: site.site_name };
+      return { booking, payment: paymentRecord, plot_number: plotNumber, site_name: site.site_name };
     });
 
-    return ok(res, result, `Plot #${result.plot_number} allocated successfully to ${user.full_name}.`, 201);
+    return ok(res, result, `Plot '${result.plot_number}' allocated successfully to ${user.full_name}.`, 201);
   } catch (error) {
     return fail(res, error.message, error.status || 400);
   }
@@ -957,10 +952,16 @@ router.post("/admin/bookings/:id/record-payment", adminAuth, async (req, res) =>
     if (receivedAmount <= 0) return fail(res, "Received amount must be greater than 0.", 400);
 
     const [booking] = await sql`
-      SELECT b.*, p.plot_number, p.base_price AS plot_base_price, s.site_id, s.site_name, u.full_name, u.mobile_no
+      SELECT b.*,
+             COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+             COALESCE(b.base_price, p.base_price, 0) AS plot_base_price,
+             COALESCE(b.site_id, p.site_id, 0) AS site_id,
+             COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name,
+             u.full_name, u.mobile_no
       FROM bookings b
-      JOIN plots p ON p.plot_id = b.plot_id
-      JOIN sites s ON s.site_id = p.site_id
+      LEFT JOIN plots p ON p.plot_id = b.plot_id
+      LEFT JOIN sites s ON s.site_id = p.site_id
+      LEFT JOIN sites s2 ON s2.site_id = b.site_id
       JOIN users u ON u.user_id = b.user_id
       WHERE b.booking_id = ${bookingId}`;
 
@@ -975,13 +976,13 @@ router.post("/admin/bookings/:id/record-payment", adminAuth, async (req, res) =>
 
       const [createdPayment] = await db`
         INSERT INTO payment_ledger (
-          payment_serial, user_id, booking_id, plot_id, site_id,
+          payment_serial, user_id, booking_id, plot_id, plot_number, site_id,
           payment_mode, payment_purpose, gross_amount, net_allocated_amount,
           payment_date, payment_status, verification_status, utr_number,
           proof_document_url, submitted_by_user_id, submitted_by_role,
           admin_notes, created_at, updated_at
         ) VALUES (
-          ${paymentSerial}, ${booking.user_id}, ${bookingId}, ${booking.plot_id}, ${booking.site_id},
+          ${paymentSerial}, ${booking.user_id}, ${bookingId}, ${booking.plot_id || null}, ${booking.plot_number}, ${booking.site_id || null},
           ${paymentMode}, 'PartPayment', ${receivedAmount}, ${receivedAmount},
           ${paymentDate}, ${paymentStatus}, ${verificationStatus}, ${paymentRef || null},
           ${proofUrl}, ${req.admin.admin_id}, 'Admin',
@@ -1005,14 +1006,19 @@ router.post("/admin/bookings/payments/:paymentId/verify", adminAuth, async (req,
     if (payment.payment_status === "Approved") return ok(res, payment, "Payment is already approved.");
 
     const [booking] = await sql`
-      SELECT b.*, p.plot_number, p.base_price AS plot_base_price, s.site_name, u.full_name, u.mobile_no
+      SELECT b.*,
+             COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+             COALESCE(b.base_price, p.base_price, 0) AS plot_base_price,
+             COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name,
+             u.full_name, u.mobile_no
       FROM bookings b
-      JOIN plots p ON p.plot_id = b.plot_id
-      JOIN sites s ON s.site_id = p.site_id
+      LEFT JOIN plots p ON p.plot_id = b.plot_id
+      LEFT JOIN sites s ON s.site_id = p.site_id
+      LEFT JOIN sites s2 ON s2.site_id = b.site_id
       JOIN users u ON u.user_id = b.user_id
       WHERE b.booking_id = ${payment.booking_id}`;
 
-    if (!booking) return fail(res, "Linked booking not found.", 404);
+    if (!booking) return fail(res, "Associated booking not found.", 404);
 
     const result = await sql.begin(async (db) => {
       await db`
