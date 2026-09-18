@@ -1497,8 +1497,14 @@ const requireMlmSchema = (() => {
             paid_at TIMESTAMPTZ
           )`;
         await sql`CREATE INDEX IF NOT EXISTS idx_referral_reg_sponsor ON referral_registrations(sponsor_user_id, created_at DESC)`;
+        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_reg_referred ON referral_registrations(referred_user_id)`;
+        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_mlm_network_assoc ON mlm_network(associate_user_id)`;
+        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_mlm_tree_closure_pair ON mlm_tree_closure(ancestor_user_id, descendant_user_id)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_mlm_tree_ancestor ON mlm_tree_closure(ancestor_user_id, depth)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_mlm_tree_descendant ON mlm_tree_closure(descendant_user_id, depth)`;
+        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_associate_ranks_name ON associate_ranks(rank_name)`;
+        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_assoc_ref_invite ON associate_referral_links(invite_code)`;
+        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_assoc_sales_tracker_user ON associate_sales_tracker(associate_user_id)`;
         await sql`
           DELETE FROM commission_rules duplicate
           USING commission_rules keeper
@@ -1538,10 +1544,12 @@ const createDashboardViews = async () => {
       SELECT
         s.site_id,
         s.site_name,
-        COUNT(DISTINCT p.plot_id) AS total_plots,
-        COUNT(DISTINCT CASE WHEN b.booking_status IN ('Confirmed', 'PaymentPending', 'InProcess') THEN p.plot_id END) AS booked,
-        COUNT(DISTINCT CASE WHEN b.booking_status = 'Confirmed' AND (p.possession_date IS NULL OR p.possession_date <= NOW()) THEN p.plot_id END) AS sold,
-        COUNT(DISTINCT p.plot_id) - COUNT(DISTINCT CASE WHEN b.booking_status IN ('Confirmed', 'PaymentPending', 'InProcess') THEN p.plot_id END) AS vacant
+        s.location,
+        COUNT(p.plot_id)::integer as total_plots,
+        COUNT(CASE WHEN p.status = 'Available' THEN 1 END)::integer as available_plots,
+        COUNT(CASE WHEN p.status = 'Booked' THEN 1 END)::integer as booked_plots,
+        COUNT(CASE WHEN p.status = 'Hold' THEN 1 END)::integer as hold_plots,
+        COALESCE(SUM(CASE WHEN p.status = 'Booked' THEN p.base_price ELSE 0 END), 0)::numeric as total_booked_value
       FROM sites s
       LEFT JOIN plots p ON s.site_id = p.site_id
       LEFT JOIN bookings b ON p.plot_id = b.plot_id
@@ -1573,10 +1581,20 @@ const createDashboardViews = async () => {
 };
 
 const seedMlmDefaults = async () => {
+  try {
+    await sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_associate_ranks_name ON associate_ranks(rank_name)`;
+  } catch (e) {}
   await sql`
     INSERT INTO associate_ranks (rank_name, min_direct_sales_gaj, min_total_network_sales_gaj, commission_multiplier)
-    VALUES ('Associate', 0, 0, 1), ('Senior Associate', 500, 1500, 1.1), ('Leader', 1500, 5000, 1.25)
-    ON CONFLICT (rank_name) DO NOTHING`;
+    SELECT * FROM (VALUES 
+      ('Associate', 0, 0, 1), 
+      ('Senior Associate', 500, 1500, 1.1), 
+      ('Leader', 1500, 5000, 1.25)
+    ) AS seed(rank_name, min_direct_sales_gaj, min_total_network_sales_gaj, commission_multiplier)
+    WHERE NOT EXISTS (
+      SELECT 1 FROM associate_ranks ar WHERE ar.rank_name = seed.rank_name
+    )`;
   await sql`
     INSERT INTO commission_rules (commission_type, level_depth, plot_area_unit, amount_per_100_gaj, duration_months)
     SELECT * FROM (VALUES
