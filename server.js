@@ -1889,7 +1889,16 @@ const requireCommissionEngineSchema = (() => {
             ) t WHERE t.rnum > 1
           )
         `.catch(e => console.error("Error removing duplicate levels:", e));
-        await sql`ALTER TABLE commission_engine_levels ADD CONSTRAINT uq_commission_engine_levels_unique UNIQUE (settings_id, commission_model, level_no)`.catch(e => console.error("Error adding unique constraint:", e));
+        await sql`
+          DO $$
+          BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_constraint WHERE conname = 'uq_commission_engine_levels_unique'
+            ) THEN
+              ALTER TABLE commission_engine_levels ADD CONSTRAINT uq_commission_engine_levels_unique UNIQUE (settings_id, commission_model, level_no);
+            END IF;
+          END $$;
+        `.catch(() => {});
         await sql`INSERT INTO commission_engine_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`;
         await sql`
           INSERT INTO commission_engine_levels (settings_id, commission_model, level_no, percentage)
