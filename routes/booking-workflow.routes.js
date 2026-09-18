@@ -772,13 +772,22 @@ router.patch("/admin/bookings/:id/appointment", adminAuth, async (req, res) => {
 async function ensureAllocationSchema() {
   try {
     await sql`ALTER TABLE bookings ALTER COLUMN booking_status TYPE VARCHAR(60) USING booking_status::text`.catch(() => {});
+    await sql`ALTER TABLE bookings ALTER COLUMN payment_type TYPE VARCHAR(60) USING payment_type::text`.catch(() => {});
+    await sql`ALTER TABLE bookings ALTER COLUMN payment_method TYPE VARCHAR(60) USING payment_method::text`.catch(() => {});
+    await sql`ALTER TABLE bookings ALTER COLUMN workflow_status TYPE VARCHAR(80) USING workflow_status::text`.catch(() => {});
+    await sql`ALTER TABLE notification_log ALTER COLUMN channel TYPE VARCHAR(60) USING channel::text`.catch(() => {});
     await sql`ALTER TYPE booking_status_enum ADD VALUE IF NOT EXISTS 'Allocated'`.catch(() => {});
+    await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'Full'`.catch(() => {});
+    await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'FullPayment'`.catch(() => {});
+    await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'InApp'`.catch(() => {});
+    await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'inapp'`.catch(() => {});
+
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS site_id INTEGER`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(12,2) DEFAULT 0`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS base_price NUMERIC(14,2) DEFAULT 0`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT`;
-    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_type VARCHAR(50) DEFAULT 'Full'`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_type VARCHAR(50) DEFAULT 'FullPayment'`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50)`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS workflow_status VARCHAR(80) DEFAULT 'Booking Initiated'`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS required_booking_amount NUMERIC(14,2) DEFAULT 0`;
@@ -901,16 +910,18 @@ router.post("/admin/bookings/allocate-plot", adminAuth, async (req, res) => {
       }
 
       if (remainingBalance > 0) {
-        await db`
-          INSERT INTO notification_log (user_id, title, message, channel, is_read, sent_at)
-          VALUES (
-            ${userId},
-            'Plot Payment Reminder',
-            ${'Your plot payment for ' + site.site_name + ', Plot No. ' + plotNumber + ' is pending. Total outstanding amount: ₹' + remainingBalance.toLocaleString('en-IN') + '. Please complete the remaining payment.'},
-            'InApp',
-            FALSE,
-            NOW()
-          )`;
+        try {
+          await db`
+            INSERT INTO notification_log (user_id, title, message, channel, is_read, sent_at)
+            VALUES (
+              ${userId},
+              'Plot Payment Reminder',
+              ${'Your plot payment for ' + site.site_name + ', Plot No. ' + plotNumber + ' is pending. Total outstanding amount: ₹' + remainingBalance.toLocaleString('en-IN') + '. Please complete the remaining payment.'},
+              'InApp',
+              FALSE,
+              NOW()
+            )`;
+        } catch (_) {}
       }
 
       return { booking, payment: paymentRecord, plot_number: plotNumber, site_name: site.site_name };

@@ -7672,13 +7672,22 @@ app.post("/api/admin/users/:id/blacklist",
 async function ensurePlotAllocationSchema() {
   try {
     await sql`ALTER TABLE bookings ALTER COLUMN booking_status TYPE VARCHAR(60) USING booking_status::text`.catch(() => {});
+    await sql`ALTER TABLE bookings ALTER COLUMN payment_type TYPE VARCHAR(60) USING payment_type::text`.catch(() => {});
+    await sql`ALTER TABLE bookings ALTER COLUMN payment_method TYPE VARCHAR(60) USING payment_method::text`.catch(() => {});
+    await sql`ALTER TABLE bookings ALTER COLUMN workflow_status TYPE VARCHAR(80) USING workflow_status::text`.catch(() => {});
+    await sql`ALTER TABLE notification_log ALTER COLUMN channel TYPE VARCHAR(60) USING channel::text`.catch(() => {});
     await sql`ALTER TYPE booking_status_enum ADD VALUE IF NOT EXISTS 'Allocated'`.catch(() => {});
+    await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'Full'`.catch(() => {});
+    await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'FullPayment'`.catch(() => {});
+    await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'InApp'`.catch(() => {});
+    await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'inapp'`.catch(() => {});
+
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS site_id INTEGER`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(12,2) DEFAULT 0`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS base_price NUMERIC(14,2) DEFAULT 0`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT`;
-    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_type VARCHAR(50) DEFAULT 'Full'`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_type VARCHAR(50) DEFAULT 'FullPayment'`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50)`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS workflow_status VARCHAR(80) DEFAULT 'Booking Initiated'`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS required_booking_amount NUMERIC(14,2) DEFAULT 0`;
@@ -7718,7 +7727,7 @@ app.get("/api/admin/bookings",
       if (paymentStatusFilter) {
         conds.push(sql`(
           CASE
-            WHEN b.booking_status = 'Confirmed' THEN 'Paid'
+            WHEN b.booking_status::text = 'Confirmed' THEN 'Paid'
             WHEN COALESCE(b.advance_amount, 0) > 0 THEN 'Partial'
             ELSE 'Unpaid'
           END
@@ -7743,16 +7752,16 @@ app.get("/api/admin/bookings",
         SELECT b.booking_id,
                COALESCE(b.booking_serial, CONCAT('MMR-', b.booking_id)) AS booking_serial,
                COALESCE(b.booking_date, b.created_at) AS booking_date,
-               COALESCE(b.booking_status, 'Pending') AS booking_status,
+               COALESCE(b.booking_status::text, 'Pending') AS booking_status,
                COALESCE(b.advance_amount, 0) AS advance_amount,
-               COALESCE(b.payment_type, 'Full') AS payment_type,
-               COALESCE(b.payment_method, b.payment_type, 'Cash') AS payment_method,
-               COALESCE(b.workflow_status, 'Booking Initiated') AS workflow_status,
+               COALESCE(b.payment_type::text, 'FullPayment') AS payment_type,
+               COALESCE(b.payment_method::text, b.payment_type::text, 'Cash') AS payment_method,
+               COALESCE(b.workflow_status::text, 'Booking Initiated') AS workflow_status,
                COALESCE(b.required_booking_amount, 0) AS required_booking_amount,
                COALESCE(b.remaining_balance, 0) AS remaining_balance,
                COALESCE(b.base_price, p.base_price, 0) AS base_price,
                CASE
-                 WHEN b.booking_status = 'Confirmed' THEN 'Paid'
+                 WHEN b.booking_status::text = 'Confirmed' THEN 'Paid'
                  WHEN COALESCE(b.advance_amount, 0) > 0 THEN 'Partial'
                  ELSE 'Unpaid'
                END AS payment_status,
