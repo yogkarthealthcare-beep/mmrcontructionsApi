@@ -16,7 +16,7 @@ function fail(res, message = "Failed", code = 400) {
 // ── Auto-create Table if missing ─────────────────────────────
 export async function ensureReceiptsTable() {
   try {
-    await sql`
+    await sql.unsafe(`
       CREATE TABLE IF NOT EXISTS receipts (
         id BIGSERIAL PRIMARY KEY,
         receipt_no VARCHAR(100) UNIQUE NOT NULL,
@@ -51,9 +51,7 @@ export async function ensureReceiptsTable() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
-    `;
 
-    await sql`
       CREATE INDEX IF NOT EXISTS idx_receipts_receipt_no ON receipts(receipt_no);
       CREATE INDEX IF NOT EXISTS idx_receipts_serial_no ON receipts(serial_no);
       CREATE INDEX IF NOT EXISTS idx_receipts_customer_name ON receipts(customer_name);
@@ -63,9 +61,7 @@ export async function ensureReceiptsTable() {
       CREATE INDEX IF NOT EXISTS idx_receipts_customer_id ON receipts(customer_id);
       CREATE INDEX IF NOT EXISTS idx_receipts_status ON receipts(status);
       CREATE INDEX IF NOT EXISTS idx_receipts_created_at ON receipts(created_at DESC);
-    `;
 
-    await sql`
       CREATE TABLE IF NOT EXISTS receipt_audit_log (
         id BIGSERIAL PRIMARY KEY,
         receipt_id BIGINT NOT NULL,
@@ -76,12 +72,10 @@ export async function ensureReceiptsTable() {
         details JSONB,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
-    `;
 
-    await sql`
       CREATE INDEX IF NOT EXISTS idx_receipt_audit_receipt_id ON receipt_audit_log(receipt_id);
       CREATE INDEX IF NOT EXISTS idx_receipt_audit_receipt_no ON receipt_audit_log(receipt_no);
-    `;
+    `);
     console.log("[Receipts] PostgreSQL tables verified.");
   } catch (err) {
     console.error("[Receipts] Error verifying tables:", err);

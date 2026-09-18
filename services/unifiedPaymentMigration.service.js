@@ -132,9 +132,9 @@ export async function runHistoricalPaymentMigration() {
       const [match] = await sql`
         SELECT pl.payment_id
         FROM payment_ledger pl
-        JOIN plots p ON p.plot_id = pl.plot_id
+        LEFT JOIN plots p ON p.plot_id = pl.plot_id
         WHERE pl.user_id = ${r.customer_id}
-          AND (p.plot_number = ${r.plot_no} OR p.plot_name = ${r.plot_no})
+          AND (COALESCE(pl.plot_number, p.plot_number, '') = ${r.plot_no})
           AND ABS(pl.gross_amount - ${Number(r.paid_amount || 0)}) < 0.01
           AND pl.receipt_id IS NULL
         LIMIT 1
