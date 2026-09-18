@@ -769,6 +769,410 @@ router.patch("/admin/bookings/:id/appointment", adminAuth, async (req, res) => {
   }
 });
 
+router.get("/admin/plots/validate-availability", adminAuth, async (req, res) => {
+  try {
+    const siteId = Number(req.query.site_id);
+    const plotNumber = String(req.query.plot_number || "").trim();
+    if (!siteId || !plotNumber) {
+      return fail(res, "site_id and plot_number are required.", 400);
+    }
+    const cleanNum = plotNumber.replace(/^plot\s*/i, "").trim();
+    const [plot] = await sql`
+      SELECT p.plot_id, p.plot_number, p.plot_area, p.plot_category, p.base_price,
+             p.down_payment, p.monthly_emi, p.plot_status, s.site_name, s.city
+      FROM plots p
+      JOIN sites s ON s.site_id = p.site_id
+      WHERE p.site_id = ${siteId}
+        AND (
+          LOWER(TRIM(p.plot_number)) = LOWER(TRIM(${plotNumber}))
+          OR LOWER(TRIM(p.plot_number)) = LOWER(TRIM(${cleanNum}))
+          OR LOWER(TRIM(p.plot_number)) = LOWER('plot ' || TRIM(${cleanNum}))
+        )
+      LIMIT 1`;
+
+    if (!plot) {
+      return ok(res, {
+        exists: false,
+        is_available: false,
+        message: `Plot '${plotNumber}' was not found in the selected site. Please check the plot number or register it in Site Management first.`
+      });
+    }
+
+    const isAvailable = plot.plot_status === "Vacant";
+    return ok(res, {
+      exists: true,
+      is_available: isAvailable,
+      plot,
+      message: isAvailable
+        ? `Plot #${plot.plot_number} is Available (Vacant).`
+        : `Plot #${plot.plot_number} is currently ${plot.plot_status} and unavailable for allocation.`
+    });
+  } catch (error) {
+    return fail(res, error.message, 400);
+  }
+});
+
+router.post("/admin/bookings/allocate-plot", adminAuth, async (req, res) => {
+  try {
+    const userId = Number(req.body.user_id);
+    const siteId = Number(req.body.site_id);
+    const plotNumber = String(req.body.plot_number || "").trim();
+    const totalPrice = Number(req.body.total_price || 0);
+    const initialPayment = Number(req.body.initial_payment_amount || 0);
+    const paymentMode = String(req.body.payment_mode || "Cash").trim();
+    const paymentRef = String(req.body.payment_reference || "").trim();
+    const inquiryId = req.body.inquiry_id ? Number(req.body.inquiry_id) : null;
+    const remarks = String(req.body.remarks || "Plot allocated by Admin").trim();
+
+    if (!userId) return fail(res, "Customer selection is required.", 400);
+    if (!siteId) return fail(res, "Site selection is required.", 400);
+    if (!plotNumber) return fail(res, "Plot number is required.", 400);
+    if (totalPrice <= 0) return fail(res, "Total plot price must be greater than 0.", 400);
+    if (initialPayment < 0) return fail(res, "Initial payment cannot be negative.", 400);
+
+    const [user] = await sql`SELECT user_id, full_name, mobile_no, email, member_id FROM users WHERE user_id = ${userId}`;
+    if (!user) return fail(res, "Selected customer was not found.", 404);
+
+    const [site] = await sql`SELECT site_id, site_name FROM sites WHERE site_id = ${siteId}`;
+    if (!site) return fail(res, "Selected site was not found.", 404);
+
+    const cleanNum = plotNumber.replace(/^plot\s*/i, "").trim();
+    const result = await sql.begin(async (db) => {
+      const [plot] = await db`
+        SELECT p.plot_id, p.plot_number, p.plot_status, p.base_price
+        FROM plots p
+        WHERE p.site_id = ${siteId}
+          AND (
+            LOWER(TRIM(p.plot_number)) = LOWER(TRIM(${plotNumber}))
+            OR LOWER(TRIM(p.plot_number)) = LOWER(TRIM(${cleanNum}))
+            OR LOWER(TRIM(p.plot_number)) = LOWER('plot ' || TRIM(${cleanNum}))
+          )
+        FOR UPDATE LIMIT 1`;
+
+      if (!plot) {
+        throw Object.assign(new Error(`Plot '${plotNumber}' does not exist in ${site.site_name}. Please verify plot number in Site Management.`), { status: 404 });
+      }
+
+      if (plot.plot_status !== "Vacant") {
+        throw Object.assign(new Error(`Plot #${plot.plot_number} is currently '${plot.plot_status}' and cannot be allocated.`), { status: 409 });
+      }
+
+      const [existingBooking] = await db`
+        SELECT booking_id FROM bookings
+        WHERE plot_id = ${plot.plot_id} AND booking_status NOT IN ('Cancelled', 'Rejected')
+        LIMIT 1`;
+      if (existingBooking) {
+        throw Object.assign(new Error(`Plot #${plot.plot_number} already has an active booking (#${existingBooking.booking_id}).`), { status: 409 });
+      }
+
+      const [seq] = await db`SELECT nextval('bookings_booking_id_seq') AS booking_id`;
+      const bookingId = Number(seq.booking_id);
+      const serial = `MMR-${new Date().getFullYear()}-${String(bookingId).padStart(5, "0")}`;
+
+      const isOnlineApproved = paymentMode === "Online" && Boolean(paymentRef);
+      const paymentStatus = isOnlineApproved ? "Approved" : "UnderVerification";
+      const verificationStatus = isOnlineApproved ? "Verified" : "Pending";
+      const approvedPaid = isOnlineApproved ? initialPayment : 0;
+      const remainingBalance = Math.max(0, totalPrice - approvedPaid);
+
+      const [booking] = await db`
+        INSERT INTO bookings (
+          booking_id, booking_serial, user_id, plot_id, payment_type, advance_amount,
+          booking_status, workflow_status, payment_method, required_booking_amount,
+          remaining_balance, notes, base_price, created_at, updated_at
+        ) VALUES (
+          ${bookingId}, ${serial}, ${userId}, ${plot.plot_id}, ${paymentMode}, ${initialPayment},
+          ${(isOnlineApproved && remainingBalance === 0) ? 'Confirmed' : 'Allocated'},
+          'Plot Allocated by Admin', ${paymentMode}, ${initialPayment},
+          ${remainingBalance}, ${remarks}, ${totalPrice}, NOW(), NOW()
+        ) RETURNING *`;
+
+      let paymentRecord = null;
+      if (initialPayment > 0) {
+        const [pSeq] = await db`SELECT COALESCE(MAX(payment_id), 0) + 1 AS pid FROM payment_ledger`;
+        const paymentSerial = `PL-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${String(pSeq.pid).padStart(6, '0')}`;
+
+        const [createdPayment] = await db`
+          INSERT INTO payment_ledger (
+            payment_serial, user_id, booking_id, plot_id, site_id,
+            payment_mode, payment_purpose, gross_amount, net_allocated_amount,
+            payment_date, payment_status, verification_status, utr_number,
+            submitted_by_user_id, submitted_by_role, approved_by_admin_id,
+            admin_notes, created_at, updated_at
+          ) VALUES (
+            ${paymentSerial}, ${userId}, ${bookingId}, ${plot.plot_id}, ${siteId},
+            ${paymentMode}, 'BookingAdvance', ${initialPayment}, ${initialPayment},
+            CURRENT_DATE, ${paymentStatus}, ${verificationStatus}, ${paymentRef || null},
+            ${userId}, 'Admin', ${isOnlineApproved ? req.admin.admin_id : null},
+            ${remarks}, NOW(), NOW()
+          ) RETURNING *`;
+        paymentRecord = createdPayment;
+      }
+
+      await db`UPDATE plots SET plot_status = 'Booked', updated_at = NOW() WHERE plot_id = ${plot.plot_id}`;
+      await db`
+        INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_admin_id, reason)
+        VALUES (${plot.plot_id}, 'Vacant', 'Booked', ${req.admin.admin_id}, ${'Allocated to ' + user.full_name + ' (Booking ' + serial + ')'})`;
+
+      if (inquiryId) {
+        await db`
+          UPDATE inquiries
+          SET status = 'Converted', remarks = ${'Converted to Allocation ' + serial + ' by Admin'}, updated_at = NOW()
+          WHERE inquiry_id = ${inquiryId}`;
+      }
+
+      if (remainingBalance > 0) {
+        await db`
+          INSERT INTO notification_log (user_id, title, message, channel, is_read, sent_at)
+          VALUES (
+            ${userId},
+            'Plot Payment Reminder',
+            ${'Your plot payment for ' + site.site_name + ', Plot No. ' + plot.plot_number + ' is pending. Total outstanding amount: ₹' + remainingBalance.toLocaleString('en-IN') + '. Please complete the remaining payment.'},
+            'InApp',
+            FALSE,
+            NOW()
+          )`;
+      }
+
+      return { booking, payment: paymentRecord, plot_number: plot.plot_number, site_name: site.site_name };
+    });
+
+    return ok(res, result, `Plot #${result.plot_number} allocated successfully to ${user.full_name}.`, 201);
+  } catch (error) {
+    return fail(res, error.message, error.status || 400);
+  }
+});
+
+router.post("/admin/bookings/:id/record-payment", adminAuth, async (req, res) => {
+  try {
+    const bookingId = Number(req.params.id);
+    const receivedAmount = Number(req.body.received_amount || 0);
+    const paymentMode = String(req.body.payment_mode || "Cash").trim();
+    const paymentRef = String(req.body.payment_reference || "").trim();
+    const paymentDate = req.body.payment_date || new Date().toISOString().slice(0, 10);
+    const remarks = String(req.body.remarks || "Milestone installment payment").trim();
+    const proofUrl = req.body.proof_url || null;
+
+    if (!bookingId) return fail(res, "Booking ID is required.", 400);
+    if (receivedAmount <= 0) return fail(res, "Received amount must be greater than 0.", 400);
+
+    const [booking] = await sql`
+      SELECT b.*, p.plot_number, p.base_price AS plot_base_price, s.site_id, s.site_name, u.full_name, u.mobile_no
+      FROM bookings b
+      JOIN plots p ON p.plot_id = b.plot_id
+      JOIN sites s ON s.site_id = p.site_id
+      JOIN users u ON u.user_id = b.user_id
+      WHERE b.booking_id = ${bookingId}`;
+
+    if (!booking) return fail(res, "Booking not found.", 404);
+
+    const result = await sql.begin(async (db) => {
+      const [pSeq] = await db`SELECT COALESCE(MAX(payment_id), 0) + 1 AS pid FROM payment_ledger`;
+      const paymentSerial = `PL-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${String(pSeq.pid).padStart(6, '0')}`;
+
+      const paymentStatus = "UnderVerification";
+      const verificationStatus = "Pending";
+
+      const [createdPayment] = await db`
+        INSERT INTO payment_ledger (
+          payment_serial, user_id, booking_id, plot_id, site_id,
+          payment_mode, payment_purpose, gross_amount, net_allocated_amount,
+          payment_date, payment_status, verification_status, utr_number,
+          proof_document_url, submitted_by_user_id, submitted_by_role,
+          admin_notes, created_at, updated_at
+        ) VALUES (
+          ${paymentSerial}, ${booking.user_id}, ${bookingId}, ${booking.plot_id}, ${booking.site_id},
+          ${paymentMode}, 'PartPayment', ${receivedAmount}, ${receivedAmount},
+          ${paymentDate}, ${paymentStatus}, ${verificationStatus}, ${paymentRef || null},
+          ${proofUrl}, ${req.admin.admin_id}, 'Admin',
+          ${remarks}, NOW(), NOW()
+        ) RETURNING *`;
+
+      return createdPayment;
+    });
+
+    return ok(res, result, "Milestone payment recorded successfully. Verification is pending.", 201);
+  } catch (error) {
+    return fail(res, error.message, 400);
+  }
+});
+
+router.post("/admin/bookings/payments/:paymentId/verify", adminAuth, async (req, res) => {
+  try {
+    const paymentId = Number(req.params.paymentId);
+    const [payment] = await sql`SELECT * FROM payment_ledger WHERE payment_id = ${paymentId}`;
+    if (!payment) return fail(res, "Payment record not found.", 404);
+    if (payment.payment_status === "Approved") return ok(res, payment, "Payment is already approved.");
+
+    const [booking] = await sql`
+      SELECT b.*, p.plot_number, p.base_price AS plot_base_price, s.site_name, u.full_name, u.mobile_no
+      FROM bookings b
+      JOIN plots p ON p.plot_id = b.plot_id
+      JOIN sites s ON s.site_id = p.site_id
+      JOIN users u ON u.user_id = b.user_id
+      WHERE b.booking_id = ${payment.booking_id}`;
+
+    if (!booking) return fail(res, "Linked booking not found.", 404);
+
+    const result = await sql.begin(async (db) => {
+      await db`
+        UPDATE payment_ledger SET
+          payment_status = 'Approved',
+          verification_status = 'Verified',
+          verified_by_admin_id = ${req.admin.admin_id},
+          approved_by_admin_id = ${req.admin.admin_id},
+          updated_at = NOW()
+        WHERE payment_id = ${paymentId}`;
+
+      let receiptId = payment.receipt_id;
+      if (!receiptId) {
+        const [rSeq] = await db`SELECT COALESCE(MAX(serial_no), 0) + 1 AS max_seq FROM receipts`;
+        const receiptNo = `MMR-REC-${new Date().getFullYear()}-${String(rSeq.max_seq).padStart(5, '0')}`;
+        const [rcpt] = await db`
+          INSERT INTO receipts (
+            receipt_no, serial_no, customer_id, customer_name, mobile_no,
+            plot_no, receipt_date, payment_mode, payment_type,
+            receipt_amount, paid_amount, payment_ledger_id, created_by
+          ) VALUES (
+            ${receiptNo}, ${rSeq.max_seq}, ${booking.user_id}, ${booking.full_name}, ${booking.mobile_no},
+            ${booking.plot_number}, CURRENT_DATE, ${payment.payment_mode}, ${payment.payment_purpose},
+            ${payment.gross_amount}, ${payment.gross_amount}, ${paymentId}, ${req.admin.admin_id}
+          ) RETURNING id`;
+        receiptId = rcpt.id;
+        await db`UPDATE payment_ledger SET receipt_id = ${receiptId} WHERE payment_id = ${paymentId}`;
+      }
+
+      const [sumRow] = await db`
+        SELECT COALESCE(SUM(gross_amount), 0) AS total_approved
+        FROM payment_ledger
+        WHERE booking_id = ${booking.booking_id} AND payment_status = 'Approved'`;
+      const totalApproved = Number(sumRow?.total_approved || 0);
+      const totalPlotPrice = Number(booking.base_price || booking.plot_base_price || 0);
+      const newRemainingBalance = Math.max(0, totalPlotPrice - totalApproved);
+
+      const isFullyPaid = newRemainingBalance <= 0;
+      await db`
+        UPDATE bookings SET
+          remaining_balance = ${newRemainingBalance},
+          booking_status = ${isFullyPaid ? 'Confirmed' : 'Allocated'},
+          workflow_status = ${isFullyPaid ? 'Fully Paid' : 'Partially Paid'},
+          updated_at = NOW()
+        WHERE booking_id = ${booking.booking_id}`;
+
+      if (isFullyPaid) {
+        await db`
+          UPDATE notification_log
+          SET is_read = TRUE, read_at = NOW()
+          WHERE user_id = ${booking.user_id} AND title = 'Plot Payment Reminder' AND is_read = FALSE`;
+        await db`
+          INSERT INTO notification_log (user_id, title, message, channel, is_read, sent_at)
+          VALUES (
+            ${booking.user_id},
+            'Plot Payment Completed',
+            ${'Congratulations! Your plot payment for ' + booking.site_name + ', Plot No. ' + booking.plot_number + ' is now 100% completed.'},
+            'InApp',
+            FALSE,
+            NOW()
+          )`;
+      } else {
+        await db`
+          INSERT INTO notification_log (user_id, title, message, channel, is_read, sent_at)
+          VALUES (
+            ${booking.user_id},
+            'Plot Payment Reminder',
+            ${'Your plot payment for ' + booking.site_name + ', Plot No. ' + booking.plot_number + ' is pending. Total outstanding amount: ₹' + newRemainingBalance.toLocaleString('en-IN') + '. Please complete the remaining payment.'},
+            'InApp',
+            FALSE,
+            NOW()
+          )`;
+      }
+
+      return { payment_id: paymentId, total_approved: totalApproved, remaining_balance: newRemainingBalance, is_fully_paid: isFullyPaid };
+    });
+
+    return ok(res, result, "Payment approved and verified successfully. Balance updated.");
+  } catch (error) {
+    return fail(res, error.message, 400);
+  }
+});
+
+router.get("/admin/plot-inquiries", adminAuth, async (req, res) => {
+  try {
+    const { search = "", status = "", site_id = "", page = 1, limit = 20 } = req.query;
+    const safeLimit = Math.min(Number(limit) || 20, 100);
+    const offset = (Math.max(1, Number(page)) - 1) * safeLimit;
+
+    const conds = [];
+    if (status && status !== "all") conds.push(sql`i.status = ${String(status)}`);
+    if (site_id) conds.push(sql`i.site_id = ${Number(site_id)}`);
+    if (search) {
+      const q = `%${String(search).trim()}%`;
+      conds.push(sql`(
+        i.full_name ILIKE ${q} OR
+        i.mobile_no ILIKE ${q} OR
+        COALESCE(i.email, '') ILIKE ${q} OR
+        COALESCE(i.site_name, '') ILIKE ${q} OR
+        COALESCE(i.plot_number, '') ILIKE ${q}
+      )`);
+    }
+
+    let whereSql = sql`TRUE`;
+    if (conds.length > 0) {
+      whereSql = conds.reduce((acc, curr) => sql`${acc} AND ${curr}`);
+    }
+
+    const rows = await sql`
+      SELECT i.inquiry_id, i.full_name, i.mobile_no, i.email, i.site_id, i.site_name,
+             i.plot_number, i.inquiry_message, i.inquiry_type, i.source_page,
+             i.status, i.remarks, i.created_at, i.updated_at,
+             u.user_id AS matched_user_id, u.member_id AS matched_member_id,
+             u.user_type AS matched_user_type, u.account_status AS matched_account_status
+      FROM inquiries i
+      LEFT JOIN LATERAL (
+        SELECT user_id, member_id, user_type, account_status
+        FROM users
+        WHERE mobile_no = i.mobile_no OR (i.email IS NOT NULL AND LOWER(email) = LOWER(i.email))
+        LIMIT 1
+      ) u ON TRUE
+      WHERE ${whereSql}
+      ORDER BY i.created_at DESC
+      LIMIT ${safeLimit} OFFSET ${offset}`;
+
+    const [totalRow] = await sql`
+      SELECT COUNT(*)::int AS count FROM inquiries i WHERE ${whereSql}`;
+
+    return ok(res, {
+      inquiries: rows,
+      total: Number(totalRow?.count || 0),
+      page: Number(page),
+      limit: safeLimit
+    });
+  } catch (error) {
+    return fail(res, error.message, 400);
+  }
+});
+
+router.put("/admin/plot-inquiries/:id/status", adminAuth, async (req, res) => {
+  try {
+    const inquiryId = Number(req.params.id);
+    const status = String(req.body.status || "").trim();
+    const remarks = req.body.remarks ? String(req.body.remarks).trim() : null;
+
+    const [updated] = await sql`
+      UPDATE inquiries SET
+        status = COALESCE(${status || null}, status),
+        remarks = COALESCE(${remarks}, remarks),
+        updated_at = NOW()
+      WHERE inquiry_id = ${inquiryId}
+      RETURNING *`;
+
+    if (!updated) return fail(res, "Inquiry not found.", 404);
+    return ok(res, updated, "Inquiry status updated successfully.");
+  } catch (error) {
+    return fail(res, error.message, 400);
+  }
+});
+
 router.post("/admin/bookings/manual", adminAuth, async (req, res) => {
   try {
     const userId = Number(req.body.user_id);
