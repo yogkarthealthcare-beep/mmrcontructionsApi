@@ -171,15 +171,23 @@ async function bookingDetails(bookingId, userId = null) {
   const [row] = await sql`
     SELECT
       b.*, u.full_name, u.mobile_no, u.email,
-      p.plot_number, p.plot_area, p.plot_category, p.base_price, p.monthly_emi,
-      p.emi_tenure_months, s.site_name, s.city, s.full_address,
+      COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+      COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+      COALESCE(p.plot_category, 'Residential') AS plot_category,
+      COALESCE(b.base_price, p.base_price, 0) AS base_price,
+      COALESCE(p.monthly_emi, 0) AS monthly_emi,
+      COALESCE(p.emi_tenure_months, 60) AS emi_tenure_months,
+      COALESCE(s.site_name, s2.site_name, 'MMR Green Valley') AS site_name,
+      COALESCE(s.city, s2.city, 'Lucknow') AS city,
+      COALESCE(s.full_address, s2.full_address, s.city, s2.city, 'Lucknow / Unnao Highway, UP') AS full_address,
       a.appointment_id, a.appointment_date, a.start_time, a.end_time,
       a.status AS appointment_status, a.payment_mode AS appointment_payment_mode,
       i.invoice_id, i.invoice_number
     FROM bookings b
-    JOIN users u ON u.user_id = b.user_id
-    JOIN plots p ON p.plot_id = b.plot_id
-    JOIN sites s ON s.site_id = p.site_id
+    LEFT JOIN users u  ON u.user_id = b.user_id
+    LEFT JOIN plots p  ON p.plot_id = b.plot_id
+    LEFT JOIN sites s  ON s.site_id = p.site_id
+    LEFT JOIN sites s2 ON s2.site_id = b.site_id
     LEFT JOIN booking_appointments a ON a.booking_id = b.booking_id
     LEFT JOIN booking_invoices i ON i.booking_id = b.booking_id
     WHERE b.booking_id = ${bookingId}
@@ -533,13 +541,19 @@ router.get("/booking/orders", userAuth, async (req, res) => {
     const rows = await sql`
       SELECT b.booking_id, b.booking_serial, b.booking_date, b.booking_status, b.workflow_status,
              b.payment_method, b.required_booking_amount, b.remaining_balance,
-             p.plot_number, p.plot_area, p.base_price, p.monthly_emi, p.emi_tenure_months,
-             s.site_name, a.appointment_date, a.start_time, a.status AS appointment_status,
+             COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+             COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+             COALESCE(b.base_price, p.base_price, 0) AS base_price,
+             COALESCE(p.monthly_emi, 0) AS monthly_emi,
+             COALESCE(p.emi_tenure_months, 60) AS emi_tenure_months,
+             COALESCE(s.site_name, s2.site_name, 'MMR Green Valley') AS site_name,
+             a.appointment_date, a.start_time, a.status AS appointment_status,
              i.invoice_number,
              COALESCE((SELECT SUM(amount) FROM booking_payment_records pr WHERE pr.booking_id = b.booking_id AND pr.status = 'Paid'), 0) AS total_paid
       FROM bookings b
-      JOIN plots p ON p.plot_id = b.plot_id
-      JOIN sites s ON s.site_id = p.site_id
+      LEFT JOIN plots p  ON p.plot_id = b.plot_id
+      LEFT JOIN sites s  ON s.site_id = p.site_id
+      LEFT JOIN sites s2 ON s2.site_id = b.site_id
       LEFT JOIN booking_appointments a ON a.booking_id = b.booking_id
       LEFT JOIN booking_invoices i ON i.booking_id = b.booking_id
       WHERE b.user_id = ${req.user.user_id}

@@ -5735,30 +5735,90 @@ app.get("/api/plots/:id", async (req, res) => {
 
 app.get("/api/bookings", verifyUserToken, async (req, res) => {
   try {
+    await ensurePlotAllocationSchema().catch(() => {});
     const bookings = await sql`
-      SELECT b.booking_id, b.booking_serial, b.booking_date, b.booking_status,
-             b.advance_amount, b.payment_type, b.created_at,
+      SELECT b.booking_id,
+             COALESCE(b.booking_serial, CONCAT('MMR-', b.booking_id)) AS booking_serial,
+             COALESCE(b.booking_date, b.created_at) AS booking_date,
+             COALESCE(b.booking_status::text, 'Allocated') AS booking_status,
+             COALESCE(b.workflow_status::text, 'Plot Allocated by Admin') AS workflow_status,
+             COALESCE(b.advance_amount, 0)::numeric AS advance_amount,
+             COALESCE(b.payment_type::text, 'FullPayment') AS payment_type,
+             COALESCE(b.payment_method::text, b.payment_type::text, 'Cash') AS payment_method,
+             b.created_at,
+             b.updated_at,
              CASE
-               WHEN b.booking_status = 'Confirmed' THEN 'Paid'
-               WHEN b.advance_amount > 0 THEN 'Partial'
+               WHEN b.booking_status::text IN ('Confirmed', 'Fully Paid') THEN 'Paid'
+               WHEN COALESCE(b.advance_amount, 0) > 0 OR COALESCE(pay.total_paid, 0) > 0 THEN 'Partial'
                ELSE 'Unpaid'
              END AS payment_status,
+             COALESCE(b.base_price, p.base_price, 0)::numeric AS base_price,
+             COALESCE(b.base_price, p.base_price, 0)::numeric AS total_amount,
+             COALESCE(b.base_price, p.base_price, 0)::numeric AS total_price,
+             COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+             COALESCE(b.plot_area, p.plot_area, 0)::numeric AS plot_area,
+             COALESCE(p.plot_category, 'Residential') AS plot_category,
+             COALESCE(s.site_name, s2.site_name, 'MMR Green Valley') AS site_name,
+             COALESCE(s.city, s2.city, 'Lucknow') AS city,
+             COALESCE(s.full_address, s2.full_address, s.city, s2.city, 'Lucknow / Unnao Highway, UP') AS location,
              COALESCE(pay.total_paid, b.advance_amount, 0)::numeric AS total_paid,
-             p.plot_number, p.plot_area, p.plot_category,
-             s.site_name, s.city
+             COALESCE(b.remaining_balance, GREATEST(0, COALESCE(b.base_price, p.base_price, 0) - COALESCE(pay.total_paid, b.advance_amount, 0)))::numeric AS remaining_balance,
+             COALESCE(b.registry_status, p.registry_status, NULL) AS registry_status,
+             COALESCE(b.registry_date, p.registry_date, NULL) AS registry_date,
+             COALESCE(b.registry_document_url, p.registry_document_url, NULL) AS registry_document_url,
+             b.notes
       FROM bookings b
-      JOIN plots p ON b.plot_id = p.plot_id
-      JOIN sites  s ON p.site_id  = s.site_id
+      LEFT JOIN plots p  ON b.plot_id = p.plot_id
+      LEFT JOIN sites s  ON p.site_id = s.site_id
+      LEFT JOIN sites s2 ON b.site_id = s2.site_id
       LEFT JOIN LATERAL (
-        SELECT COALESCE(SUM(e.paid_amount) FILTER (WHERE e.emi_status = 'Paid'), 0) + COALESCE(b.advance_amount, 0) AS total_paid
-        FROM emi_schedules e
-        WHERE e.booking_id = b.booking_id
+        SELECT (
+          COALESCE((
+            SELECT SUM(e.paid_amount) 
+            FROM emi_schedules e 
+            WHERE e.booking_id = b.booking_id AND e.emi_status = 'Paid'
+          ), 0) +
+          COALESCE((
+            SELECT SUM(pl.gross_amount)
+            FROM payment_ledger pl
+            WHERE pl.booking_id = b.booking_id AND pl.payment_status = 'Approved' AND pl.payment_purpose != 'EMI'
+          ), COALESCE(b.advance_amount, 0))
+        ) AS total_paid
       ) pay ON TRUE
       WHERE b.user_id = ${req.user.user_id}
       ORDER BY b.created_at DESC`;
     return ok(res, bookings);
   } catch (e) {
-    return err(res, e.message);
+    console.error("[Customer Bookings Error]:", e);
+    try {
+      const fallback = await sql`
+        SELECT b.booking_id,
+               COALESCE(b.booking_serial, CONCAT('MMR-', b.booking_id)) AS booking_serial,
+               COALESCE(b.booking_date, b.created_at) AS booking_date,
+               COALESCE(b.booking_status::text, 'Allocated') AS booking_status,
+               COALESCE(b.workflow_status::text, 'Plot Allocated by Admin') AS workflow_status,
+               COALESCE(b.advance_amount, 0)::numeric AS advance_amount,
+               COALESCE(b.payment_type::text, 'FullPayment') AS payment_type,
+               COALESCE(b.base_price, p.base_price, 0)::numeric AS base_price,
+               COALESCE(b.base_price, p.base_price, 0)::numeric AS total_amount,
+               COALESCE(b.base_price, p.base_price, 0)::numeric AS total_price,
+               COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+               COALESCE(b.plot_area, p.plot_area, 0)::numeric AS plot_area,
+               COALESCE(s.site_name, s2.site_name, 'MMR Green Valley') AS site_name,
+               COALESCE(s.city, s2.city, 'Lucknow') AS city,
+               COALESCE(s.full_address, s2.full_address, s.city, s2.city, 'Lucknow / Unnao Highway, UP') AS location,
+               COALESCE(b.advance_amount, 0)::numeric AS total_paid,
+               COALESCE(b.remaining_balance, GREATEST(0, COALESCE(b.base_price, p.base_price, 0) - COALESCE(b.advance_amount, 0)))::numeric AS remaining_balance
+        FROM bookings b
+        LEFT JOIN plots p  ON b.plot_id = p.plot_id
+        LEFT JOIN sites s  ON p.site_id = s.site_id
+        LEFT JOIN sites s2 ON b.site_id = s2.site_id
+        WHERE b.user_id = ${req.user.user_id}
+        ORDER BY b.created_at DESC`;
+      return ok(res, fallback);
+    } catch (e2) {
+      return err(res, e.message);
+    }
   }
 });
 
@@ -5844,21 +5904,39 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
 
 app.get("/api/bookings/:id", verifyUserToken, async (req, res) => {
   try {
+    await ensurePlotAllocationSchema().catch(() => {});
     const [booking] = await sql`
-      SELECT b.*, p.plot_number, p.plot_area, p.plot_category,
-             p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months, p.file_charge,
-             s.site_name, s.city, s.full_address
+      SELECT b.*,
+             COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+             COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+             COALESCE(p.plot_category, 'Residential') AS plot_category,
+             COALESCE(b.base_price, p.base_price, 0) AS base_price,
+             COALESCE(b.base_price, p.base_price, 0) AS total_amount,
+             COALESCE(p.down_payment, 0) AS down_payment,
+             COALESCE(p.monthly_emi, 0) AS monthly_emi,
+             COALESCE(p.emi_tenure_months, 60) AS emi_tenure_months,
+             COALESCE(p.file_charge, 0) AS file_charge,
+             COALESCE(s.site_name, s2.site_name, 'MMR Green Valley') AS site_name,
+             COALESCE(s.city, s2.city, 'Lucknow') AS city,
+             COALESCE(s.full_address, s2.full_address, s.city, s2.city, 'Lucknow / Unnao Highway, UP') AS full_address,
+             COALESCE(b.registry_status, p.registry_status, NULL) AS registry_status,
+             COALESCE(b.registry_date, p.registry_date, NULL) AS registry_date,
+             COALESCE(b.registry_document_url, p.registry_document_url, NULL) AS registry_document_url
       FROM bookings b
-      JOIN plots p ON b.plot_id = p.plot_id
-      JOIN sites  s ON p.site_id = s.site_id
+      LEFT JOIN plots p  ON b.plot_id = p.plot_id
+      LEFT JOIN sites s  ON p.site_id = s.site_id
+      LEFT JOIN sites s2 ON b.site_id = s2.site_id
       WHERE b.booking_id = ${req.params.id} AND b.user_id = ${req.user.user_id}`;
     if (!booking) return err(res, "Booking not found", 404);
-    const emi_schedule = await sql`
-      SELECT emi_id, installment_no, due_date, emi_amount, late_fee_amount,
-             total_due, paid_amount, paid_date, emi_status
-      FROM emi_schedules
-      WHERE booking_id = ${req.params.id}
-      ORDER BY installment_no`;
+    let emi_schedule = [];
+    try {
+      emi_schedule = await sql`
+        SELECT emi_id, installment_no, due_date, emi_amount, late_fee_amount,
+               total_due, paid_amount, paid_date, emi_status
+        FROM emi_schedules
+        WHERE booking_id = ${req.params.id}
+        ORDER BY installment_no`;
+    } catch (_) {}
     return ok(res, {
       ...booking,
       plot: {
@@ -5871,6 +5949,9 @@ app.get("/api/bookings/:id", verifyUserToken, async (req, res) => {
         monthly_emi: booking.monthly_emi,
         emi_tenure_months: booking.emi_tenure_months,
         file_charge: booking.file_charge,
+        registry_status: booking.registry_status,
+        registry_date: booking.registry_date,
+        registry_document_url: booking.registry_document_url,
       },
       site: {
         id: booking.site_id,
@@ -5947,13 +6028,15 @@ app.get("/api/emi", verifyUserToken, async (req, res) => {
       SELECT e.emi_id, e.installment_no, e.due_date, e.emi_amount,
              e.late_fee_amount, e.total_due, e.paid_amount, e.paid_date,
              e.emi_status, e.voucher_file_path,
-             p.plot_number, s.site_name,
+             COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+             COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name,
              CASE WHEN CURRENT_DATE > e.due_date AND e.emi_status = 'Pending'
                   THEN (CURRENT_DATE - e.due_date) ELSE 0 END AS overdue_days
       FROM emi_schedules e
       JOIN bookings b ON e.booking_id = b.booking_id
-      JOIN plots    p ON b.plot_id = p.plot_id
-      JOIN sites    s ON p.site_id = s.site_id
+      LEFT JOIN plots p  ON b.plot_id = p.plot_id
+      LEFT JOIN sites s  ON p.site_id = s.site_id
+      LEFT JOIN sites s2 ON b.site_id = s2.site_id
       WHERE e.user_id = ${req.user.user_id}
       ORDER BY e.due_date ASC`;
     return ok(res, emis);
@@ -6652,10 +6735,11 @@ app.post("/api/buyback/apply", verifyUserToken, async (req, res) => {
 
     const [booking] = await sql`
       SELECT b.booking_id, b.plot_id, b.booking_date, b.booking_status,
-             p.base_price
-      FROM bookings b JOIN plots p ON b.plot_id = p.plot_id
+             COALESCE(b.base_price, p.base_price, 0) AS base_price
+      FROM bookings b
+      LEFT JOIN plots p ON b.plot_id = p.plot_id
       WHERE b.booking_id = ${booking_id} AND b.user_id = ${req.user.user_id}
-        AND b.booking_status = 'Confirmed'`;
+        AND b.booking_status IN ('Confirmed', 'Allocated')`;
 
     if (!booking) return err(res, "Valid confirmed booking not found", 404);
 
@@ -6700,10 +6784,14 @@ app.post("/api/buyback/apply", verifyUserToken, async (req, res) => {
 app.get("/api/buyback/status", verifyUserToken, async (req, res) => {
   try {
     const apps = await sql`
-      SELECT ba.*, p.plot_number, s.site_name
+      SELECT ba.*,
+             COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+             COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name
       FROM buyback_applications ba
-      JOIN plots p ON ba.plot_id = p.plot_id
-      JOIN sites s ON p.site_id  = s.site_id
+      LEFT JOIN bookings b ON ba.booking_id = b.booking_id
+      LEFT JOIN plots p ON ba.plot_id = p.plot_id
+      LEFT JOIN sites s ON p.site_id  = s.site_id
+      LEFT JOIN sites s2 ON b.site_id = s2.site_id
       WHERE ba.user_id = ${req.user.user_id}
       ORDER BY ba.applied_at DESC`;
     return ok(res, apps);
@@ -7693,6 +7781,9 @@ async function ensurePlotAllocationSchema() {
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS required_booking_amount NUMERIC(14,2) DEFAULT 0`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS remaining_balance NUMERIC(14,2) DEFAULT 0`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_date TIMESTAMPTZ DEFAULT NOW()`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS registry_status VARCHAR(60)`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS registry_date DATE`;
+    await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS registry_document_url TEXT`;
     await sql`ALTER TABLE bookings ALTER COLUMN plot_id DROP NOT NULL`;
 
     await sql`ALTER TABLE payment_ledger ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
