@@ -769,35 +769,6 @@ router.patch("/admin/bookings/:id/appointment", adminAuth, async (req, res) => {
   }
 });
 
-router.get("/admin/plots/validate-availability", adminAuth, async (req, res) => {
-  try {
-    const siteId = Number(req.query.site_id);
-    const plotNumber = String(req.query.plot_number || "").trim();
-    if (!siteId || !plotNumber) {
-      return fail(res, "site_id and plot_number are required.", 400);
-    }
-    const cleanNum = plotNumber.replace(/^plot\s*/i, "").trim();
-    const [plot] = await sql`
-      SELECT p.plot_id, p.plot_number, p.plot_area, p.plot_category, p.base_price,
-             p.down_payment, p.monthly_emi, p.plot_status, s.site_name, s.city
-      FROM plots p
-      JOIN sites s ON s.site_id = p.site_id
-      WHERE p.site_id = ${siteId}
-        AND (
-          LOWER(TRIM(p.plot_number)) = LOWER(TRIM(${plotNumber}))
-          OR LOWER(TRIM(p.plot_number)) = LOWER(TRIM(${cleanNum}))
-          OR LOWER(TRIM(p.plot_number)) = LOWER('plot ' || TRIM(${cleanNum}))
-        )
-      LIMIT 1`;
-
-    if (!plot) {
-      return ok(res, {
-        exists: false,
-        is_available: false,
-        message: `Plot '${plotNumber}' was not found in the selected site. Please check the plot number or register it in Site Management first.`
-      });
-    }
-
 async function ensureAllocationSchema() {
   try {
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
