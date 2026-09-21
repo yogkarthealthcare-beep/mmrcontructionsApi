@@ -289,9 +289,68 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
         }
       }
 
-      // Update user's enrollment_status to Completed
+      // Update user's enrollment_status and sync profile info
       if (user_id) {
-        await tx`UPDATE users SET enrollment_status = 'Completed' WHERE user_id = ${user_id}`;
+        await tx`
+          UPDATE users SET 
+            enrollment_status = 'Completed',
+            gender = COALESCE(${b.gender || null}, gender),
+            date_of_birth = COALESCE(${dobVal || null}, date_of_birth),
+            pan_number = COALESCE(${b.pan || null}, pan_number),
+            aadhar_number = COALESCE(${b.aadhar || null}, aadhar_number),
+            father_name = COALESCE(${b.fhName || null}, father_name),
+            updated_at = NOW()
+          WHERE user_id = ${user_id}
+        `;
+
+        // Sync Permanent Address
+        if (b.permanentAddress || b.presentAddress || b.permanentCity || b.presentCity) {
+          await tx`DELETE FROM user_addresses WHERE user_id = ${user_id} AND address_type = 'Permanent'`;
+          await tx`
+            INSERT INTO user_addresses (user_id, address_type, address_line1, city, state, pin_code, country)
+            VALUES (
+              ${user_id},
+              'Permanent',
+              ${b.permanentAddress || b.presentAddress || null},
+              ${b.permanentCity || b.presentCity || null},
+              ${b.permanentStatePin || b.presentStatePin || null},
+              ${b.permanentStatePin || b.presentStatePin || null},
+              'India'
+            )
+          `;
+        }
+
+        // Sync Bank Details
+        if (b.accNumber || b.ifscCode || b.accHolderName || b.accBankBranch) {
+          await tx`DELETE FROM user_bank_details WHERE user_id = ${user_id}`;
+          await tx`
+            INSERT INTO user_bank_details (user_id, account_holder_name, account_number, ifsc_code, bank_name, branch_name, is_verified)
+            VALUES (
+              ${user_id},
+              ${b.accHolderName || b.applicantName || 'Customer'},
+              ${b.accNumber || ''},
+              ${b.ifscCode || ''},
+              ${b.accBankBranch || null},
+              ${b.drawnBankBranch || b.accBankBranch || null},
+              true
+            )
+          `;
+        }
+
+        // Sync Nominee Details
+        const primaryNom = (b.nominees && b.nominees[0]) ? b.nominees[0] : null;
+        if (primaryNom?.nomineeName || b.coApplicantName) {
+          await tx`DELETE FROM user_nominees WHERE user_id = ${user_id}`;
+          await tx`
+            INSERT INTO user_nominees (user_id, nominee_name, relationship, aadhar_number)
+            VALUES (
+              ${user_id},
+              ${primaryNom?.nomineeName || b.coApplicantName},
+              ${primaryNom?.nomineeRelation || b.coRelation || null},
+              ${primaryNom?.nomineeAadhar || b.coAadhar || null}
+            )
+          `;
+        }
       }
     });
 

@@ -5328,15 +5328,30 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
              COALESCE(sp.full_name, 'Suraj Kumar Verma') AS sponsor_name,
              COALESCE(sp.invitation_code, sp.member_id, u.sponsor_invite_code, 'MMR0001') AS sponsor_id,
              COALESCE(sp.mobile_no, '7071951011') AS sponsor_contact,
-             pa.city, pa.state, pa.pin_code,
-             b.bank_name, b.account_number, b.ifsc_code,
-             n.nominee_name, n.relationship AS nominee_relationship
+             COALESCE(pa.city, ces.permanent_city, ces.present_city) AS city,
+             COALESCE(pa.state, ces.permanent_state_pin, ces.present_state_pin) AS state,
+             COALESCE(pa.pin_code, ces.permanent_state_pin, ces.present_state_pin) AS pin_code,
+             COALESCE(b.bank_name, ces.acc_bank_branch, ces.drawn_bank_branch) AS bank_name,
+             COALESCE(b.account_number, ces.acc_number) AS account_number,
+             COALESCE(b.ifsc_code, ces.ifsc_code) AS ifsc_code,
+             COALESCE(n.nominee_name, cnom.nominee_name, ces.co_applicant_name) AS nominee_name,
+             COALESCE(n.relationship, cnom.relation, ces.co_relation) AS nominee_relationship
       FROM users u
       LEFT JOIN users sp               ON u.sponsor_user_id = sp.user_id
       LEFT JOIN user_addresses pa      ON u.user_id = pa.user_id AND pa.address_type = 'Permanent'
       LEFT JOIN user_bank_details b    ON u.user_id = b.user_id
       LEFT JOIN user_nominees n        ON u.user_id = n.user_id
       LEFT JOIN user_kyc_profiles k    ON u.user_id = k.user_id
+      LEFT JOIN (
+        SELECT DISTINCT ON (user_id) user_id, id, permanent_city, present_city, permanent_state_pin, present_state_pin, acc_bank_branch, drawn_bank_branch, acc_number, ifsc_code, co_applicant_name, co_relation
+        FROM customer_enrollment_submissions
+        ORDER BY user_id, created_at DESC
+      ) ces ON ces.user_id = u.user_id
+      LEFT JOIN (
+        SELECT DISTINCT ON (submission_id) submission_id, nominee_name, relation
+        FROM customer_nominees
+        ORDER BY submission_id, created_at ASC
+      ) cnom ON cnom.submission_id = ces.id
       WHERE u.user_id = ${req.user.user_id}`;
 
     if (!user) return err(res, "User not found", 404);
@@ -6916,12 +6931,20 @@ const getAdminUsersPage = async (query, defaults = {}) => {
            u.email, u.account_status, u.registered_at, u.updated_at,
            COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
            CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted') THEN TRUE ELSE FALSE END AS is_verified,
-           pa.address_line1 AS address, pa.city, pa.state, pa.pin_code,
+           COALESCE(pa.address_line1, ces.permanent_address, ces.present_address) AS address,
+           COALESCE(pa.city, ces.permanent_city, ces.present_city) AS city,
+           COALESCE(pa.state, ces.permanent_state_pin, ces.present_state_pin) AS state,
+           COALESCE(pa.pin_code, ces.permanent_state_pin, ces.present_state_pin) AS pin_code,
            u.invitation_code, sp.full_name AS sponsor_name,
            COALESCE(doc.doc_count, 0)::int AS doc_count
     FROM users u
     LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
     LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
+    LEFT JOIN (
+      SELECT DISTINCT ON (user_id) user_id, permanent_address, present_address, permanent_city, present_city, permanent_state_pin, present_state_pin
+      FROM customer_enrollment_submissions
+      ORDER BY user_id, created_at DESC
+    ) ces ON ces.user_id = u.user_id
     LEFT JOIN (
       SELECT user_id, COUNT(*) AS doc_count
       FROM user_documents
@@ -7615,10 +7638,110 @@ app.get("/api/admin/users/:id",
       const [user] = await sql`SELECT * FROM users WHERE user_id = ${uid}`;
       if (!user) return err(res, "User not found", 404);
 
-      const [address] = await sql`SELECT * FROM user_addresses    WHERE user_id = ${uid} AND address_type = 'Permanent'`;
-      const [bank] = await sql`SELECT * FROM user_bank_details  WHERE user_id = ${uid}`;
-      const [nominee] = await sql`SELECT * FROM user_nominees      WHERE user_id = ${uid}`;
-      const documents = await sql`SELECT * FROM user_documents     WHERE user_id = ${uid} AND is_active = TRUE`;
+      let [address] = await sql`SELECT * FROM user_addresses WHERE user_id = ${uid} AND address_type = 'Permanent'`;
+      let [bank] = await sql`SELECT * FROM user_bank_details WHERE user_id = ${uid}`;
+      let [nominee] = await sql`SELECT * FROM user_nominees WHERE user_id = ${uid}`;
+      const documents = await sql`SELECT * FROM user_documents WHERE user_id = ${uid} AND is_active = TRUE`;
+
+      // Fallback 1: Customer Enrollment Submissions
+      const [custSub] = await sql`
+        SELECT * FROM customer_enrollment_submissions 
+        WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}
+        ORDER BY created_at DESC LIMIT 1
+      `;
+      if (custSub) {
+        if (!address || (!address.address_line1 && !address.city && !address.state && !address.pin_code)) {
+          address = {
+            address_id: address?.address_id || null,
+            user_id: uid,
+            address_type: 'Permanent',
+            address_line1: custSub.permanent_address || custSub.present_address || null,
+            address_line2: null,
+            city: custSub.permanent_city || custSub.present_city || null,
+            state: custSub.permanent_state_pin || custSub.present_state_pin || null,
+            pin_code: custSub.permanent_state_pin || custSub.present_state_pin || null,
+            country: 'India'
+          };
+        }
+        if (!bank || (!bank.account_number && !bank.ifsc_code && !bank.account_holder_name && !bank.bank_name)) {
+          bank = {
+            bank_detail_id: bank?.bank_detail_id || null,
+            user_id: uid,
+            account_holder_name: custSub.acc_holder_name || user.full_name,
+            account_number: custSub.acc_number || null,
+            ifsc_code: custSub.ifsc_code || null,
+            branch_name: custSub.drawn_bank_branch || custSub.acc_bank_branch || null,
+            bank_name: custSub.acc_bank_branch || custSub.drawn_bank_branch || null,
+            is_verified: true
+          };
+        }
+        if (!nominee || (!nominee.nominee_name && !nominee.relationship)) {
+          const [custNom] = await sql`
+            SELECT * FROM customer_nominees 
+            WHERE submission_id = ${custSub.id} 
+            ORDER BY created_at ASC LIMIT 1
+          `;
+          if (custNom || custSub.co_applicant_name) {
+            nominee = {
+              nominee_id: nominee?.nominee_id || null,
+              user_id: uid,
+              nominee_name: custNom?.nominee_name || custSub.co_applicant_name || null,
+              relationship: custNom?.relation || custSub.co_relation || null,
+              nominee_mobile: custSub.co_mobile || custSub.mobile_2 || null,
+              aadhar_number: custNom?.aadhar_no || custSub.co_aadhar_no || null,
+              date_of_birth: custNom?.age_dob || custSub.co_date_of_birth || null
+            };
+          }
+        }
+      }
+
+      // Fallback 2: Associate Enrollment Submissions
+      const [assoc] = await sql`
+        SELECT ae.*, aa.local_address AS perm_address, aa.city AS perm_city, aa.state AS perm_state, aa.pin_code AS perm_pin,
+               ab.bank_name, ab.acc_holder, ab.acc_no, ab.ifsc, ab.branch_name,
+               an.nominee_name, an.relationship AS nom_rel, an.nominee_contact
+        FROM associate_enrollment ae
+        LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
+        LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
+        LEFT JOIN associate_nominee an ON an.associate_id = ae.id
+        WHERE LOWER(ae.email) = LOWER(${user.email || ''}) OR ae.contact_no_1 = ${user.mobile_no || ''}
+        ORDER BY ae.created_at DESC LIMIT 1
+      `;
+      if (assoc) {
+        if (!address || (!address.address_line1 && !address.city && !address.state && !address.pin_code)) {
+          address = {
+            address_id: address?.address_id || null,
+            user_id: uid,
+            address_type: 'Permanent',
+            address_line1: assoc.perm_address || null,
+            city: assoc.perm_city || null,
+            state: assoc.perm_state || null,
+            pin_code: assoc.perm_pin || null,
+            country: 'India'
+          };
+        }
+        if (!bank || (!bank.account_number && !bank.ifsc_code)) {
+          bank = {
+            bank_detail_id: bank?.bank_detail_id || null,
+            user_id: uid,
+            account_holder_name: assoc.acc_holder || user.full_name,
+            account_number: assoc.acc_no || null,
+            ifsc_code: assoc.ifsc || null,
+            branch_name: assoc.branch_name || null,
+            bank_name: assoc.bank_name || null,
+            is_verified: true
+          };
+        }
+        if (!nominee || !nominee.nominee_name) {
+          nominee = {
+            nominee_id: nominee?.nominee_id || null,
+            user_id: uid,
+            nominee_name: assoc.nominee_name || null,
+            relationship: assoc.nom_rel || null,
+            nominee_mobile: assoc.nominee_contact || null
+          };
+        }
+      }
 
       return ok(res, { ...user, address, bank, nominee, documents });
     } catch (e) {
