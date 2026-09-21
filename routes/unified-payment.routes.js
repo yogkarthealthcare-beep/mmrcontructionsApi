@@ -671,7 +671,7 @@ router.get("/api/admin/payment-ledger", adminAuth, async (req, res) => {
              u.full_name as customer_name, u.mobile_no as customer_mobile, u.member_id,
              p.plot_number, p.plot_area, s.site_name,
              r.receipt_no, pv.voucher_serial,
-             adm.name as verified_by_name
+             adm.full_name as verified_by_name
       FROM payment_ledger pl
       JOIN users u ON u.user_id = pl.user_id
       JOIN plots p ON p.plot_id = pl.plot_id
