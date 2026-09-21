@@ -53,11 +53,16 @@ export async function ensureTwoFactorTables() {
         id SERIAL PRIMARY KEY,
         provider VARCHAR(50) NOT NULL DEFAULT '2Factor',
         api_key_encrypted TEXT,
+        template_identifiers JSONB DEFAULT '{}'::jsonb,
         is_active BOOLEAN NOT NULL DEFAULT true,
         updated_by VARCHAR(100),
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+    `;
+
+    await sql`
+      ALTER TABLE two_factor_config ADD COLUMN IF NOT EXISTS template_identifiers JSONB DEFAULT '{}'::jsonb;
     `;
 
     await sql`
@@ -101,10 +106,10 @@ const sanitizeProviderError = (errorDetail = "") => {
     return "2Factor API authentication failed. Please verify the API key.";
   }
   if (detail.includes("balance") || detail.includes("credit") || detail.includes("low")) {
-    return "2Factor account does not have sufficient OTP balance.";
+    return "2Factor account does not have sufficient SMS OTP balance.";
   }
   if (detail.includes("template") || detail.includes("sender id")) {
-    return "2Factor rejected the selected OTP template. Verify the approved template configuration.";
+    return "2Factor rejected the selected OTP template. Please verify the approved template configuration.";
   }
   if (detail.includes("expired")) {
     return "The OTP has expired. Please request a new test OTP.";
@@ -115,7 +120,7 @@ const sanitizeProviderError = (errorDetail = "") => {
   if (detail.includes("limit") || detail.includes("flood") || detail.includes("too many")) {
     return "2Factor rate limit reached. Please wait before attempting again.";
   }
-  return "2Factor service request could not be completed. Please verify configuration and balance.";
+  return "2Factor SMS service request could not be completed. Please verify configuration and balance.";
 };
 
 export class TwoFactorService {
@@ -124,8 +129,9 @@ export class TwoFactorService {
    * NEVER returns the decrypted API key or encrypted secret.
    */
   async getConfig() {
-    const [row] = await sql`SELECT id, provider, api_key_encrypted, is_active, updated_at, updated_by FROM two_factor_config WHERE id = 1`;
+    const [row] = await sql`SELECT id, provider, api_key_encrypted, template_identifiers, is_active, updated_at, updated_by FROM two_factor_config WHERE id = 1`;
     const isConfigured = Boolean(row?.api_key_encrypted && row.api_key_encrypted.trim().length > 0);
+    const templateIdentifiers = (row?.template_identifiers && typeof row.template_identifiers === "object") ? row.template_identifiers : {};
 
     return {
       is_configured: isConfigured,
@@ -133,36 +139,45 @@ export class TwoFactorService {
       provider: row?.provider || "2Factor",
       is_active: row ? row.is_active : true,
       updated_at: row?.updated_at || null,
+      template_identifiers: templateIdentifiers,
       approved_templates: APPROVED_TEMPLATES.map((name) => ({
         name,
+        identifier: templateIdentifiers[name] || name,
         status: "Approved",
       })),
     };
   }
 
   /**
-   * Encrypt and store the 2Factor API Key.
+   * Encrypt and store the 2Factor API Key and optional template identifiers.
    */
-  async saveConfig(apiKey, adminIdentifier = null) {
-    if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
-      throw new Error("API Key is required.");
-    }
-    const cleanKey = apiKey.trim();
-    if (cleanKey.includes("*")) {
-      throw new Error("Cannot save masked placeholder. Please enter the actual API Key.");
+  async saveConfig({ apiKey = null, templateIdentifiers = null, adminIdentifier = null }) {
+    let encryptedKey = null;
+    if (apiKey && typeof apiKey === "string" && apiKey.trim()) {
+      const cleanKey = apiKey.trim();
+      if (!cleanKey.includes("*")) {
+        encryptedKey = encrypt(cleanKey);
+        if (!encryptedKey) {
+          throw new Error("Failed to encrypt API key securely.");
+        }
+      }
     }
 
-    const encryptedKey = encrypt(cleanKey);
-    if (!encryptedKey) {
-      throw new Error("Failed to encrypt API key securely.");
+    const [existing] = await sql`SELECT api_key_encrypted, template_identifiers FROM two_factor_config WHERE id = 1`;
+    const finalEncryptedKey = encryptedKey || existing?.api_key_encrypted || null;
+    
+    let finalTemplateIdentifiers = existing?.template_identifiers || {};
+    if (templateIdentifiers && typeof templateIdentifiers === "object") {
+      finalTemplateIdentifiers = { ...finalTemplateIdentifiers, ...templateIdentifiers };
     }
 
     const [updated] = await sql`
-      INSERT INTO two_factor_config (id, provider, api_key_encrypted, is_active, updated_by, updated_at)
-      VALUES (1, '2Factor', ${encryptedKey}, true, ${adminIdentifier ? String(adminIdentifier) : null}, NOW())
+      INSERT INTO two_factor_config (id, provider, api_key_encrypted, template_identifiers, is_active, updated_by, updated_at)
+      VALUES (1, '2Factor', ${finalEncryptedKey}, ${JSON.stringify(finalTemplateIdentifiers)}::jsonb, true, ${adminIdentifier ? String(adminIdentifier) : null}, NOW())
       ON CONFLICT (id) DO UPDATE SET
         provider = '2Factor',
-        api_key_encrypted = ${encryptedKey},
+        api_key_encrypted = COALESCE(${finalEncryptedKey}, two_factor_config.api_key_encrypted),
+        template_identifiers = ${JSON.stringify(finalTemplateIdentifiers)}::jsonb,
         is_active = true,
         updated_by = ${adminIdentifier ? String(adminIdentifier) : null},
         updated_at = NOW()
@@ -170,19 +185,20 @@ export class TwoFactorService {
     `;
 
     return {
-      is_configured: true,
-      masked_api_key: "**************",
+      is_configured: Boolean(finalEncryptedKey),
+      masked_api_key: finalEncryptedKey ? "**************" : null,
       provider: updated.provider,
       is_active: updated.is_active,
       updated_at: updated.updated_at,
+      template_identifiers: finalTemplateIdentifiers,
     };
   }
 
   /**
-   * Retrieve decrypted API Key internally for server-side API calls only.
+   * Retrieve decrypted API Key and config internally for server-side API calls only.
    */
-  async getDecryptedApiKey() {
-    const [row] = await sql`SELECT api_key_encrypted, is_active FROM two_factor_config WHERE id = 1`;
+  async getConfigWithDecryptedKey() {
+    const [row] = await sql`SELECT api_key_encrypted, template_identifiers, is_active FROM two_factor_config WHERE id = 1`;
     if (!row || !row.api_key_encrypted) {
       throw new Error("2Factor API Key is not configured. Please save your API Key first.");
     }
@@ -193,11 +209,15 @@ export class TwoFactorService {
     if (!decrypted) {
       throw new Error("Unable to decrypt 2Factor API credentials. Please re-save your API key.");
     }
-    return decrypted;
+    return {
+      apiKey: decrypted,
+      templateIdentifiers: row.template_identifiers || {},
+    };
   }
 
   /**
-   * Send Test OTP via official 2Factor AUTOGEN API.
+   * Send Test OTP via official 2Factor SMS AUTOGEN API.
+   * STRICTLY SMS ONLY – NO VOICE CALL / NO OBD.
    */
   async sendTestOtp({ mobile, template, adminId = null }) {
     // 1. Validate Indian mobile
@@ -220,16 +240,19 @@ export class TwoFactorService {
       throw new Error(`Please wait ${remainingSeconds} seconds before sending another test OTP to this number.`);
     }
 
-    // 4. Retrieve and decrypt API key server-side
-    const apiKey = await this.getDecryptedApiKey();
+    // 4. Retrieve and decrypt API key & template identifiers server-side
+    const { apiKey, templateIdentifiers } = await this.getConfigWithDecryptedKey();
+    const templateIdentifier = (templateIdentifiers && templateIdentifiers[selectedTemplate])
+      ? String(templateIdentifiers[selectedTemplate]).trim()
+      : selectedTemplate;
 
-    // 5. Construct official 2Factor AUTOGEN URL
-    // Format: https://2factor.in/API/V1/{api_key}/SMS/{phone_number}/AUTOGEN/{template_name}
-    const targetPhone = `91${normalizedMobile}`;
-    const endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${encodeURIComponent(targetPhone)}/AUTOGEN/${encodeURIComponent(selectedTemplate)}`;
+    // 5. Construct official 2Factor SMS OTP URL
+    // Format: https://2factor.in/API/V1/{api_key}/SMS/+91{phone_number}/AUTOGEN/{template_name}
+    // Note: International prefix +91 is strictly required by 2Factor SMS gateway
+    const targetPhone = `+91${normalizedMobile}`;
+    const endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${encodeURIComponent(targetPhone)}/AUTOGEN/${encodeURIComponent(templateIdentifier)}`;
 
     let responseJson = null;
-    let httpStatus = 200;
 
     try {
       const controller = new AbortController();
@@ -237,15 +260,17 @@ export class TwoFactorService {
 
       const resp = await fetch(endpointUrl, {
         method: "GET",
+        headers: {
+          "Accept": "application/json",
+        },
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
 
-      httpStatus = resp.status;
       responseJson = await resp.json();
     } catch (fetchErr) {
       const isTimeout = fetchErr.name === "AbortError";
-      const errorMsg = isTimeout ? "2Factor request timed out. Please check network connection." : "2Factor service is temporarily unavailable. Please try again.";
+      const errorMsg = isTimeout ? "2Factor request timed out. Please check network connection." : "2Factor SMS service is temporarily unavailable. Please try again.";
 
       // Record audit failure
       await this.recordAuditLog({
@@ -277,8 +302,9 @@ export class TwoFactorService {
 
       return {
         success: true,
-        message: "Test OTP sent successfully.",
+        message: "Test OTP sent successfully via SMS.",
         provider: "2Factor",
+        delivery_channel: "SMS",
         session_id: sessionId,
         mobile_masked: maskMobile(normalizedMobile),
         template: selectedTemplate,
@@ -302,7 +328,7 @@ export class TwoFactorService {
   }
 
   /**
-   * Verify Test OTP via official 2Factor VERIFY API.
+   * Verify Test OTP via official 2Factor SMS VERIFY API.
    */
   async verifyTestOtp({ sessionId, otp, adminId = null }) {
     if (!sessionId || !String(sessionId).trim()) {
@@ -313,7 +339,7 @@ export class TwoFactorService {
       throw new Error("Please enter a valid numeric OTP.");
     }
 
-    const apiKey = await this.getDecryptedApiKey();
+    const { apiKey } = await this.getConfigWithDecryptedKey();
 
     // Format: https://2factor.in/API/V1/{api_key}/SMS/VERIFY/{session_id}/{otp_entered_by_user}
     const endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/VERIFY/${encodeURIComponent(sessionId.trim())}/${encodeURIComponent(cleanOtp)}`;
@@ -325,12 +351,15 @@ export class TwoFactorService {
 
       const resp = await fetch(endpointUrl, {
         method: "GET",
+        headers: {
+          "Accept": "application/json",
+        },
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
       responseJson = await resp.json();
     } catch (fetchErr) {
-      throw new Error("Failed to verify OTP with 2Factor. Service may be unreachable.");
+      throw new Error("Failed to verify OTP with 2Factor. SMS service may be unreachable.");
     }
 
     if (responseJson && responseJson.Status === "Success") {

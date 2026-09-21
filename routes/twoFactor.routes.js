@@ -29,12 +29,16 @@ router.get("/admin/test-otp/config", adminAuth, async (_req, res) => {
  */
 router.post("/admin/test-otp/config", adminAuth, async (req, res) => {
   try {
-    const { api_key } = req.body || {};
+    const { api_key, template_identifiers } = req.body || {};
     const adminId = req.admin?.admin_id || req.admin?.id || req.admin?.email || "Admin";
-    const result = await twoFactorService.saveConfig(api_key, adminId);
-    return ok(res, result, "2Factor API Key saved and encrypted successfully.");
+    const result = await twoFactorService.saveConfig({
+      apiKey: api_key,
+      templateIdentifiers: template_identifiers,
+      adminIdentifier: adminId,
+    });
+    return ok(res, result, "2Factor SMS configuration saved and encrypted successfully.");
   } catch (error) {
-    return fail(res, error.message || "Failed to save 2Factor API Key.", 400);
+    return fail(res, error.message || "Failed to save 2Factor configuration.", 400);
   }
 });
 
