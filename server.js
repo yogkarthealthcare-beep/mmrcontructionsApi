@@ -29,6 +29,8 @@ import associateEnrollmentRoutes from './routes/associateEnrollmentRoutes.js';
 import teamMemberRoutes from './routes/teamMemberRoutes.js';
 import receiptRoutes, { ensureReceiptsTable } from './routes/receipt.routes.js';
 import siteGalleryRoutes, { ensureSiteGalleryTable } from './routes/site-gallery.routes.js';
+import twoFactorRoutes from './routes/twoFactor.routes.js';
+import { ensureTwoFactorTables } from './services/twoFactor.service.js';
 import unifiedPaymentRoutes from './routes/unified-payment.routes.js';
 import { ensureUnifiedPaymentSchema } from './services/unifiedPaymentSchema.service.js';
 import { runHistoricalPaymentMigration } from './services/unifiedPaymentMigration.service.js';
@@ -238,6 +240,8 @@ app.use('/api', receiptRoutes);
 ensureReceiptsTable();
 app.use('/api', siteGalleryRoutes);
 ensureSiteGalleryTable();
+app.use('/api', twoFactorRoutes);
+ensureTwoFactorTables();
 app.use(unifiedPaymentRoutes);
 ensureUnifiedPaymentSchema().then(() => {
   runHistoricalPaymentMigration();
