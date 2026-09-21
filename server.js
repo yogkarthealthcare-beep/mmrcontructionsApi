@@ -7183,14 +7183,18 @@ app.put("/api/admin/inquiries/:id",
   async (req, res) => {
     try {
       await ensureInquirySchema();
-      const status = String(req.body.status || "").trim();
+      const status = req.body.status ? String(req.body.status).trim() : null;
       const remarks = req.body.remarks == null ? null : String(req.body.remarks).trim();
+      const siteName = req.body.site_name == null ? null : String(req.body.site_name).trim();
+      const inquiryType = req.body.inquiry_type == null ? null : String(req.body.inquiry_type).trim();
       if (status && !inquiryStatuses.includes(status)) return err(res, "Invalid inquiry status", 400);
 
       const [updated] = await sql`
         UPDATE inquiries SET
-          status = COALESCE(${status || null}, status),
+          status = COALESCE(${status}, status),
           remarks = COALESCE(${remarks}, remarks),
+          site_name = COALESCE(${siteName}, site_name),
+          inquiry_type = COALESCE(${inquiryType}, inquiry_type),
           updated_at = NOW()
         WHERE inquiry_id = ${req.params.id}
         RETURNING inquiry_id, full_name, mobile_no, email, site_name, plot_number,
