@@ -247,10 +247,10 @@ export class TwoFactorService {
       : selectedTemplate;
 
     // 5. Construct official 2Factor SMS OTP URL
-    // Format: https://2factor.in/API/V1/{api_key}/SMS/+91{phone_number}/AUTOGEN/{template_name}
-    // Note: International prefix +91 is strictly required by 2Factor SMS gateway
-    const targetPhone = `+91${normalizedMobile}`;
-    const endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${encodeURIComponent(targetPhone)}/AUTOGEN/${encodeURIComponent(templateIdentifier)}`;
+    // Format: https://2factor.in/API/V1/{api_key}/SMS/{phone_number}/AUTOGEN/{template_name}
+    // Standard Indian mobile number with 91 prefix for 2Factor SMS routing
+    const targetPhone = `91${normalizedMobile}`;
+    const endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/AUTOGEN/${encodeURIComponent(templateIdentifier)}`;
 
     let responseJson = null;
 
@@ -272,6 +272,9 @@ export class TwoFactorService {
       const isTimeout = fetchErr.name === "AbortError";
       const errorMsg = isTimeout ? "2Factor request timed out. Please check network connection." : "2Factor SMS service is temporarily unavailable. Please try again.";
 
+      // Safe debug logging (NEVER log apiKey, OTP, or secret)
+      console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP\nTemplate: ${selectedTemplate}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: failure (Network/Timeout)`);
+
       // Record audit failure
       await this.recordAuditLog({
         adminUserId: adminId,
@@ -285,8 +288,12 @@ export class TwoFactorService {
       throw new Error(errorMsg);
     }
 
+    // Safe debug logging (NEVER log apiKey, OTP, or secret)
+    const isSuccess = Boolean(responseJson && responseJson.Status === "Success");
+    console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP\nTemplate: ${selectedTemplate}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: ${isSuccess ? "success" : "failure"}`);
+
     // 6. Inspect 2Factor response
-    if (responseJson && responseJson.Status === "Success") {
+    if (isSuccess) {
       const sessionId = responseJson.Details;
       // Update cooldown timer
       sendCooldownMap.set(normalizedMobile, Date.now());
