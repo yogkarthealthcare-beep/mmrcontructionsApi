@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import PDFDocument from "pdfkit";
 import sql from "../db.js";
 import GatewayFactory from "../payment/GatewayFactory.js";
+import { ensureEmiSchedulesForBooking } from "../services/emi.service.js";
 
 const router = express.Router();
 const ok = (res, data, message = "Success", status = 200) =>
@@ -940,6 +941,18 @@ router.post("/admin/bookings/allocate-plot", adminAuth, async (req, res) => {
 
       return { booking, payment: paymentRecord, plot_number: plotNumber, site_name: site.site_name };
     });
+
+    if (result.booking) {
+      try {
+        await ensureEmiSchedulesForBooking(sql, {
+          ...result.booking,
+          plot_number: result.plot_number,
+          site_name: result.site_name
+        });
+      } catch (emiErr) {
+        console.error("[Auto EMI Schedule] Error generating schedules on allocation:", emiErr.message);
+      }
+    }
 
     return ok(res, result, `Plot '${result.plot_number}' allocated successfully to ${user.full_name}.`, 201);
   } catch (error) {

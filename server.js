@@ -37,7 +37,8 @@ import { runHistoricalPaymentMigration } from './services/unifiedPaymentMigratio
 import fileStorageService, { saveFileToVPS, deleteFileFromStorage, getStorageRoot } from "./services/fileStorage.service.js";
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
-import { getVersionInfo } from "./services/version.service.js";
+import GatewayFactory from "./payment/GatewayFactory.js";
+import { ensureEmiSchedulesForBooking, ensureInvoiceForEmi, ensureReceiptForEmi } from "./services/emi.service.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -6068,22 +6069,65 @@ app.post("/api/bookings/:id/upload-proof",
 
 /* ==========================
    ─────────────────────────
-   EMI  (JWT required)
-   GET  /api/emi               — all EMIs for my bookings
+   EMI & INSTALLMENT LEDGER (JWT required)
+   GET  /api/emi               — all EMIs & financial summary for my bookings
    GET  /api/emi/:bookingId    — EMI schedule for a booking
-   POST /api/emi/:emiId/upload-proof
-   GET  /api/emi/:emiId/voucher
+   POST /api/emi/:emiId/pay-online — Pay EMI via Online Gateway or Wallet
+   POST /api/emi/:emiId/verify-payment — Verify and confirm Online EMI payment
+   POST /api/emi/:emiId/upload-proof — Upload offline payment proof
+   GET  /api/emi/:emiId/voucher — Official payment voucher
    ─────────────────────────
 ========================== */
 
 app.get("/api/emi", verifyUserToken, async (req, res) => {
   try {
+    const userId = req.user.user_id;
+
+    // 1. Fetch all active bookings for this customer
+    const userBookings = await sql`
+      SELECT b.booking_id, b.booking_serial, b.user_id, b.site_id, b.plot_id,
+             COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+             COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
+             COALESCE(b.base_price, p.base_price, 0)::numeric AS total_amount,
+             COALESCE(b.advance_amount, 0)::numeric AS down_payment,
+             COALESCE(b.remaining_balance, GREATEST(0, COALESCE(b.base_price, p.base_price, 0) - COALESCE(b.advance_amount, 0)))::numeric AS remaining_balance,
+             COALESCE(p.monthly_emi, 0)::numeric AS monthly_emi,
+             COALESCE(p.emi_tenure_months, 60)::int AS emi_tenure_months,
+             b.booking_status, b.payment_type, b.created_at
+      FROM bookings b
+      LEFT JOIN plots p ON b.plot_id = p.plot_id
+      LEFT JOIN sites s ON p.site_id = s.site_id
+      LEFT JOIN sites s2 ON b.site_id = s2.site_id
+      WHERE b.user_id = ${userId}
+        AND b.booking_status NOT IN ('Cancelled', 'Rejected')
+      ORDER BY b.created_at DESC
+    `;
+
+    // 2. Automatically generate EMI schedules for any booking missing installment records
+    for (const bk of userBookings) {
+      await ensureEmiSchedulesForBooking(sql, bk);
+    }
+
+    // 3. Query all EMI schedules enriched with plot, booking, and invoice metadata
     const emis = await sql`
-      SELECT e.emi_id, e.installment_no, e.due_date, e.emi_amount,
-             e.late_fee_amount, e.total_due, e.paid_amount, e.paid_date,
-             e.emi_status, e.voucher_file_path,
+      SELECT e.emi_id, e.booking_id, e.installment_no, e.due_date, e.emi_amount::numeric,
+             COALESCE(e.late_fee_amount, 0)::numeric AS late_fee_amount,
+             COALESCE(e.total_due, e.emi_amount)::numeric AS total_due,
+             COALESCE(e.paid_amount, 0)::numeric AS paid_amount,
+             e.paid_date, e.emi_status, e.payment_mode, e.transaction_reference,
+             e.voucher_file_path,
              COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
              COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name,
+             b.booking_serial,
+             COALESCE(b.base_price, p.base_price, 0)::numeric AS total_plot_amount,
+             COALESCE(b.advance_amount, 0)::numeric AS down_payment,
+             COALESCE(b.remaining_balance, 0)::numeric AS remaining_balance,
+             COALESCE(p.monthly_emi, e.emi_amount)::numeric AS plot_monthly_emi,
+             COALESCE(p.emi_tenure_months, 60)::int AS emi_tenure_months,
+             COALESCE(inv.invoice_number, '') AS invoice_number,
+             inv.invoice_id,
+             COALESCE(rec.receipt_no, '') AS receipt_no,
+             rec.id AS receipt_id,
              CASE WHEN CURRENT_DATE > e.due_date AND e.emi_status = 'Pending'
                   THEN (CURRENT_DATE - e.due_date) ELSE 0 END AS overdue_days
       FROM emi_schedules e
@@ -6091,23 +6135,391 @@ app.get("/api/emi", verifyUserToken, async (req, res) => {
       LEFT JOIN plots p  ON b.plot_id = p.plot_id
       LEFT JOIN sites s  ON p.site_id = s.site_id
       LEFT JOIN sites s2 ON b.site_id = s2.site_id
-      WHERE e.user_id = ${req.user.user_id}
-      ORDER BY e.due_date ASC`;
-    return ok(res, emis);
+      LEFT JOIN LATERAL (
+        SELECT invoice_id, invoice_number FROM invoices 
+        WHERE (booking_id = e.booking_id AND (invoice_data->>'emi_id')::int = e.emi_id)
+           OR (booking_id = e.booking_id AND invoice_data->>'invoice_type' = 'EMI Installment Payment' AND (invoice_data->>'installment_no')::int = e.installment_no)
+        LIMIT 1
+      ) inv ON true
+      LEFT JOIN LATERAL (
+        SELECT id, receipt_no FROM receipts
+        WHERE customer_id = e.user_id AND (notes LIKE '%' || e.plot_number || '%' OR plot_no = e.plot_number)
+        ORDER BY id DESC LIMIT 1
+      ) rec ON true
+      WHERE e.user_id = ${userId}
+      ORDER BY e.booking_id ASC, e.installment_no ASC
+    `;
+
+    // 4. Compute per-booking and overall financial summaries
+    const bookingSummaries = userBookings.map((bk) => {
+      const plotEmis = emis.filter((e) => Number(e.booking_id) === Number(bk.booking_id));
+      const totalPlotAmount = Number(bk.total_amount || 0);
+      const downPayment = Number(bk.down_payment || 0);
+
+      const paidEmis = plotEmis.filter((e) => e.emi_status === 'Paid');
+      const paidEmisAmount = paidEmis.reduce((sum, e) => sum + Number(e.paid_amount || e.emi_amount || 0), 0);
+
+      const totalPaidAmount = downPayment + paidEmisAmount;
+      const remainingAmount = Math.max(0, totalPlotAmount - totalPaidAmount);
+
+      const pendingEmis = plotEmis.filter((e) => e.emi_status === 'Pending' || e.emi_status === 'Overdue' || e.emi_status === 'ProofSubmitted');
+      const nextDue = pendingEmis.length > 0 ? pendingEmis[0] : null;
+
+      const progressPercent = totalPlotAmount > 0 
+        ? Math.min(100, Math.round((totalPaidAmount / totalPlotAmount) * 100)) 
+        : (totalPaidAmount > 0 ? 100 : 0);
+
+      return {
+        booking_id: bk.booking_id,
+        booking_serial: bk.booking_serial,
+        plot_number: bk.plot_number,
+        site_name: bk.site_name,
+        total_plot_amount: totalPlotAmount,
+        down_payment: downPayment,
+        paid_emis_amount: paidEmisAmount,
+        total_paid_amount: totalPaidAmount,
+        remaining_amount: remainingAmount,
+        monthly_emi: Number(bk.monthly_emi || (plotEmis[0]?.emi_amount || 0)),
+        emi_frequency: 'Monthly',
+        total_emis: plotEmis.length,
+        paid_emis_count: paidEmis.length,
+        pending_emis_count: pendingEmis.length,
+        next_due_date: nextDue ? nextDue.due_date : null,
+        next_due_amount: nextDue ? Number(nextDue.emi_amount) : 0,
+        progress_percent: progressPercent,
+        booking_status: bk.booking_status
+      };
+    });
+
+    const totalPaidAll = bookingSummaries.reduce((sum, b) => sum + b.total_paid_amount, 0);
+    const totalRemainingAll = bookingSummaries.reduce((sum, b) => sum + b.remaining_amount, 0);
+
+    const overallSummary = {
+      total_properties: bookingSummaries.length,
+      total_paid: totalPaidAll,
+      total_remaining: totalRemainingAll,
+      total_emis_paid: emis.filter((e) => e.emi_status === 'Paid').length,
+      total_emis_pending: emis.filter((e) => e.emi_status === 'Pending' || e.emi_status === 'ProofSubmitted').length,
+      total_emis_overdue: emis.filter((e) => e.emi_status === 'Overdue' || (e.overdue_days > 0 && e.emi_status !== 'Paid')).length
+    };
+
+    return res.json({
+      success: true,
+      message: "EMI schedules and financial summaries loaded successfully",
+      data: emis,
+      bookings: bookingSummaries,
+      summary: overallSummary
+    });
   } catch (e) {
+    console.error("GET /api/emi error:", e);
     return err(res, e.message);
   }
 });
 
 app.get("/api/emi/:bookingId", verifyUserToken, async (req, res) => {
   try {
+    const bookingId = Number(req.params.bookingId);
+    const [booking] = await sql`
+      SELECT b.*, p.monthly_emi, p.emi_tenure_months, p.plot_number, p.base_price
+      FROM bookings b
+      LEFT JOIN plots p ON b.plot_id = p.plot_id
+      WHERE b.booking_id = ${bookingId} AND b.user_id = ${req.user.user_id}
+    `;
+    if (!booking) return err(res, "Booking not found", 404);
+
+    await ensureEmiSchedulesForBooking(sql, booking);
+
     const emis = await sql`
       SELECT e.* FROM emi_schedules e
-      JOIN bookings b ON e.booking_id = b.booking_id
-      WHERE e.booking_id = ${req.params.bookingId} AND b.user_id = ${req.user.user_id}
-      ORDER BY e.installment_no`;
+      WHERE e.booking_id = ${bookingId} AND e.user_id = ${req.user.user_id}
+      ORDER BY e.installment_no ASC`;
     return ok(res, emis);
   } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+/**
+ * Pay EMI via Online Payment Gateway (Razorpay/Cashfree/PayU) or MMR Wallet
+ */
+app.post("/api/emi/:emiId/pay-online", verifyUserToken, async (req, res) => {
+  try {
+    const emiId = Number(req.params.emiId);
+    const userId = req.user.user_id;
+    const { payment_mode = "Online", gateway_name = "razorpay" } = req.body;
+
+    const [emi] = await sql`
+      SELECT e.*, b.plot_id, b.site_id, b.booking_serial, b.base_price, b.advance_amount, b.remaining_balance,
+             COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+             COALESCE(s.site_name, 'MMR City') AS site_name,
+             u.full_name, u.email, u.mobile_no
+      FROM emi_schedules e
+      JOIN bookings b ON e.booking_id = b.booking_id
+      LEFT JOIN plots p ON b.plot_id = p.plot_id
+      LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
+      JOIN users u ON u.user_id = e.user_id
+      WHERE e.emi_id = ${emiId} AND e.user_id = ${userId}
+    `;
+
+    if (!emi) return err(res, "Installment not found or unauthorized.", 404);
+    if (emi.emi_status === "Paid") return err(res, "This installment is already paid.", 400);
+
+    const payableAmount = Number(emi.total_due || emi.emi_amount || 0);
+    if (payableAmount <= 0) return err(res, "Payable amount must be greater than zero.", 400);
+
+    // 1. If paying with MMR Wallet Balance
+    if (payment_mode === "Wallet") {
+      const [wallet] = await sql`
+        SELECT * FROM user_wallets WHERE user_id = ${userId} FOR UPDATE
+      `;
+      if (!wallet || Number(wallet.available_balance || 0) < payableAmount) {
+        return err(res, "Insufficient wallet balance to pay this EMI.", 400);
+      }
+
+      const orderId = `EMI-${emiId}-W-${Date.now()}`;
+
+      await sql.begin(async (db) => {
+        // Debit wallet balance
+        await db`
+          UPDATE user_wallets SET
+            available_balance = available_balance - ${payableAmount},
+            updated_at = NOW()
+          WHERE wallet_id = ${wallet.wallet_id}
+        `;
+
+        // Log wallet debit transaction
+        await db`
+          INSERT INTO wallet_transactions (
+            wallet_id, user_id, amount, balance_before, balance_after,
+            transaction_type, source, status, remarks
+          ) VALUES (
+            ${wallet.wallet_id}, ${userId}, ${payableAmount},
+            ${Number(wallet.available_balance)}, ${Number(wallet.available_balance) - payableAmount},
+            'Debit', 'EmiPayment', 'success',
+            ${`EMI #${emi.installment_no} payment for Plot ${emi.plot_number} (${orderId})`}
+          )
+        `;
+
+        // Mark EMI as Paid
+        await db`
+          UPDATE emi_schedules SET
+            emi_status = 'Paid',
+            paid_amount = ${payableAmount},
+            paid_date = NOW(),
+            payment_mode = 'Wallet',
+            transaction_reference = ${orderId},
+            updated_at = NOW()
+          WHERE emi_id = ${emiId}
+        `;
+
+        // Insert into payment_ledger
+        const [pSeq] = await db`SELECT COALESCE(MAX(payment_id), 0) + 1 AS pid FROM payment_ledger`;
+        const paymentSerial = `PL-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${String(pSeq.pid).padStart(6, '0')}`;
+
+        const [paymentLedger] = await db`
+          INSERT INTO payment_ledger (
+            payment_serial, user_id, booking_id, plot_id, site_id,
+            payment_mode, payment_purpose, gross_amount, net_allocated_amount,
+            payment_date, payment_status, verification_status, utr_number,
+            submitted_by_user_id, submitted_by_role, admin_notes, created_at, updated_at
+          ) VALUES (
+            ${paymentSerial}, ${userId}, ${emi.booking_id}, ${emi.plot_id}, ${emi.site_id},
+            'Wallet', 'EmiPayment', ${payableAmount}, ${payableAmount},
+            CURRENT_DATE, 'Approved', 'Verified', ${orderId},
+            ${userId}, 'Customer', 'Paid instantly using Wallet balance', NOW(), NOW()
+          ) RETURNING *
+        `;
+
+        // Insert into payment_allocations
+        await db`
+          INSERT INTO payment_allocations (
+            payment_id, booking_id, allocation_type, emi_id, installment_no, allocated_amount, status
+          ) VALUES (
+            ${paymentLedger.payment_id}, ${emi.booking_id}, 'EmiInstallment', ${emiId}, ${emi.installment_no}, ${payableAmount}, 'Allocated'
+          )
+        `;
+
+        // Generate official invoice and receipt
+        const invoice = await ensureInvoiceForEmi(db, { ...emi, paid_amount: payableAmount }, emi, emi, {
+          payment_mode: 'Wallet',
+          transaction_id: orderId,
+          reference_no: orderId
+        });
+
+        const receipt = await ensureReceiptForEmi(db, { ...emi, paid_amount: payableAmount }, emi, emi, {
+          payment_mode: 'Wallet'
+        });
+
+        // Update booking remaining balance
+        await db`
+          UPDATE bookings SET
+            remaining_balance = GREATEST(0, remaining_balance - ${payableAmount}),
+            updated_at = NOW()
+          WHERE booking_id = ${emi.booking_id}
+        `;
+      });
+
+      return ok(res, {
+        order_id: orderId,
+        payment_mode: "Wallet",
+        amount: payableAmount,
+        status: "Paid",
+        message: `EMI #${emi.installment_no} paid successfully using MMR Wallet.`
+      }, `EMI #${emi.installment_no} paid successfully!`);
+    }
+
+    // 2. If paying with Online Payment Gateway (Razorpay / Cashfree)
+    const orderId = `EMI-${emiId}-${Date.now()}`;
+    const gateway = await GatewayFactory.resolveGateway(gateway_name);
+    const customer = { name: emi.full_name, email: emi.email, phone: emi.mobile_no };
+    const callback = gateway.config.callback_url || "";
+    const result = await gateway.createOrder(orderId, payableAmount, customer, callback);
+
+    await sql`
+      INSERT INTO payment_transactions (
+        order_id, gateway_name, amount, customer_name, customer_email, customer_mobile,
+        payment_status, gateway_order_id, gateway_response, created_by
+      ) VALUES (
+        ${orderId}, ${gateway.config.gateway_name}, ${payableAmount}, ${emi.full_name},
+        ${emi.email}, ${emi.mobile_no}, 'pending',
+        ${result.gateway_order_id || orderId}, ${JSON.stringify(result)}, ${userId}
+      ) ON CONFLICT (order_id) DO UPDATE SET
+        gateway_order_id = EXCLUDED.gateway_order_id,
+        gateway_response = EXCLUDED.gateway_response,
+        updated_at = NOW()
+    `;
+
+    return ok(res, {
+      order_id: orderId,
+      emi_id: emiId,
+      installment_no: emi.installment_no,
+      amount: payableAmount,
+      gateway_name: gateway.config.gateway_name,
+      checkout_details: result
+    }, "Online payment initialized. Proceed to complete checkout.");
+  } catch (e) {
+    console.error("POST /api/emi/:emiId/pay-online error:", e);
+    return err(res, e.message);
+  }
+});
+
+/**
+ * Verify and confirm Online Gateway EMI payment
+ */
+app.post("/api/emi/:emiId/verify-payment", verifyUserToken, async (req, res) => {
+  try {
+    const emiId = Number(req.params.emiId);
+    const userId = req.user.user_id;
+    const { order_id, razorpay_order_id, razorpay_payment_id, razorpay_signature, gateway_name = "razorpay" } = req.body;
+
+    const [emi] = await sql`
+      SELECT e.*, b.plot_id, b.site_id, b.booking_serial, b.base_price, b.advance_amount, b.remaining_balance,
+             COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+             COALESCE(s.site_name, 'MMR City') AS site_name,
+             u.full_name, u.email, u.mobile_no
+      FROM emi_schedules e
+      JOIN bookings b ON e.booking_id = b.booking_id
+      LEFT JOIN plots p ON b.plot_id = p.plot_id
+      LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
+      JOIN users u ON u.user_id = e.user_id
+      WHERE e.emi_id = ${emiId} AND e.user_id = ${userId}
+    `;
+
+    if (!emi) return err(res, "Installment not found.", 404);
+    if (emi.emi_status === "Paid") return ok(res, { status: "Paid" }, "Installment already verified and paid.");
+
+    const payableAmount = Number(emi.total_due || emi.emi_amount || 0);
+
+    // Verify signature with Gateway
+    const gateway = await GatewayFactory.getGatewayInstance(gateway_name);
+    await gateway.verifyPayment(order_id, {}, req.body);
+
+    let generatedInvoice = null;
+    let generatedReceipt = null;
+
+    await sql.begin(async (db) => {
+      // Update payment transaction to success
+      await db`
+        UPDATE payment_transactions SET
+          payment_status = 'success',
+          gateway_payment_id = ${razorpay_payment_id || null},
+          gateway_signature = ${razorpay_signature || null},
+          updated_at = NOW()
+        WHERE order_id = ${order_id}
+      `;
+
+      // Mark EMI schedule as Paid
+      await db`
+        UPDATE emi_schedules SET
+          emi_status = 'Paid',
+          paid_amount = ${payableAmount},
+          paid_date = NOW(),
+          payment_mode = ${gateway_name.toUpperCase()},
+          transaction_reference = ${razorpay_payment_id || order_id},
+          updated_at = NOW()
+        WHERE emi_id = ${emiId}
+      `;
+
+      // Insert into payment_ledger
+      const [pSeq] = await db`SELECT COALESCE(MAX(payment_id), 0) + 1 AS pid FROM payment_ledger`;
+      const paymentSerial = `PL-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${String(pSeq.pid).padStart(6, '0')}`;
+
+      const [paymentLedger] = await db`
+        INSERT INTO payment_ledger (
+          payment_serial, user_id, booking_id, plot_id, site_id,
+          payment_mode, payment_purpose, gross_amount, net_allocated_amount,
+          payment_date, payment_status, verification_status, utr_number,
+          submitted_by_user_id, submitted_by_role, admin_notes, created_at, updated_at
+        ) VALUES (
+          ${paymentSerial}, ${userId}, ${emi.booking_id}, ${emi.plot_id}, ${emi.site_id},
+          'Online', 'EmiPayment', ${payableAmount}, ${payableAmount},
+          CURRENT_DATE, 'Approved', 'Verified', ${razorpay_payment_id || order_id},
+          ${userId}, 'Customer', ${'Online payment via ' + gateway_name}, NOW(), NOW()
+        ) RETURNING *
+      `;
+
+      // Insert into payment_allocations
+      await db`
+        INSERT INTO payment_allocations (
+          payment_id, booking_id, allocation_type, emi_id, installment_no, allocated_amount, status
+        ) VALUES (
+          ${paymentLedger.payment_id}, ${emi.booking_id}, 'EmiInstallment', ${emiId}, ${emi.installment_no}, ${payableAmount}, 'Allocated'
+        )
+      `;
+
+      // Generate invoice and receipt
+      generatedInvoice = await ensureInvoiceForEmi(db, { ...emi, paid_amount: payableAmount }, emi, emi, {
+        payment_mode: gateway_name.toUpperCase(),
+        transaction_id: razorpay_payment_id || order_id,
+        reference_no: razorpay_payment_id || order_id,
+        utr_number: razorpay_payment_id || ''
+      });
+
+      generatedReceipt = await ensureReceiptForEmi(db, { ...emi, paid_amount: payableAmount }, emi, emi, {
+        payment_mode: gateway_name.toUpperCase(),
+        transaction_id: razorpay_payment_id || order_id
+      });
+
+      // Update booking remaining balance
+      await db`
+        UPDATE bookings SET
+          remaining_balance = GREATEST(0, remaining_balance - ${payableAmount}),
+          updated_at = NOW()
+        WHERE booking_id = ${emi.booking_id}
+      `;
+    });
+
+    return ok(res, {
+      status: "Paid",
+      emi_id: emiId,
+      installment_no: emi.installment_no,
+      amount: payableAmount,
+      invoice_number: generatedInvoice?.invoice_number || null,
+      receipt_no: generatedReceipt?.receipt_no || null,
+      message: `EMI #${emi.installment_no} verified and marked as Paid successfully.`
+    }, `EMI payment verified successfully!`);
+  } catch (e) {
+    console.error("POST /api/emi/:emiId/verify-payment error:", e);
     return err(res, e.message);
   }
 });
@@ -6118,13 +6530,18 @@ app.post("/api/emi/:emiId/upload-proof",
   async (req, res) => {
     try {
       if (!req.file) return err(res, "No file uploaded", 400);
-      const { payment_mode, reference_no } = req.body;
+      const { payment_mode, reference_no, amount } = req.body;
+      const emiId = Number(req.params.emiId);
+      const userId = req.user.user_id;
 
       const [emi] = await sql`
-        SELECT e.emi_id FROM emi_schedules e
+        SELECT e.*, b.plot_id, b.site_id, b.plot_number
+        FROM emi_schedules e
         JOIN bookings b ON e.booking_id = b.booking_id
-        WHERE e.emi_id = ${req.params.emiId} AND b.user_id = ${req.user.user_id}`;
+        WHERE e.emi_id = ${emiId} AND b.user_id = ${userId}`;
       if (!emi) return err(res, "EMI not found", 404);
+
+      const emiAmount = Number(amount || emi.emi_amount || 0);
 
       // Save to VPS Storage
       const { url } = await saveFileToVPS(
@@ -6137,10 +6554,33 @@ app.post("/api/emi/:emiId/upload-proof",
         VALUES (${emi.emi_id}, ${url}, ${null}, ${payment_mode || null}, ${reference_no || null})`;
 
       await sql`
-        UPDATE emi_schedules SET emi_status = 'ProofSubmitted', updated_at = NOW()
+        UPDATE emi_schedules SET 
+          emi_status = 'ProofSubmitted', 
+          payment_mode = ${payment_mode || 'UPI'},
+          transaction_reference = ${reference_no || null},
+          voucher_file_path = ${url},
+          updated_at = NOW()
         WHERE emi_id = ${emi.emi_id}`;
 
-      return ok(res, { url }, "EMI proof submitted. Awaiting admin confirmation.");
+      // Insert pending entry in payment_ledger so Admin can audit & approve in accounts
+      const [pSeq] = await sql`SELECT COALESCE(MAX(payment_id), 0) + 1 AS pid FROM payment_ledger`;
+      const paymentSerial = `PL-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${String(pSeq.pid).padStart(6, '0')}`;
+
+      await sql`
+        INSERT INTO payment_ledger (
+          payment_serial, user_id, booking_id, plot_id, site_id,
+          payment_mode, payment_purpose, gross_amount, payment_date,
+          payment_status, verification_status, utr_number, proof_document_url,
+          submitted_by_user_id, submitted_by_role, admin_notes, created_at, updated_at
+        ) VALUES (
+          ${paymentSerial}, ${userId}, ${emi.booking_id}, ${emi.plot_id}, ${emi.site_id},
+          ${payment_mode || 'UPI'}, 'EmiPayment', ${emiAmount}, CURRENT_DATE,
+          'Submitted', 'Pending', ${reference_no || null}, ${url},
+          ${userId}, 'Customer', ${'Installment #' + emi.installment_no + ' proof uploaded by customer'}, NOW(), NOW()
+        )
+      `;
+
+      return ok(res, { url, emi_status: 'ProofSubmitted' }, "EMI payment proof submitted successfully. Under verification by MMR Accounts.");
     } catch (e) {
       return err(res, e.message);
     }
@@ -6149,12 +6589,34 @@ app.post("/api/emi/:emiId/upload-proof",
 
 app.get("/api/emi/:emiId/voucher", verifyUserToken, async (req, res) => {
   try {
-    const [v] = await sql`
-      SELECT pv.* FROM payment_vouchers pv
-      WHERE pv.voucher_type = 'EMI' AND pv.reference_id = ${req.params.emiId}
-        AND pv.user_id = ${req.user.user_id}`;
-    if (!v) return err(res, "Voucher not found", 404);
-    return ok(res, v);
+    const emiId = Number(req.params.emiId);
+    const userId = req.user.user_id;
+
+    const [emi] = await sql`
+      SELECT e.*, b.plot_number, COALESCE(s.site_name, 'MMR Green Valley') AS site_name,
+             u.full_name, u.mobile_no
+      FROM emi_schedules e
+      JOIN bookings b ON e.booking_id = b.booking_id
+      LEFT JOIN plots p ON b.plot_id = p.plot_id
+      LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
+      JOIN users u ON u.user_id = e.user_id
+      WHERE e.emi_id = ${emiId} AND e.user_id = ${userId}
+    `;
+    if (!emi) return err(res, "Voucher not found", 404);
+
+    return ok(res, {
+      voucher_ref: `MMR-RC-${emi.emi_id}`,
+      emi_id: emi.emi_id,
+      installment_no: emi.installment_no,
+      plot_number: emi.plot_number,
+      site_name: emi.site_name,
+      paid_date: emi.paid_date,
+      payment_mode: emi.payment_mode || "Confirmed",
+      paid_amount: Number(emi.paid_amount || emi.emi_amount),
+      customer_name: emi.full_name,
+      mobile_no: emi.mobile_no,
+      status: emi.emi_status
+    });
   } catch (e) {
     return err(res, e.message);
   }

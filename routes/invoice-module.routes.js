@@ -193,6 +193,7 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
       SELECT * FROM invoices
       WHERE LOWER(invoice_number) = LOWER(${invoiceNumber})
          OR LOWER(order_id) = LOWER(${invoiceNumber})
+         OR invoice_id::text = ${invoiceNumber}
          OR booking_id::text = ${invoiceNumber}`;
 
     if (!invoice) return fail(res, "Invoice not found.", 404);
@@ -255,6 +256,7 @@ router.get("/invoice/:invoiceNumber/pdf", userAuth, async (req, res) => {
       SELECT * FROM invoices
       WHERE LOWER(invoice_number) = LOWER(${invoiceNumber})
          OR LOWER(order_id) = LOWER(${invoiceNumber})
+         OR invoice_id::text = ${invoiceNumber}
          OR booking_id::text = ${invoiceNumber}`;
 
     if (!invoice) return fail(res, "Invoice not found.", 404);
