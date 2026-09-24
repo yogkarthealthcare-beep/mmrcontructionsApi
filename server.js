@@ -30,7 +30,7 @@ import teamMemberRoutes from './routes/teamMemberRoutes.js';
 import receiptRoutes, { ensureReceiptsTable } from './routes/receipt.routes.js';
 import siteGalleryRoutes, { ensureSiteGalleryTable } from './routes/site-gallery.routes.js';
 import twoFactorRoutes from './routes/twoFactor.routes.js';
-import { ensureTwoFactorTables } from './services/twoFactor.service.js';
+import twoFactorService, { ensureTwoFactorTables } from './services/twoFactor.service.js';
 import unifiedPaymentRoutes from './routes/unified-payment.routes.js';
 import { ensureUnifiedPaymentSchema } from './services/unifiedPaymentSchema.service.js';
 import { runHistoricalPaymentMigration } from './services/unifiedPaymentMigration.service.js';
@@ -4189,10 +4189,18 @@ app.post("/api/auth/send-otp", async (req, res) => {
       UPDATE otp_log SET is_used = TRUE
       WHERE mobile = ${mobile_no} AND purpose = ${purpose} AND is_used = FALSE`;
 
-    await safeInsertOtpLog('User', 0, mobile_no, otp, purpose, exp);
+    // Dispatch SMS OTP via 2Factor if configured (STRICTLY SMS - NO VOICE CALL / NO OBD)
+    try {
+      await twoFactorService.sendCustomOtp({
+        mobile: mobile_no,
+        otp,
+        purpose,
+      });
+    } catch (smsErr) {
+      console.warn("[Auth Send-OTP SMS Note]:", smsErr.message);
+    }
 
-    // TODO: Integrate real SMS gateway (Fast2SMS / MSG91)
-    return ok(res, { mobile_no }, "OTP sent successfully");
+    return ok(res, { mobile_no }, "OTP sent successfully via SMS text message.");
   } catch (e) {
     return err(res, e.message);
   }

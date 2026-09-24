@@ -2,6 +2,7 @@ import sql from "../db.js";
 import { encrypt, decrypt } from "../utils/encryption.js";
 
 const APPROVED_TEMPLATES = [
+  "DEFAULT",
   "MMR OTP Verification",
   "MMR Forgot Password OTP",
 ];
@@ -109,10 +110,10 @@ const sanitizeProviderError = (errorDetail = "") => {
     return "2Factor account does not have sufficient SMS OTP balance.";
   }
   if (detail.includes("template") || detail.includes("sender id")) {
-    return "2Factor rejected the selected OTP template. Please verify the approved template configuration.";
+    return "2Factor rejected the selected SMS template. Please use Default SMS Template or verify the approved DLT template name.";
   }
   if (detail.includes("expired")) {
-    return "The OTP has expired. Please request a new test OTP.";
+    return "The OTP has expired. Please request a new OTP.";
   }
   if (detail.includes("mismatch") || detail.includes("invalid otp") || detail.includes("not match")) {
     return "OTP verification failed. The entered OTP does not match.";
@@ -142,7 +143,7 @@ export class TwoFactorService {
       template_identifiers: templateIdentifiers,
       approved_templates: APPROVED_TEMPLATES.map((name) => ({
         name,
-        identifier: templateIdentifiers[name] || name,
+        identifier: templateIdentifiers[name] || (name === "DEFAULT" ? "" : name),
         status: "Approved",
       })),
     };
@@ -217,9 +218,9 @@ export class TwoFactorService {
 
   /**
    * Send Test OTP via official 2Factor SMS AUTOGEN API.
-   * STRICTLY SMS ONLY – NO VOICE CALL / NO OBD.
+   * STRICTLY SMS ONLY – NO VOICE CALL / NO OBD / NO CALL FALLBACK.
    */
-  async sendTestOtp({ mobile, template, adminId = null }) {
+  async sendTestOtp({ mobile, template = "DEFAULT", adminId = null }) {
     // 1. Validate Indian mobile
     const normalizedMobile = normalizeIndianMobile(mobile);
     if (!normalizedMobile) {
@@ -227,8 +228,8 @@ export class TwoFactorService {
     }
 
     // 2. Validate template
-    const selectedTemplate = template ? String(template).trim() : APPROVED_TEMPLATES[0];
-    if (!APPROVED_TEMPLATES.includes(selectedTemplate)) {
+    const selectedTemplate = template ? String(template).trim() : "DEFAULT";
+    if (selectedTemplate !== "DEFAULT" && !APPROVED_TEMPLATES.includes(selectedTemplate)) {
       throw new Error(`Invalid template selected. Approved templates are: ${APPROVED_TEMPLATES.join(", ")}`);
     }
 
@@ -242,15 +243,21 @@ export class TwoFactorService {
 
     // 4. Retrieve and decrypt API key & template identifiers server-side
     const { apiKey, templateIdentifiers } = await this.getConfigWithDecryptedKey();
-    const templateIdentifier = (templateIdentifiers && templateIdentifiers[selectedTemplate])
-      ? String(templateIdentifiers[selectedTemplate]).trim()
-      : selectedTemplate;
-
-    // 5. Construct official 2Factor SMS OTP URL
-    // Format: https://2factor.in/API/V1/{api_key}/SMS/{phone_number}/AUTOGEN/{template_name}
-    // Standard Indian mobile number with 91 prefix for 2Factor SMS routing
     const targetPhone = `91${normalizedMobile}`;
-    const endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/AUTOGEN/${encodeURIComponent(templateIdentifier)}`;
+
+    // 5. Construct official 2Factor SMS OTP URL (STRICTLY /SMS/ ROUTE - NO /VOICE/ ROUTE)
+    // If DEFAULT or no custom template, call .../SMS/{phone}/AUTOGEN directly to avoid DLT template mismatch
+    let endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/AUTOGEN`;
+
+    if (selectedTemplate && selectedTemplate !== "DEFAULT") {
+      const templateIdentifier = (templateIdentifiers && templateIdentifiers[selectedTemplate])
+        ? String(templateIdentifiers[selectedTemplate]).trim()
+        : selectedTemplate;
+
+      if (templateIdentifier && templateIdentifier !== "DEFAULT") {
+        endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/AUTOGEN/${encodeURIComponent(templateIdentifier)}`;
+      }
+    }
 
     let responseJson = null;
 
@@ -273,7 +280,7 @@ export class TwoFactorService {
       const errorMsg = isTimeout ? "2Factor request timed out. Please check network connection." : "2Factor SMS service is temporarily unavailable. Please try again.";
 
       // Safe debug logging (NEVER log apiKey, OTP, or secret)
-      console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP\nTemplate: ${selectedTemplate}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: failure (Network/Timeout)`);
+      console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP (AUTOGEN)\nTemplate: ${selectedTemplate}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: failure (Network/Timeout)`);
 
       // Record audit failure
       await this.recordAuditLog({
@@ -290,7 +297,7 @@ export class TwoFactorService {
 
     // Safe debug logging (NEVER log apiKey, OTP, or secret)
     const isSuccess = Boolean(responseJson && responseJson.Status === "Success");
-    console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP\nTemplate: ${selectedTemplate}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: ${isSuccess ? "success" : "failure"}`);
+    console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP (AUTOGEN)\nTemplate: ${selectedTemplate}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: ${isSuccess ? "success" : "failure"}`);
 
     // 6. Inspect 2Factor response
     if (isSuccess) {
@@ -309,7 +316,7 @@ export class TwoFactorService {
 
       return {
         success: true,
-        message: "Test OTP sent successfully via SMS.",
+        message: "Test OTP sent successfully via SMS text message.",
         provider: "2Factor",
         delivery_channel: "SMS",
         session_id: sessionId,
@@ -325,6 +332,110 @@ export class TwoFactorService {
         adminUserId: adminId,
         mobileNumber: maskMobile(normalizedMobile),
         template: selectedTemplate,
+        status: "Failed",
+        errorCode: responseJson?.Status || "ERROR",
+        errorMessage: safeMsg,
+      });
+
+      throw new Error(safeMsg);
+    }
+  }
+
+  /**
+   * Send custom backend-generated OTP via official 2Factor SMS API.
+   * STRICTLY SMS ONLY – NO VOICE CALL / NO OBD / NO CALL FALLBACK.
+   * Endpoint format: https://2factor.in/API/V1/{api_key}/SMS/{phone_number}/{otp_val}
+   * or: https://2factor.in/API/V1/{api_key}/SMS/{phone_number}/{otp_val}/{template_name}
+   */
+  async sendCustomOtp({ mobile, otp, template = null, adminId = null, purpose = "Authentication" }) {
+    const normalizedMobile = normalizeIndianMobile(mobile);
+    if (!normalizedMobile) {
+      throw new Error("Please enter a valid 10-digit Indian mobile number (e.g. 9876543210).");
+    }
+
+    const cleanOtp = String(otp || "").trim();
+    if (!cleanOtp || !/^\d{4,8}$/.test(cleanOtp)) {
+      throw new Error("Invalid numeric OTP code.");
+    }
+
+    const { apiKey, templateIdentifiers } = await this.getConfigWithDecryptedKey();
+    const targetPhone = `91${normalizedMobile}`;
+
+    let endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/${encodeURIComponent(cleanOtp)}`;
+
+    if (template && template !== "DEFAULT") {
+      const templateIdentifier = (templateIdentifiers && templateIdentifiers[template])
+        ? String(templateIdentifiers[template]).trim()
+        : template;
+      if (templateIdentifier && templateIdentifier !== "DEFAULT") {
+        endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/${encodeURIComponent(cleanOtp)}/${encodeURIComponent(templateIdentifier)}`;
+      }
+    }
+
+    let responseJson = null;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+      const resp = await fetch(endpointUrl, {
+        method: "GET",
+        headers: {
+          "Accept": "application/json",
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      responseJson = await resp.json();
+    } catch (fetchErr) {
+      const isTimeout = fetchErr.name === "AbortError";
+      const errorMsg = isTimeout ? "2Factor request timed out. Please check network connection." : "2Factor SMS service is temporarily unavailable. Please try again.";
+
+      console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP (Custom)\nPurpose: ${purpose}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: failure (Network/Timeout)`);
+
+      await this.recordAuditLog({
+        adminUserId: adminId,
+        mobileNumber: maskMobile(normalizedMobile),
+        template: template || purpose,
+        status: "Failed",
+        errorCode: isTimeout ? "TIMEOUT" : "FETCH_ERROR",
+        errorMessage: errorMsg,
+      });
+
+      throw new Error(errorMsg);
+    }
+
+    const isSuccess = Boolean(responseJson && responseJson.Status === "Success");
+    console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP (Custom)\nPurpose: ${purpose}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: ${isSuccess ? "success" : "failure"}`);
+
+    if (isSuccess) {
+      const sessionId = responseJson.Details || "SMS_SENT";
+      sendCooldownMap.set(normalizedMobile, Date.now());
+
+      await this.recordAuditLog({
+        adminUserId: adminId,
+        mobileNumber: maskMobile(normalizedMobile),
+        template: template || purpose,
+        status: "Success",
+        providerReferenceId: sessionId,
+      });
+
+      return {
+        success: true,
+        message: "OTP sent successfully via SMS text message.",
+        provider: "2Factor",
+        delivery_channel: "SMS",
+        session_id: sessionId,
+        mobile_masked: maskMobile(normalizedMobile),
+        template: template || purpose,
+      };
+    } else {
+      const rawDetail = responseJson?.Details || "Unknown 2Factor error";
+      const safeMsg = sanitizeProviderError(rawDetail);
+
+      await this.recordAuditLog({
+        adminUserId: adminId,
+        mobileNumber: maskMobile(normalizedMobile),
+        template: template || purpose,
         status: "Failed",
         errorCode: responseJson?.Status || "ERROR",
         errorMessage: safeMsg,
