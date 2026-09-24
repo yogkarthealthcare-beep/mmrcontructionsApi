@@ -6110,12 +6110,12 @@ app.get("/api/emi", verifyUserToken, async (req, res) => {
 
     // 3. Query all EMI schedules enriched with plot, booking, and invoice metadata
     const emis = await sql`
-      SELECT e.emi_id, e.booking_id, e.installment_no, e.due_date, e.emi_amount::numeric,
+      SELECT e.emi_id, e.booking_id, e.installment_no, e.due_date,
+             COALESCE(e.emi_amount, 0)::numeric AS emi_amount,
              COALESCE(e.late_fee_amount, 0)::numeric AS late_fee_amount,
-             COALESCE(e.total_due, e.emi_amount)::numeric AS total_due,
+             COALESCE(e.total_due, e.emi_amount, 0)::numeric AS total_due,
              COALESCE(e.paid_amount, 0)::numeric AS paid_amount,
-             e.paid_date, e.emi_status, e.payment_mode, e.transaction_reference,
-             e.voucher_file_path,
+             e.paid_date, e.emi_status,
              COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
              COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name,
              b.booking_serial,
@@ -6126,6 +6126,8 @@ app.get("/api/emi", verifyUserToken, async (req, res) => {
              COALESCE(p.emi_tenure_months, 60)::int AS emi_tenure_months,
              COALESCE(inv.invoice_number, '') AS invoice_number,
              inv.invoice_id,
+             COALESCE(inv.payment_method, pl.payment_mode, 'Online') AS payment_mode,
+             COALESCE(inv.transaction_id, pl.utr_number, '') AS transaction_reference,
              COALESCE(rec.receipt_no, '') AS receipt_no,
              rec.id AS receipt_id,
              CASE WHEN CURRENT_DATE > e.due_date AND e.emi_status = 'Pending'
@@ -6136,17 +6138,25 @@ app.get("/api/emi", verifyUserToken, async (req, res) => {
       LEFT JOIN sites s  ON p.site_id = s.site_id
       LEFT JOIN sites s2 ON b.site_id = s2.site_id
       LEFT JOIN LATERAL (
-        SELECT invoice_id, invoice_number FROM invoices 
+        SELECT invoice_id, invoice_number, payment_method, (invoice_data->>'transaction_id') as transaction_id
+        FROM invoices 
         WHERE (booking_id = e.booking_id AND (invoice_data->>'emi_id')::int = e.emi_id)
            OR (booking_id = e.booking_id AND invoice_data->>'invoice_type' = 'EMI Installment Payment' AND (invoice_data->>'installment_no')::int = e.installment_no)
         LIMIT 1
       ) inv ON true
       LEFT JOIN LATERAL (
+        SELECT pl.payment_mode, pl.utr_number
+        FROM payment_allocations pa
+        JOIN payment_ledger pl ON pa.payment_id = pl.payment_id
+        WHERE pa.emi_id = e.emi_id OR (pa.booking_id = e.booking_id AND pa.installment_no = e.installment_no)
+        ORDER BY pl.payment_id DESC LIMIT 1
+      ) pl ON true
+      LEFT JOIN LATERAL (
         SELECT id, receipt_no FROM receipts
-        WHERE customer_id = e.user_id AND (notes LIKE '%' || COALESCE(b.plot_number, p.plot_number, '') || '%' OR plot_no = COALESCE(b.plot_number, p.plot_number, ''))
+        WHERE customer_id = b.user_id AND (notes LIKE '%' || COALESCE(b.plot_number, p.plot_number, '') || '%' OR plot_no = COALESCE(b.plot_number, p.plot_number, ''))
         ORDER BY id DESC LIMIT 1
       ) rec ON true
-      WHERE e.user_id = ${userId}
+      WHERE b.user_id = ${userId}
       ORDER BY e.booking_id ASC, e.installment_no ASC
     `;
 
@@ -6306,8 +6316,6 @@ app.post("/api/emi/:emiId/pay-online", verifyUserToken, async (req, res) => {
             emi_status = 'Paid',
             paid_amount = ${payableAmount},
             paid_date = NOW(),
-            payment_mode = 'Wallet',
-            transaction_reference = ${orderId},
             updated_at = NOW()
           WHERE emi_id = ${emiId}
         `;
@@ -6454,8 +6462,6 @@ app.post("/api/emi/:emiId/verify-payment", verifyUserToken, async (req, res) => 
           emi_status = 'Paid',
           paid_amount = ${payableAmount},
           paid_date = NOW(),
-          payment_mode = ${gateway_name.toUpperCase()},
-          transaction_reference = ${razorpay_payment_id || order_id},
           updated_at = NOW()
         WHERE emi_id = ${emiId}
       `;
@@ -6556,8 +6562,6 @@ app.post("/api/emi/:emiId/upload-proof",
       await sql`
         UPDATE emi_schedules SET 
           emi_status = 'ProofSubmitted', 
-          payment_mode = ${payment_mode || 'UPI'},
-          transaction_reference = ${reference_no || null},
           voucher_file_path = ${url},
           updated_at = NOW()
         WHERE emi_id = ${emi.emi_id}`;
