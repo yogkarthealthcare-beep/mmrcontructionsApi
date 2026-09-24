@@ -6143,7 +6143,7 @@ app.get("/api/emi", verifyUserToken, async (req, res) => {
       ) inv ON true
       LEFT JOIN LATERAL (
         SELECT id, receipt_no FROM receipts
-        WHERE customer_id = e.user_id AND (notes LIKE '%' || e.plot_number || '%' OR plot_no = e.plot_number)
+        WHERE customer_id = e.user_id AND (notes LIKE '%' || COALESCE(b.plot_number, p.plot_number, '') || '%' OR plot_no = COALESCE(b.plot_number, p.plot_number, ''))
         ORDER BY id DESC LIMIT 1
       ) rec ON true
       WHERE e.user_id = ${userId}
