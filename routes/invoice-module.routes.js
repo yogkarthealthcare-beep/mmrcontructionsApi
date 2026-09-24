@@ -189,12 +189,101 @@ async function canAccessInvoice(reqUser = {}, invoice = {}) {
 router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
   try {
     const { invoiceNumber } = req.params;
-    const [invoice] = await sql`
+    const cleanNum = String(invoiceNumber || "").replace(/^MMR-INV-/i, "").replace(/^BK-/i, "").replace(/^INV-/i, "").trim();
+    const cleanId = !isNaN(Number(cleanNum)) && cleanNum.length > 0 ? Number(cleanNum) : null;
+
+    let [invoice] = await sql`
       SELECT * FROM invoices
       WHERE LOWER(invoice_number) = LOWER(${invoiceNumber})
          OR LOWER(order_id) = LOWER(${invoiceNumber})
-         OR invoice_id::text = ${invoiceNumber}
-         OR booking_id::text = ${invoiceNumber}`;
+         OR (CASE WHEN ${cleanId !== null} THEN invoice_id = ${cleanId} OR booking_id = ${cleanId} ELSE false END)
+         OR (invoice_data->>'booking_id')::text = ${cleanNum}
+         OR (invoice_data->>'invoice_number') ILIKE ${'%' + invoiceNumber + '%'}
+         OR invoice_number ILIKE ${'%' + invoiceNumber + '%'}
+      ORDER BY invoice_id ASC
+      LIMIT 1
+    `;
+
+    // If no existing invoice found in invoices table, auto-generate for the booking if cleanId is valid
+    if (!invoice && cleanId !== null) {
+      const [booking] = await sql`
+        SELECT b.*, COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+               p.plot_area, p.plot_type, COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
+               u.full_name, u.mobile_no, u.email
+        FROM bookings b
+        LEFT JOIN plots p ON b.plot_id = p.plot_id
+        LEFT JOIN sites s ON p.site_id = s.site_id
+        LEFT JOIN sites s2 ON b.site_id = s2.site_id
+        JOIN users u ON b.user_id = u.user_id
+        WHERE b.booking_id = ${cleanId}
+        LIMIT 1
+      `;
+
+      if (booking) {
+        const totalPlotPrice = Number(booking.base_price || (Number(booking.plot_area || 0) * 1000) || 0);
+        const downPayment = Number(booking.advance_amount || booking.required_booking_amount || 0);
+        const remainingBal = Math.max(0, totalPlotPrice - downPayment);
+        const formattedInvNum = `MMR-INV-${booking.booking_id}`;
+
+        const invData = {
+          invoice_number: formattedInvNum,
+          invoice_type: "Plot Booking Advance",
+          booking_id: booking.booking_id,
+          booking_serial: booking.booking_serial || `BK-${booking.booking_id}`,
+          customer_name: booking.full_name || "Valued Customer",
+          mobile_no: booking.mobile_no || "",
+          email: booking.email || "",
+          site_name: booking.site_name || "MMR City",
+          plot_number: booking.plot_number || "Plot",
+          plot_size: `${booking.plot_area || ''} Sq.Yd.`.trim(),
+          total_plot_price: totalPlotPrice,
+          down_payment: downPayment,
+          emi_amount: downPayment,
+          grand_total: downPayment,
+          paid_amount: downPayment,
+          total_paid_till_date: downPayment,
+          balance_amount: remainingBal,
+          payment_method: booking.payment_method || booking.payment_type || "Cash / Bank",
+          payment_date: booking.created_at ? new Date(booking.created_at).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
+          transaction_id: booking.booking_serial || `BK-${booking.booking_id}`,
+          payment_status: "Paid",
+          order_status: "Completed"
+        };
+
+        try {
+          const [created] = await sql`
+            INSERT INTO invoices (
+              invoice_number, order_id, user_id, booking_id, invoice_date, subtotal, discount,
+              registration_charges, development_charges, other_charges, grand_total,
+              paid_amount, balance_amount, payment_method, payment_status, order_status,
+              invoice_data, created_at, updated_at
+            ) VALUES (
+              ${formattedInvNum}, ${booking.booking_serial || `BK-${booking.booking_id}`}, ${booking.user_id}, ${booking.booking_id},
+              ${booking.created_at || new Date()}, ${downPayment}, 0.00, 0.00, 0.00, 0.00, ${downPayment}, ${downPayment},
+              ${remainingBal}, ${booking.payment_method || 'Cash / Bank'}, 'Paid', 'Completed',
+              ${JSON.stringify(invData)}::jsonb, NOW(), NOW()
+            ) RETURNING *
+          `;
+          invoice = created;
+        } catch (_) {
+          invoice = {
+            invoice_id: booking.booking_id,
+            invoice_number: formattedInvNum,
+            order_id: booking.booking_serial,
+            user_id: booking.user_id,
+            booking_id: booking.booking_id,
+            invoice_date: booking.created_at || new Date(),
+            grand_total: downPayment,
+            paid_amount: downPayment,
+            balance_amount: remainingBal,
+            payment_method: booking.payment_method || 'Cash / Bank',
+            payment_status: 'Paid',
+            order_status: 'Completed',
+            invoice_data: invData
+          };
+        }
+      }
+    }
 
     if (!invoice) return fail(res, "Invoice not found.", 404);
 
@@ -229,9 +318,12 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
     // Audit Log Entry
     const actorId = req.user.user_id || req.user.admin_id || req.user.id || 0;
     const actorRole = req.user.role || (req.user.admin_id ? 'Admin' : 'USER');
-    await sql`
-      INSERT INTO invoice_audit_log (invoice_id, invoice_number, action, performed_by_id, performed_by_role, ip_address)
-      VALUES (${invoice.invoice_id}, ${invoice.invoice_number}, 'VIEWED', ${actorId}, ${actorRole}, ${req.ip || ''})`;
+    if (invoice.invoice_id) {
+      await sql`
+        INSERT INTO invoice_audit_log (invoice_id, invoice_number, action, performed_by_id, performed_by_role, ip_address)
+        VALUES (${invoice.invoice_id}, ${invoice.invoice_number}, 'VIEWED', ${actorId}, ${actorRole}, ${req.ip || ''})
+        ON CONFLICT DO NOTHING`;
+    }
 
     return ok(res, {
       invoice,
@@ -252,12 +344,83 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
 router.get("/invoice/:invoiceNumber/pdf", userAuth, async (req, res) => {
   try {
     const { invoiceNumber } = req.params;
-    const [invoice] = await sql`
+    const cleanNum = String(invoiceNumber || "").replace(/^MMR-INV-/i, "").replace(/^BK-/i, "").replace(/^INV-/i, "").trim();
+    const cleanId = !isNaN(Number(cleanNum)) && cleanNum.length > 0 ? Number(cleanNum) : null;
+
+    let [invoice] = await sql`
       SELECT * FROM invoices
       WHERE LOWER(invoice_number) = LOWER(${invoiceNumber})
          OR LOWER(order_id) = LOWER(${invoiceNumber})
-         OR invoice_id::text = ${invoiceNumber}
-         OR booking_id::text = ${invoiceNumber}`;
+         OR (CASE WHEN ${cleanId !== null} THEN invoice_id = ${cleanId} OR booking_id = ${cleanId} ELSE false END)
+         OR (invoice_data->>'booking_id')::text = ${cleanNum}
+         OR (invoice_data->>'invoice_number') ILIKE ${'%' + invoiceNumber + '%'}
+         OR invoice_number ILIKE ${'%' + invoiceNumber + '%'}
+      ORDER BY invoice_id ASC
+      LIMIT 1
+    `;
+
+    if (!invoice && cleanId !== null) {
+      const [booking] = await sql`
+        SELECT b.*, COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+               p.plot_area, p.plot_type, COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
+               u.full_name, u.mobile_no, u.email
+        FROM bookings b
+        LEFT JOIN plots p ON b.plot_id = p.plot_id
+        LEFT JOIN sites s ON p.site_id = s.site_id
+        LEFT JOIN sites s2 ON b.site_id = s2.site_id
+        JOIN users u ON b.user_id = u.user_id
+        WHERE b.booking_id = ${cleanId}
+        LIMIT 1
+      `;
+
+      if (booking) {
+        const totalPlotPrice = Number(booking.base_price || (Number(booking.plot_area || 0) * 1000) || 0);
+        const downPayment = Number(booking.advance_amount || booking.required_booking_amount || 0);
+        const remainingBal = Math.max(0, totalPlotPrice - downPayment);
+        const formattedInvNum = `MMR-INV-${booking.booking_id}`;
+
+        const invData = {
+          invoice_number: formattedInvNum,
+          invoice_type: "Plot Booking Advance",
+          booking_id: booking.booking_id,
+          booking_serial: booking.booking_serial || `BK-${booking.booking_id}`,
+          customer_name: booking.full_name || "Valued Customer",
+          mobile_no: booking.mobile_no || "",
+          email: booking.email || "",
+          site_name: booking.site_name || "MMR City",
+          plot_number: booking.plot_number || "Plot",
+          plot_size: `${booking.plot_area || ''} Sq.Yd.`.trim(),
+          total_plot_price: totalPlotPrice,
+          down_payment: downPayment,
+          emi_amount: downPayment,
+          grand_total: downPayment,
+          paid_amount: downPayment,
+          total_paid_till_date: downPayment,
+          balance_amount: remainingBal,
+          payment_method: booking.payment_method || booking.payment_type || "Cash / Bank",
+          payment_date: booking.created_at ? new Date(booking.created_at).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
+          transaction_id: booking.booking_serial || `BK-${booking.booking_id}`,
+          payment_status: "Paid",
+          order_status: "Completed"
+        };
+
+        invoice = {
+          invoice_id: booking.booking_id,
+          invoice_number: formattedInvNum,
+          order_id: booking.booking_serial,
+          user_id: booking.user_id,
+          booking_id: booking.booking_id,
+          invoice_date: booking.created_at || new Date(),
+          grand_total: downPayment,
+          paid_amount: downPayment,
+          balance_amount: remainingBal,
+          payment_method: booking.payment_method || 'Cash / Bank',
+          payment_status: 'Paid',
+          order_status: 'Completed',
+          invoice_data: invData
+        };
+      }
+    }
 
     if (!invoice) return fail(res, "Invoice not found.", 404);
 

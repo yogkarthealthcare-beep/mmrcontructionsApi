@@ -6093,11 +6093,20 @@ app.get("/api/emi", verifyUserToken, async (req, res) => {
              COALESCE(b.remaining_balance, GREATEST(0, COALESCE(b.base_price, p.base_price, 0) - COALESCE(b.advance_amount, 0)))::numeric AS remaining_balance,
              COALESCE(p.monthly_emi, 0)::numeric AS monthly_emi,
              COALESCE(p.emi_tenure_months, 60)::int AS emi_tenure_months,
-             b.booking_status, b.payment_type, b.created_at
+             b.booking_status, b.payment_type, b.created_at,
+             COALESCE(inv.invoice_number, CONCAT('MMR-INV-', b.booking_id)) AS invoice_number,
+             inv.invoice_id
       FROM bookings b
       LEFT JOIN plots p ON b.plot_id = p.plot_id
       LEFT JOIN sites s ON p.site_id = s.site_id
       LEFT JOIN sites s2 ON b.site_id = s2.site_id
+      LEFT JOIN LATERAL (
+        SELECT invoice_id, invoice_number 
+        FROM invoices 
+        WHERE booking_id = b.booking_id 
+           OR (invoice_data->>'booking_id')::text = b.booking_id::text
+        ORDER BY invoice_id ASC LIMIT 1
+      ) inv ON true
       WHERE b.user_id = ${userId}
         AND b.booking_status NOT IN ('Cancelled', 'Rejected')
       ORDER BY b.created_at DESC
