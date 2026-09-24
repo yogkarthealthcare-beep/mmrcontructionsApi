@@ -208,7 +208,10 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
     if (!invoice && cleanId !== null) {
       const [booking] = await sql`
         SELECT b.*, COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
-               p.plot_area, p.plot_type, COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
+               COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+               COALESCE(p.plot_category, 'Residential') AS plot_type,
+               COALESCE(p.plot_category, 'Residential') AS plot_category,
+               COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
                u.full_name, u.mobile_no, u.email
         FROM bookings b
         LEFT JOIN plots p ON b.plot_id = p.plot_id
@@ -362,7 +365,10 @@ router.get("/invoice/:invoiceNumber/pdf", userAuth, async (req, res) => {
     if (!invoice && cleanId !== null) {
       const [booking] = await sql`
         SELECT b.*, COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
-               p.plot_area, p.plot_type, COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
+               COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+               COALESCE(p.plot_category, 'Residential') AS plot_type,
+               COALESCE(p.plot_category, 'Residential') AS plot_category,
+               COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
                u.full_name, u.mobile_no, u.email
         FROM bookings b
         LEFT JOIN plots p ON b.plot_id = p.plot_id
