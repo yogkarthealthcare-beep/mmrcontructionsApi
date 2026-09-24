@@ -6213,11 +6213,65 @@ app.get("/api/emi", verifyUserToken, async (req, res) => {
       total_emis_overdue: emis.filter((e) => e.emi_status === 'Overdue' || (e.overdue_days > 0 && e.emi_status !== 'Paid')).length
     };
 
+    // 5. Gather all confirmed payments (Down Payments / Advances + Paid EMIs)
+    const confirmedPayments = [];
+
+    // Add Down Payment / Booking Advance from each booking
+    for (const bk of userBookings) {
+      if (Number(bk.down_payment || 0) > 0) {
+        confirmedPayments.push({
+          id: `dp-${bk.booking_id}`,
+          payment_type: 'Booking Advance / Down Payment',
+          installment_no: 'DP',
+          booking_id: bk.booking_id,
+          booking_serial: bk.booking_serial,
+          plot_number: bk.plot_number,
+          site_name: bk.site_name,
+          amount: Number(bk.down_payment),
+          paid_amount: Number(bk.down_payment),
+          paid_date: bk.created_at ? new Date(bk.created_at).toISOString().split('T')[0] : null,
+          due_date: bk.created_at ? new Date(bk.created_at).toISOString().split('T')[0] : null,
+          payment_mode: bk.payment_type || 'Cash / Bank',
+          transaction_reference: bk.booking_serial || `BK-${bk.booking_id}`,
+          status: 'Approved',
+          invoice_number: `MMR-INV-${bk.booking_id}`,
+          receipt_no: `MMR/REC/${bk.booking_id}`
+        });
+      }
+    }
+
+    // Add Paid EMIs
+    for (const e of emis) {
+      if (e.emi_status === 'Paid') {
+        confirmedPayments.push({
+          id: `emi-${e.emi_id}`,
+          emi_id: e.emi_id,
+          payment_type: `EMI Installment #${e.installment_no}`,
+          installment_no: e.installment_no,
+          booking_id: e.booking_id,
+          booking_serial: e.booking_serial,
+          plot_number: e.plot_number,
+          site_name: e.site_name,
+          amount: Number(e.paid_amount || e.emi_amount),
+          paid_amount: Number(e.paid_amount || e.emi_amount),
+          paid_date: e.paid_date || e.due_date,
+          due_date: e.due_date,
+          payment_mode: e.payment_mode || 'Online',
+          transaction_reference: e.transaction_reference || e.invoice_number,
+          status: 'Approved',
+          invoice_number: e.invoice_number,
+          invoice_id: e.invoice_id,
+          receipt_no: e.receipt_no
+        });
+      }
+    }
+
     return res.json({
       success: true,
       message: "EMI schedules and financial summaries loaded successfully",
       data: emis,
       bookings: bookingSummaries,
+      payments: confirmedPayments,
       summary: overallSummary
     });
   } catch (e) {
