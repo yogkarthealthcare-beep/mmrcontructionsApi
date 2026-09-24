@@ -174,7 +174,7 @@ async function bookingDetails(bookingId, userId = null) {
       b.*, u.full_name, u.mobile_no, u.email,
       COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
       COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
-      COALESCE(p.plot_category, 'Residential') AS plot_category,
+      COALESCE(p.plot_category::text, 'Residential') AS plot_category,
       COALESCE(b.base_price, p.base_price, 0) AS base_price,
       COALESCE(p.monthly_emi, 0) AS monthly_emi,
       COALESCE(p.emi_tenure_months, 60) AS emi_tenure_months,
