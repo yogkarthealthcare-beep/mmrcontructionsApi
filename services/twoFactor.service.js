@@ -1,11 +1,142 @@
 import sql from "../db.js";
 import { encrypt, decrypt } from "../utils/encryption.js";
 
-const APPROVED_TEMPLATES = [
-  "DEFAULT",
-  "MMR OTP Verification",
-  "MMR Forgot Password OTP",
+export const DLT_OTP_TEMPLATES = [
+  {
+    id: "DEFAULT",
+    name: "Default 2Factor SMS Template",
+    displayName: "Default 2Factor SMS Route (Direct SMS)",
+    dltTemplateId: "DIRECT_DEFAULT",
+    header: "2FACTOR",
+    communicationType: "Service Implicit",
+    messageText: "XXXX is your verification OTP. Please do not share it with anyone.",
+    placeholder: "XXXX",
+    purpose: "Direct standard SMS delivery without custom DLT template mismatch",
+    category: "AUTHENTICATION",
+    status: "Approved",
+    description: "Standard 2Factor SMS route. Sends pure SMS text message directly.",
+  },
+  {
+    id: "OTP Verification",
+    name: "OTP Verification",
+    aliasName: "MMR OTP Verification",
+    displayName: "OTP Verification (Header: MMRCTN | DLT ID: 1077327240019142677)",
+    dltTemplateId: "1077327240019142677",
+    header: "MMRCTN",
+    communicationType: "Service Implicit",
+    messageText: "MMR Construction and Developers: Your OTP for mobile number verification is {#num#}. This OTP is valid for 10 minutes. Please do not share it with anyone.",
+    twoFactorMessageText: "XXXX is your OTP for MMR Construction and Developers mobile number verification. This OTP is valid for 10 minutes. Please do not share it with anyone.",
+    placeholder: "{#num#} / XXXX",
+    purpose: "Mobile number verification OTP",
+    category: "AUTHENTICATION",
+    status: "Approved",
+    description: "Used for mobile number verification and phone confirmation.",
+  },
+  {
+    id: "MMR OTP Verification",
+    name: "MMR OTP Verification",
+    aliasName: "OTP Verification",
+    displayName: "MMR OTP Verification (Header: MMRCTN | DLT ID: 1077327240019142677)",
+    dltTemplateId: "1077327240019142677",
+    header: "MMRCTN",
+    communicationType: "Service Implicit",
+    messageText: "XXXX is your OTP for MMR Construction and Developers mobile number verification. This OTP is valid for 10 minutes. Please do not share it with anyone.",
+    placeholder: "XXXX",
+    purpose: "2Factor synchronized mobile verification OTP",
+    category: "AUTHENTICATION",
+    status: "Approved",
+    description: "2Factor synchronized template for user registration and phone verification.",
+  },
+  {
+    id: "Forgot Password OTP",
+    name: "Forgot Password OTP",
+    aliasName: "MMR Forgot Password OTP",
+    displayName: "Forgot Password OTP (Header: MMRCTN | DLT ID: 1077411370018848441)",
+    dltTemplateId: "1077411370018848441",
+    header: "MMRCTN",
+    communicationType: "Service Implicit",
+    messageText: "MMR Construction and Developers: Your OTP to reset your account password is {#num#}. This OTP is valid for 10 minutes. Please do not share it with anyone.",
+    twoFactorMessageText: "XXXX is your OTP to reset your MMR Construction and Developers account password. This OTP is valid for 10 minutes. Please do not share it with anyone.",
+    placeholder: "{#num#} / XXXX",
+    purpose: "Account password reset OTP",
+    category: "SECURITY / RESET",
+    status: "Approved",
+    description: "Used to reset account password.",
+  },
+  {
+    id: "MMR Forgot Password OTP",
+    name: "MMR Forgot Password OTP",
+    aliasName: "Forgot Password OTP",
+    displayName: "MMR Forgot Password OTP (Header: MMRCTN | DLT ID: 1077411370018848441)",
+    dltTemplateId: "1077411370018848441",
+    header: "MMRCTN",
+    communicationType: "Service Implicit",
+    messageText: "XXXX is your OTP to reset your MMR Construction and Developers account password. This OTP is valid for 10 minutes. Please do not share it with anyone.",
+    placeholder: "XXXX",
+    purpose: "2Factor synchronized password reset OTP",
+    category: "SECURITY / RESET",
+    status: "Approved",
+    description: "2Factor synchronized template for password recovery and account security resets.",
+  },
+  {
+    id: "MMR Login OTP",
+    name: "MMR Login OTP",
+    displayName: "MMR Login OTP (Header: MMRCTN | DLT ID: 1077327240019142677)",
+    dltTemplateId: "1077327240019142677",
+    header: "MMRCTN",
+    communicationType: "Service Implicit",
+    messageText: "XXXX is your OTP for MMR Construction and Developers login. This OTP is valid for 10 minutes. Please do not share it with anyone.",
+    placeholder: "XXXX",
+    purpose: "OTP-based login",
+    category: "AUTHENTICATION",
+    status: "Approved",
+    description: "2Factor synchronized template for OTP-based user login.",
+  },
+  {
+    id: "Account Verification Confirmation",
+    name: "Account Verification Confirmation",
+    displayName: "Account Verification Confirmation (Header: MMRCTN | DLT ID: 1077145980024832603)",
+    dltTemplateId: "1077145980024832603",
+    header: "MMRCTN",
+    communicationType: "Service Implicit",
+    messageText: "MMR Construction and Developers: Your account has been verified successfully. Your User ID is {#alp#}. Thank you for choosing MMR Construction and Developers.",
+    placeholder: "{#alp#}",
+    purpose: "Account verification confirmation message",
+    category: "CONFIRMATION",
+    status: "Approved",
+    description: "Notification sent upon successful account verification.",
+  },
+  {
+    id: "Pending EMI Reminder",
+    name: "Pending EMI Reminder",
+    displayName: "Pending EMI Reminder (Header: MMRCDP | DLT ID: 1077177370024607423)",
+    dltTemplateId: "1077177370024607423",
+    header: "MMRCDP",
+    communicationType: "Service Implicit",
+    messageText: "MMR Construction and Developers: Dear {#alp#}, your EMI payment of Rs. {#alp#} is pending and was due on {#alp#}. Please make the payment at the earliest to keep your account up to date.",
+    placeholder: "{#alp#}",
+    purpose: "EMI payment due reminder notification",
+    category: "FINANCIAL / REMINDER",
+    status: "Approved",
+    description: "Notification sent for pending EMI installments.",
+  },
+  {
+    id: "EMI Payment Confirmation",
+    name: "EMI Payment Confirmation",
+    displayName: "EMI Payment Confirmation (Header: MMRCDP | DLT ID: 1077301680024625003)",
+    dltTemplateId: "1077301680024625003",
+    header: "MMRCDP",
+    communicationType: "Service Implicit",
+    messageText: "MMR Construction and Developers: Dear {#alp#}, your EMI payment of Rs. {#alp#} has been received successfully. Transaction reference: {#alp#}. Thank you.",
+    placeholder: "{#alp#}",
+    purpose: "EMI payment receipt confirmation notification",
+    category: "FINANCIAL / RECEIPT",
+    status: "Approved",
+    description: "Notification sent upon receipt of EMI installment payment.",
+  },
 ];
+
+const APPROVED_TEMPLATES = DLT_OTP_TEMPLATES.map((t) => t.id);
 
 // In-memory cooldown tracker: mobile -> timestamp
 const sendCooldownMap = new Map();
@@ -126,7 +257,7 @@ const sanitizeProviderError = (errorDetail = "") => {
 
 export class TwoFactorService {
   /**
-   * Get current 2Factor configuration status.
+   * Get current 2Factor configuration status and complete DLT templates catalog.
    * NEVER returns the decrypted API key or encrypted secret.
    */
   async getConfig() {
@@ -141,9 +272,9 @@ export class TwoFactorService {
       is_active: row ? row.is_active : true,
       updated_at: row?.updated_at || null,
       template_identifiers: templateIdentifiers,
-      approved_templates: APPROVED_TEMPLATES.map((name) => ({
-        name,
-        identifier: templateIdentifiers[name] || (name === "DEFAULT" ? "" : name),
+      approved_templates: DLT_OTP_TEMPLATES.map((t) => ({
+        ...t,
+        identifier: templateIdentifiers[t.id] || templateIdentifiers[t.name] || (t.id === "DEFAULT" ? "" : t.name),
         status: "Approved",
       })),
     };
@@ -217,7 +348,7 @@ export class TwoFactorService {
   }
 
   /**
-   * Send Test OTP via official 2Factor SMS AUTOGEN API.
+   * Send Test OTP via official 2Factor SMS AUTOGEN API with dynamically selected DLT template.
    * STRICTLY SMS ONLY – NO VOICE CALL / NO OBD / NO CALL FALLBACK.
    */
   async sendTestOtp({ mobile, template = "DEFAULT", adminId = null }) {
@@ -227,11 +358,11 @@ export class TwoFactorService {
       throw new Error("Please enter a valid 10-digit Indian mobile number (e.g. 9876543210).");
     }
 
-    // 2. Validate template
-    const selectedTemplate = template ? String(template).trim() : "DEFAULT";
-    if (selectedTemplate !== "DEFAULT" && !APPROVED_TEMPLATES.includes(selectedTemplate)) {
-      throw new Error(`Invalid template selected. Approved templates are: ${APPROVED_TEMPLATES.join(", ")}`);
-    }
+    // 2. Resolve template object from DLT templates catalog
+    const cleanTemplateId = String(template || "DEFAULT").trim();
+    const templateObj = DLT_OTP_TEMPLATES.find(
+      (t) => t.id === cleanTemplateId || t.name === cleanTemplateId
+    ) || DLT_OTP_TEMPLATES[0];
 
     // 3. Rate limiting / cooldown check
     const now = Date.now();
@@ -249,10 +380,10 @@ export class TwoFactorService {
     // If DEFAULT or no custom template, call .../SMS/{phone}/AUTOGEN directly to avoid DLT template mismatch
     let endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/AUTOGEN`;
 
-    if (selectedTemplate && selectedTemplate !== "DEFAULT") {
-      const templateIdentifier = (templateIdentifiers && templateIdentifiers[selectedTemplate])
-        ? String(templateIdentifiers[selectedTemplate]).trim()
-        : selectedTemplate;
+    if (templateObj.id !== "DEFAULT") {
+      const templateIdentifier = (templateIdentifiers && (templateIdentifiers[templateObj.id] || templateIdentifiers[templateObj.name]))
+        ? String(templateIdentifiers[templateObj.id] || templateIdentifiers[templateObj.name]).trim()
+        : templateObj.name;
 
       if (templateIdentifier && templateIdentifier !== "DEFAULT") {
         endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/AUTOGEN/${encodeURIComponent(templateIdentifier)}`;
@@ -280,13 +411,13 @@ export class TwoFactorService {
       const errorMsg = isTimeout ? "2Factor request timed out. Please check network connection." : "2Factor SMS service is temporarily unavailable. Please try again.";
 
       // Safe debug logging (NEVER log apiKey, OTP, or secret)
-      console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP (AUTOGEN)\nTemplate: ${selectedTemplate}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: failure (Network/Timeout)`);
+      console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP (AUTOGEN)\nTemplate: ${templateObj.name}\nHeader: ${templateObj.header}\nDLT ID: ${templateObj.dltTemplateId}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: failure (Network/Timeout)`);
 
       // Record audit failure
       await this.recordAuditLog({
         adminUserId: adminId,
         mobileNumber: maskMobile(normalizedMobile),
-        template: selectedTemplate,
+        template: templateObj.name,
         status: "Failed",
         errorCode: isTimeout ? "TIMEOUT" : "FETCH_ERROR",
         errorMessage: errorMsg,
@@ -297,7 +428,7 @@ export class TwoFactorService {
 
     // Safe debug logging (NEVER log apiKey, OTP, or secret)
     const isSuccess = Boolean(responseJson && responseJson.Status === "Success");
-    console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP (AUTOGEN)\nTemplate: ${selectedTemplate}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: ${isSuccess ? "success" : "failure"}`);
+    console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP (AUTOGEN)\nTemplate: ${templateObj.name}\nHeader: ${templateObj.header}\nDLT ID: ${templateObj.dltTemplateId}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: ${isSuccess ? "success" : "failure"}`);
 
     // 6. Inspect 2Factor response
     if (isSuccess) {
@@ -309,7 +440,7 @@ export class TwoFactorService {
       await this.recordAuditLog({
         adminUserId: adminId,
         mobileNumber: maskMobile(normalizedMobile),
-        template: selectedTemplate,
+        template: templateObj.name,
         status: "Success",
         providerReferenceId: sessionId,
       });
@@ -321,7 +452,12 @@ export class TwoFactorService {
         delivery_channel: "SMS",
         session_id: sessionId,
         mobile_masked: maskMobile(normalizedMobile),
-        template: selectedTemplate,
+        template: templateObj.name,
+        template_id: templateObj.id,
+        dlt_template_id: templateObj.dltTemplateId,
+        header: templateObj.header,
+        message_content: templateObj.messageText || templateObj.twoFactorMessageText,
+        placeholder: templateObj.placeholder,
       };
     } else {
       const rawDetail = responseJson?.Details || "Unknown 2Factor error";
@@ -331,7 +467,7 @@ export class TwoFactorService {
       await this.recordAuditLog({
         adminUserId: adminId,
         mobileNumber: maskMobile(normalizedMobile),
-        template: selectedTemplate,
+        template: templateObj.name,
         status: "Failed",
         errorCode: responseJson?.Status || "ERROR",
         errorMessage: safeMsg,
