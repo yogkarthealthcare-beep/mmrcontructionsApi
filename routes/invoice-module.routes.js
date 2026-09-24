@@ -319,13 +319,20 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
     }
 
     // Audit Log Entry
-    const actorId = req.user.user_id || req.user.admin_id || req.user.id || 0;
-    const actorRole = req.user.role || (req.user.admin_id ? 'Admin' : 'USER');
-    if (invoice.invoice_id) {
-      await sql`
-        INSERT INTO invoice_audit_log (invoice_id, invoice_number, action, performed_by_id, performed_by_role, ip_address)
-        VALUES (${invoice.invoice_id}, ${invoice.invoice_number}, 'VIEWED', ${actorId}, ${actorRole}, ${req.ip || ''})
-        ON CONFLICT DO NOTHING`;
+    try {
+      const actorId = req.user.user_id || req.user.admin_id || req.user.id || 0;
+      const actorRole = req.user.role || (req.user.admin_id ? 'Admin' : 'USER');
+      if (invoice.invoice_id) {
+        await sql`
+          INSERT INTO invoice_audit_log (log_id, invoice_id, invoice_number, action, performed_by_id, performed_by_role, ip_address)
+          VALUES (
+            (SELECT COALESCE(MAX(log_id), 0) + 1 FROM invoice_audit_log),
+            ${invoice.invoice_id}, ${invoice.invoice_number || ''}, 'VIEWED', ${actorId}, ${actorRole}, ${req.ip || ''}
+          )
+          ON CONFLICT DO NOTHING`;
+      }
+    } catch (auditErr) {
+      console.warn("Invoice audit log non-critical warning:", auditErr.message);
     }
 
     return ok(res, {
@@ -438,11 +445,19 @@ router.get("/invoice/:invoiceNumber/pdf", userAuth, async (req, res) => {
     const data = invoice.invoice_data || {};
 
     // Audit Log Entry
-    const actorId = req.user.user_id || req.user.admin_id || req.user.id || 0;
-    const actorRole = req.user.role || (req.user.admin_id ? 'Admin' : 'USER');
-    await sql`
-      INSERT INTO invoice_audit_log (invoice_id, invoice_number, action, performed_by_id, performed_by_role, ip_address)
-      VALUES (${invoice.invoice_id}, ${invoice.invoice_number}, 'DOWNLOADED', ${actorId}, ${actorRole}, ${req.ip || ''})`;
+    try {
+      const actorId = req.user.user_id || req.user.admin_id || req.user.id || 0;
+      const actorRole = req.user.role || (req.user.admin_id ? 'Admin' : 'USER');
+      await sql`
+        INSERT INTO invoice_audit_log (log_id, invoice_id, invoice_number, action, performed_by_id, performed_by_role, ip_address)
+        VALUES (
+          (SELECT COALESCE(MAX(log_id), 0) + 1 FROM invoice_audit_log),
+          ${invoice.invoice_id || 0}, ${invoice.invoice_number || ''}, 'DOWNLOADED', ${actorId}, ${actorRole}, ${req.ip || ''}
+        )
+        ON CONFLICT DO NOTHING`;
+    } catch (auditErr) {
+      console.warn("Invoice download audit log non-critical warning:", auditErr.message);
+    }
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${invoice.invoice_number}.pdf"`);
@@ -745,8 +760,12 @@ router.delete("/admin/orders/:id", adminAuth, async (req, res) => {
     try {
       const actorId = req.user?.user_id || req.user?.admin_id || req.user?.id || 0;
       await sql`
-        INSERT INTO invoice_audit_log (invoice_id, action, performed_by, notes)
-        VALUES (${inv?.invoice_id || 0}, 'DELETED', ${actorId}, ${'Admin deleted order #' + targetId + '. Plot #' + (plotId || '') + ' reset to Available.'})`;
+        INSERT INTO invoice_audit_log (log_id, invoice_id, invoice_number, action, performed_by_id, performed_by_role, ip_address)
+        VALUES (
+          (SELECT COALESCE(MAX(log_id), 0) + 1 FROM invoice_audit_log),
+          ${inv?.invoice_id || 0}, ${inv?.invoice_number || ''}, 'DELETED', ${actorId}, 'Admin', ${req.ip || ''}
+        )
+        ON CONFLICT DO NOTHING`;
     } catch (_) {}
 
     return ok(res, {}, `Order #${targetId} deleted successfully. Associated plot status reset to Available.`);

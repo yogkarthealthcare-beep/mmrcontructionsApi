@@ -88,6 +88,16 @@ async function verifyOrCreateAdminTables() {
       console.warn("Admin account setup warning:", e.message);
     }
 
+    // Ensure invoice_audit_log sequence and default
+    try {
+      await sql.unsafe(`
+        CREATE SEQUENCE IF NOT EXISTS invoice_audit_log_log_id_seq;
+        ALTER TABLE invoice_audit_log ALTER COLUMN log_id SET DEFAULT nextval('invoice_audit_log_log_id_seq');
+      `);
+    } catch (e) {
+      console.warn("invoice_audit_log sequence setup notice:", e.message);
+    }
+
     // Fetch total admin users count
     const adminCount = await sql`SELECT COUNT(*)::int as count FROM admin_users`;
 
