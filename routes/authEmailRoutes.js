@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import sql from '../db.js';
 import { sendEmail, otpEmailHtml } from '../emailService.js';
+import twoFactorService from '../services/twoFactor.service.js';
 
 const router = express.Router();
 
@@ -1240,50 +1241,90 @@ const safeInsertOtpLogRoute = async (userType, refId, mobile, otpCode, purpose, 
   }
 };
 
-// Forgot Password - Send OTP
+// Forgot Password - Send OTP via approved 2Factor SMS Template & Email
 router.post('/forgot-password', async (req, res) => {
   try {
-    const emailInput = String(req.body.email || req.body.identifier || '').toLowerCase().trim();
-    const mobileNo = String(req.body.mobile_no || req.body.identifier || '').replace(/\D/g, '');
+    const rawInput = String(req.body.email || req.body.mobile_no || req.body.identifier || '').trim();
+    if (!rawInput) return err(res, 'Email or Mobile number required', 400);
 
-    if (!emailInput && !mobileNo) return err(res, 'Email or Mobile number required', 400);
+    const isEmailInput = rawInput.includes('@');
+    const emailInput = isEmailInput ? rawInput.toLowerCase() : '';
+    const cleanDigits = !isEmailInput ? rawInput.replace(/\D/g, '') : '';
+    const cleanMobile = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : '';
 
-    const [user] = emailInput
-      ? await sql`SELECT user_id, full_name, email, mobile_no FROM users WHERE LOWER(email) = ${emailInput}`
-      : await sql`SELECT user_id, full_name, email, mobile_no FROM users WHERE mobile_no = ${mobileNo}`;
+    const [user] = isEmailInput
+      ? await sql`SELECT user_id, full_name, email, mobile_no FROM users WHERE LOWER(email) = ${emailInput} LIMIT 1`
+      : await sql`SELECT user_id, full_name, email, mobile_no FROM users WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile} OR LOWER(email) = ${rawInput.toLowerCase()} LIMIT 1`;
 
     if (!user) {
-      const [investor] = emailInput
+      const [investor] = isEmailInput
         ? await sql`SELECT id, full_name, email, mobile_number FROM investor_users WHERE LOWER(email) = ${emailInput} AND deleted_at IS NULL LIMIT 1`
-        : await sql`SELECT id, full_name, email, mobile_number FROM investor_users WHERE mobile_number = ${mobileNo} AND deleted_at IS NULL LIMIT 1`;
+        : await sql`SELECT id, full_name, email, mobile_number FROM investor_users WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile} AND deleted_at IS NULL LIMIT 1`;
 
       if (investor) {
-        const resetEmail = String(investor.email).toLowerCase().trim();
+        const resetEmail = String(investor.email || '').toLowerCase().trim();
+        const investorPhone = investor.mobile_number;
         const otp = genOTP();
         const expires = new Date(Date.now() + 15 * 60 * 1000);
         await sql`UPDATE investor_users SET reset_otp = ${otp}, reset_otp_expires = ${expires} WHERE id = ${investor.id}`;
-        try {
-          await sendEmail(resetEmail, 'MMR Investor Password Reset OTP', otpEmailHtml(otp, 'Password Reset'));
-        } catch (mailErr) {}
-        return ok(res, { email: resetEmail, user_type: 'Investor' }, 'OTP sent to your registered email');
+
+        if (investorPhone) {
+          try {
+            await twoFactorService.sendForgotPasswordOtp({
+              mobile: investorPhone,
+              otp,
+            });
+          } catch (smsErr) {
+            console.warn('[Investor Forgot-Password SMS Note]:', smsErr.message);
+          }
+        }
+
+        if (resetEmail) {
+          try {
+            await sendEmail(resetEmail, 'MMR Investor Password Reset OTP', otpEmailHtml(otp, 'Password Reset'));
+          } catch (mailErr) {}
+        }
+
+        return ok(res, { email: resetEmail || investorPhone, user_type: 'Investor' }, 'Password reset OTP sent successfully via SMS text message.');
       }
 
       return err(res, 'Account not found with this email / phone', 404);
     }
 
-    if (!user.email) return err(res, 'Registered email not available for this account', 400);
-
-    const resetEmail = String(user.email).toLowerCase().trim();
+    const userPhone = user.mobile_no;
+    const userEmail = user.email ? String(user.email).toLowerCase().trim() : null;
+    const resetIdentifier = userEmail || userPhone || cleanMobile;
     const otp = genOTP();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-    await sql`UPDATE otp_log SET is_used = TRUE WHERE mobile = ${resetEmail} AND purpose = 'ResetPassword' AND is_used = FALSE`;
-    await safeInsertOtpLogRoute('User', user.user_id, resetEmail, otp, 'ResetPassword', new Date(Date.now() + 10 * 60 * 1000));
+    await sql`UPDATE otp_log SET is_used = TRUE WHERE (mobile = ${resetIdentifier} OR mobile = ${userEmail || ''} OR mobile = ${userPhone || ''}) AND purpose = 'ResetPassword' AND is_used = FALSE`;
+    
+    if (userPhone) {
+      await safeInsertOtpLogRoute('User', user.user_id, userPhone, otp, 'ResetPassword', expiresAt);
+    }
+    if (userEmail && userEmail !== userPhone) {
+      await safeInsertOtpLogRoute('User', user.user_id, userEmail, otp, 'ResetPassword', expiresAt);
+    }
 
-    try {
-      await sendEmail(resetEmail, 'MMR Password Reset OTP', otpEmailHtml(otp, 'Password Reset'));
-    } catch (mailErr) {}
+    // Send SMS OTP via 2Factor approved template: /SMS/{phone}/{otp}/Forgot+Password+OTP
+    if (userPhone) {
+      try {
+        await twoFactorService.sendForgotPasswordOtp({
+          mobile: userPhone,
+          otp,
+        });
+      } catch (smsErr) {
+        console.warn('[User Forgot-Password SMS Note]:', smsErr.message);
+      }
+    }
 
-    return ok(res, { email: resetEmail }, 'OTP sent to your registered email');
+    if (userEmail) {
+      try {
+        await sendEmail(userEmail, 'MMR Password Reset OTP', otpEmailHtml(otp, 'Password Reset'));
+      } catch (mailErr) {}
+    }
+
+    return ok(res, { email: userEmail || userPhone, mobile_no: userPhone }, 'Password reset OTP sent successfully via SMS text message.');
   } catch (e) {
     return err(res, e.message);
   }

@@ -386,7 +386,8 @@ export class TwoFactorService {
         : templateObj.name;
 
       if (templateIdentifier && templateIdentifier !== "DEFAULT") {
-        endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/AUTOGEN/${encodeURIComponent(templateIdentifier)}`;
+        const encodedTemplate = encodeURIComponent(templateIdentifier).replace(/%20/g, "+");
+        endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/AUTOGEN/${encodedTemplate}`;
       }
     }
 
@@ -478,6 +479,109 @@ export class TwoFactorService {
   }
 
   /**
+   * Send Forgot Password OTP via 2Factor official SMS template endpoint.
+   * Invocation format:
+   * https://2factor.in/API/V1/{API_KEY}/SMS/{CLIENT_NUMBER}/{OTP_VALUE}/Forgot+Password+OTP
+   */
+  async sendForgotPasswordOtp({ mobile, otp, adminId = null }) {
+    const normalizedMobile = normalizeIndianMobile(mobile);
+    if (!normalizedMobile) {
+      throw new Error("Please enter a valid 10-digit Indian mobile number (e.g. 9876543210).");
+    }
+
+    const cleanOtp = String(otp || "").trim();
+    if (!cleanOtp || !/^\d{4,8}$/.test(cleanOtp)) {
+      throw new Error("Invalid numeric OTP code.");
+    }
+
+    const { apiKey, templateIdentifiers } = await this.getConfigWithDecryptedKey();
+    const targetPhone = `91${normalizedMobile}`;
+
+    const templateName = "Forgot Password OTP";
+    const templateIdentifier = (templateIdentifiers && templateIdentifiers[templateName])
+      ? String(templateIdentifiers[templateName]).trim()
+      : templateName;
+    const encodedTemplate = encodeURIComponent(templateIdentifier).replace(/%20/g, "+");
+
+    // Construct approved 2Factor SMS URL: /SMS/{phone}/{otp}/{template}
+    const endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/${encodeURIComponent(cleanOtp)}/${encodedTemplate}`;
+
+    let responseJson = null;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+      const resp = await fetch(endpointUrl, {
+        method: "GET",
+        headers: {
+          "Accept": "application/json",
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      responseJson = await resp.json();
+    } catch (fetchErr) {
+      const isTimeout = fetchErr.name === "AbortError";
+      const errorMsg = isTimeout
+        ? "2Factor request timed out. Please check network connection."
+        : "2Factor SMS service is temporarily unavailable. Please try again.";
+
+      console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP (Forgot Password)\nTemplate: ${templateName}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: failure (Network/Timeout)`);
+
+      await this.recordAuditLog({
+        adminUserId: adminId,
+        mobileNumber: maskMobile(normalizedMobile),
+        template: templateName,
+        status: "Failed",
+        errorCode: isTimeout ? "TIMEOUT" : "FETCH_ERROR",
+        errorMessage: errorMsg,
+      });
+
+      throw new Error(errorMsg);
+    }
+
+    const isSuccess = Boolean(responseJson && responseJson.Status === "Success");
+    console.log(`[TwoFactor Debug]\n2Factor service: SMS OTP (Forgot Password)\nTemplate: ${templateName}\nMobile: ${maskMobile(normalizedMobile)}\nResponse status: ${isSuccess ? "success" : "failure"}`);
+
+    if (isSuccess) {
+      const sessionId = responseJson.Details || "SMS_SENT";
+      sendCooldownMap.set(normalizedMobile, Date.now());
+
+      await this.recordAuditLog({
+        adminUserId: adminId,
+        mobileNumber: maskMobile(normalizedMobile),
+        template: templateName,
+        status: "Success",
+        providerReferenceId: sessionId,
+      });
+
+      return {
+        success: true,
+        message: "Password reset OTP sent successfully via SMS text message.",
+        provider: "2Factor",
+        delivery_channel: "SMS",
+        session_id: sessionId,
+        mobile_masked: maskMobile(normalizedMobile),
+        template: templateName,
+      };
+    } else {
+      const rawDetail = responseJson?.Details || "Unknown 2Factor error";
+      const safeMsg = sanitizeProviderError(rawDetail);
+
+      await this.recordAuditLog({
+        adminUserId: adminId,
+        mobileNumber: maskMobile(normalizedMobile),
+        template: templateName,
+        status: "Failed",
+        errorCode: responseJson?.Status || "ERROR",
+        errorMessage: safeMsg,
+      });
+
+      throw new Error(safeMsg);
+    }
+  }
+
+  /**
    * Send custom backend-generated OTP via official 2Factor SMS API.
    * STRICTLY SMS ONLY – NO VOICE CALL / NO OBD / NO CALL FALLBACK.
    * Endpoint format: https://2factor.in/API/V1/{api_key}/SMS/{phone_number}/{otp_val}
@@ -504,7 +608,8 @@ export class TwoFactorService {
         ? String(templateIdentifiers[template]).trim()
         : template;
       if (templateIdentifier && templateIdentifier !== "DEFAULT") {
-        endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/${encodeURIComponent(cleanOtp)}/${encodeURIComponent(templateIdentifier)}`;
+        const encodedTemplate = encodeURIComponent(templateIdentifier).replace(/%20/g, "+");
+        endpointUrl = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${targetPhone}/${encodeURIComponent(cleanOtp)}/${encodedTemplate}`;
       }
     }
 
