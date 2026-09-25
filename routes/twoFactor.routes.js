@@ -11,10 +11,10 @@ const fail = (res, message = "Server error", status = 500) =>
   res.status(status).json({ success: false, message });
 
 /**
- * GET /api/admin/test-otp/config
+ * GET /api/admin/test-otp/config & /api/test-otp/config
  * Retrieves 2Factor configuration status (NEVER returns plaintext or encrypted API key)
  */
-router.get("/admin/test-otp/config", adminAuth, async (_req, res) => {
+router.get(["/admin/test-otp/config", "/test-otp/config"], adminAuth, async (_req, res) => {
   try {
     const config = await twoFactorService.getConfig();
     return ok(res, config);
@@ -24,10 +24,10 @@ router.get("/admin/test-otp/config", adminAuth, async (_req, res) => {
 });
 
 /**
- * POST /api/admin/test-otp/config
+ * POST /api/admin/test-otp/config & /api/test-otp/config
  * Encrypts and saves 2Factor API Key into PostgreSQL
  */
-router.post("/admin/test-otp/config", adminAuth, async (req, res) => {
+router.post(["/admin/test-otp/config", "/test-otp/config"], adminAuth, async (req, res) => {
   try {
     const { api_key, template_identifiers } = req.body || {};
     const adminId = req.admin?.admin_id || req.admin?.id || req.admin?.email || "Admin";
@@ -43,10 +43,10 @@ router.post("/admin/test-otp/config", adminAuth, async (req, res) => {
 });
 
 /**
- * POST /api/admin/test-otp/send
+ * POST /api/admin/test-otp/send & /api/test-otp/send
  * Sends a real test OTP to a mobile number using 2Factor AUTOGEN API
  */
-router.post("/admin/test-otp/send", adminAuth, async (req, res) => {
+router.post(["/admin/test-otp/send", "/test-otp/send"], adminAuth, async (req, res) => {
   try {
     const { mobile, template } = req.body || {};
     const adminId = req.admin?.admin_id || req.admin?.id || req.admin?.email || "Admin";
@@ -58,10 +58,10 @@ router.post("/admin/test-otp/send", adminAuth, async (req, res) => {
 });
 
 /**
- * POST /api/admin/test-otp/verify
+ * POST /api/admin/test-otp/verify & /api/test-otp/verify
  * Verifies a received OTP against the 2Factor Session ID
  */
-router.post("/admin/test-otp/verify", adminAuth, async (req, res) => {
+router.post(["/admin/test-otp/verify", "/test-otp/verify"], adminAuth, async (req, res) => {
   try {
     const { session_id, otp } = req.body || {};
     const adminId = req.admin?.admin_id || req.admin?.id || req.admin?.email || "Admin";
@@ -73,10 +73,10 @@ router.post("/admin/test-otp/verify", adminAuth, async (req, res) => {
 });
 
 /**
- * GET /api/admin/test-otp/logs
+ * GET /api/admin/test-otp/logs & /api/test-otp/logs
  * Retrieves masked audit history of test OTP attempts
  */
-router.get("/admin/test-otp/logs", adminAuth, async (req, res) => {
+router.get(["/admin/test-otp/logs", "/test-otp/logs"], adminAuth, async (req, res) => {
   try {
     const limit = Number(req.query.limit) || 20;
     const logs = await twoFactorService.getLogs(limit);
