@@ -78,10 +78,13 @@ async function triggerMlmCommission(req, bookingId, sourceType, sourceId, amount
     return await sql.begin(async (db) => {
       await db`SELECT pg_advisory_xact_lock(${Number(bookingId)})`;
       const [booking] = await db`
-        SELECT b.booking_id, b.user_id, p.plot_id, p.plot_area, p.base_price, buyer.sponsor_user_id
+        SELECT b.booking_id, b.user_id, COALESCE(b.plot_id, p.plot_id, 0) as plot_id,
+               COALESCE(b.plot_area, p.plot_area, 0) as plot_area,
+               COALESCE(b.base_price, p.base_price, 0) as base_price,
+               buyer.sponsor_user_id
         FROM bookings b
-        JOIN users buyer ON buyer.user_id = b.user_id
-        JOIN plots p ON p.plot_id = b.plot_id
+        LEFT JOIN users buyer ON buyer.user_id = b.user_id
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
         WHERE b.booking_id = ${bookingId}
       `;
 
@@ -133,11 +136,16 @@ async function executePaymentAllocation(paymentId, adminId = null) {
 
     // Fetch booking details
     const [booking] = await db`
-      SELECT b.*, p.plot_number, p.plot_area, p.base_price, p.site_id,
-             u.full_name as customer_name, u.mobile_no as customer_mobile
+      SELECT b.*, 
+             COALESCE(b.plot_number, p.plot_number, 'Plot') as plot_number,
+             COALESCE(b.plot_area, p.plot_area, 0) as plot_area,
+             COALESCE(b.base_price, p.base_price, 0) as base_price,
+             COALESCE(b.site_id, p.site_id, 0) as site_id,
+             COALESCE(u.full_name, 'Customer') as customer_name,
+             COALESCE(u.mobile_no, '') as customer_mobile
       FROM bookings b
-      JOIN plots p ON p.plot_id = b.plot_id
-      JOIN users u ON u.user_id = b.user_id
+      LEFT JOIN plots p ON p.plot_id = b.plot_id
+      LEFT JOIN users u ON u.user_id = b.user_id
       WHERE b.booking_id = ${bookingId}
     `;
 
@@ -319,9 +327,16 @@ async function executePaymentAllocation(paymentId, adminId = null) {
 // ─── 1. CUSTOMER: INITIATE PAYMENT (Online / Offline / Wallet) ───
 router.post("/api/payments/initiate", userAuth, async (req, res) => {
   try {
-    const userId = req.user.user_id || req.user.userId;
+    const userId = req.user.user_id || req.user.userId || req.user.id;
+    const userMemberId = req.user.member_id || null;
+    const userEmail = req.user.email ? String(req.user.email).trim().toLowerCase() : null;
+    const userMobile = req.user.mobile_no ? String(req.user.mobile_no).replace(/\D/g, '').slice(-10) : null;
+    const isAdmin = Boolean(req.user.is_admin || req.admin || req.user.role === 'Admin' || req.user.role === 'SuperAdmin');
+
     const {
       booking_id,
+      booking_serial,
+      plot_id,
       payment_mode, // 'Online', 'Cash', 'Cheque', 'BankTransfer', 'UPI', 'Wallet'
       payment_purpose, // 'BookingAdvance', 'EmiPayment', 'PartialEmi', 'MultipleEmi'
       amount,
@@ -330,30 +345,70 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
       cheque_number,
       bank_name,
       cheque_date,
+      collector_name,
+      cash_receipt_no,
       proof_document_url,
       customer_notes
     } = req.body;
 
     const grossAmount = money(amount);
     if (grossAmount <= 0) return fail(res, "Amount must be greater than zero", 400);
-    if (!booking_id) return fail(res, "Booking ID is required", 400);
+    if (!booking_id && !booking_serial && !plot_id) return fail(res, "Booking reference is required", 400);
 
-    // Verify booking ownership
+    const bookingIdNum = Number(booking_id) || 0;
+    const plotIdNum = Number(plot_id) || 0;
+    const serialStr = String(booking_serial || (isNaN(Number(booking_id)) ? booking_id : '') || '').trim();
+
+    // Verify booking ownership with flexible lookup & LEFT JOIN
     const [booking] = await sql`
-      SELECT b.*, p.site_id, p.plot_number
+      SELECT b.*, 
+             COALESCE(p.site_id, b.site_id, 0) AS resolved_site_id,
+             COALESCE(b.plot_number, p.plot_number, 'Plot') AS resolved_plot_number,
+             COALESCE(b.plot_id, p.plot_id, 0) AS resolved_plot_id
       FROM bookings b
-      JOIN plots p ON p.plot_id = b.plot_id
-      WHERE b.booking_id = ${booking_id} AND b.user_id = ${userId}
+      LEFT JOIN plots p ON p.plot_id = b.plot_id
+      WHERE (
+        (${bookingIdNum} > 0 AND b.booking_id = ${bookingIdNum})
+        OR (${serialStr.length} > 0 AND (b.booking_serial = ${serialStr} OR b.booking_serial ILIKE ${'%' + serialStr + '%'}))
+        OR (${plotIdNum} > 0 AND (b.plot_id = ${plotIdNum} OR p.plot_id = ${plotIdNum}))
+      )
+      AND (
+        ${isAdmin} = TRUE
+        OR b.user_id = ${userId}
+        OR b.user_id IN (
+          SELECT u.user_id FROM users u 
+          WHERE u.user_id = ${userId}
+             OR (${userMemberId} IS NOT NULL AND u.member_id = ${userMemberId})
+             OR (${userEmail} IS NOT NULL AND LOWER(u.email) = ${userEmail})
+             OR (${userMobile} IS NOT NULL AND RIGHT(regexp_replace(COALESCE(u.mobile_no, ''), '\\D', '', 'g'), 10) = ${userMobile})
+        )
+      )
+      ORDER BY b.booking_id DESC
+      LIMIT 1
     `;
     if (!booking) return fail(res, "Booking not found or not owned by you", 404);
 
+    const targetBookingId = booking.booking_id;
+    const targetPlotId = booking.resolved_plot_id || booking.plot_id || null;
+    const targetSiteId = booking.resolved_site_id || booking.site_id || 0;
+    const targetUserId = booking.user_id || userId;
     const paymentSerial = await generatePaymentSerial();
+
+    let finalNotes = customer_notes || '';
+    if (payment_mode === 'Cash') {
+      const cashDetails = [];
+      if (collector_name) cashDetails.push(`Collector: ${collector_name}`);
+      if (cash_receipt_no) cashDetails.push(`Slip: ${cash_receipt_no}`);
+      if (cashDetails.length > 0) {
+        finalNotes = `[Cash Mode: ${cashDetails.join(', ')}] ${finalNotes}`.trim();
+      }
+    }
 
     // 1. If Wallet Payment
     if (payment_mode === "Wallet") {
       // Check wallet balance
       const [wallet] = await sql`
-        SELECT * FROM user_wallets WHERE user_id = ${userId} FOR UPDATE
+        SELECT * FROM user_wallets WHERE user_id = ${targetUserId} FOR UPDATE
       `;
       if (!wallet || Number(wallet.available_balance || 0) < grossAmount) {
         return fail(res, "Insufficient wallet balance", 400);
@@ -373,10 +428,10 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
           wallet_id, user_id, amount, balance_before, balance_after,
           transaction_type, source, status, remarks
         ) VALUES (
-          ${wallet.wallet_id}, ${userId}, ${grossAmount},
+          ${wallet.wallet_id}, ${targetUserId}, ${grossAmount},
           ${Number(wallet.available_balance)}, ${Number(wallet.available_balance) - grossAmount},
           'Debit', 'PlotPayment', 'success',
-          ${`Payment for Plot ${booking.plot_number} (${paymentSerial})`}
+          ${`Payment for Plot ${booking.resolved_plot_number || booking.plot_number} (${paymentSerial})`}
         )
       `;
 
@@ -388,10 +443,10 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
           payment_date, payment_status, verification_status,
           submitted_by_user_id, submitted_by_role, admin_notes
         ) VALUES (
-          ${paymentSerial}, ${userId}, ${booking_id}, ${booking.plot_id}, ${booking.site_id},
+          ${paymentSerial}, ${targetUserId}, ${targetBookingId}, ${targetPlotId}, ${targetSiteId},
           'Wallet', ${payment_purpose || 'EmiPayment'}, ${grossAmount}, ${grossAmount},
           CURRENT_DATE, 'Submitted', 'Pending',
-          ${userId}, 'Customer', ${customer_notes || null}
+          ${userId}, 'Customer', ${finalNotes || null}
         )
         RETURNING payment_id
       `;
@@ -415,7 +470,7 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
           cheque_status, received_by_user_id
         ) VALUES (
           ${cheque_number}, ${bank_name}, ${cheque_date}, ${grossAmount},
-          ${userId}, ${booking_id}, ${booking.plot_id}, ${proof_document_url || null},
+          ${targetUserId}, ${targetBookingId}, ${targetPlotId}, ${proof_document_url || null},
           'ChequeReceived', ${userId}
         )
         RETURNING cheque_id
@@ -431,11 +486,11 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
         proof_document_url, submitted_by_user_id, submitted_by_role,
         admin_notes
       ) VALUES (
-        ${paymentSerial}, ${userId}, ${booking_id}, ${booking.plot_id}, ${booking.site_id},
+        ${paymentSerial}, ${targetUserId}, ${targetBookingId}, ${targetPlotId}, ${targetSiteId},
         ${payment_mode}, ${payment_purpose || 'EmiPayment'}, ${grossAmount}, CURRENT_DATE,
-        'Submitted', 'Pending', ${utr_number || null}, ${chequeId},
+        'Submitted', 'Pending', ${utr_number || (payment_mode === 'Cash' ? (cash_receipt_no || null) : null)}, ${chequeId},
         ${proof_document_url || null}, ${userId}, 'Customer',
-        ${customer_notes || null}
+        ${finalNotes || null}
       )
       RETURNING *
     `;
@@ -446,7 +501,7 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
         UPDATE emi_schedules SET
           emi_status = 'ProofSubmitted',
           updated_at = NOW()
-        WHERE emi_id = ${emi_id} AND booking_id = ${booking_id}
+        WHERE emi_id = ${emi_id} AND booking_id = ${targetBookingId}
       `;
     }
 
@@ -460,7 +515,12 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
 // ─── 2. CUSTOMER: REPORT MISSING PAYMENT ────────────────────────
 router.post("/api/payments/report-missing", userAuth, async (req, res) => {
   try {
-    const userId = req.user.user_id || req.user.userId;
+    const userId = req.user.user_id || req.user.userId || req.user.id;
+    const userMemberId = req.user.member_id || null;
+    const userEmail = req.user.email ? String(req.user.email).trim().toLowerCase() : null;
+    const userMobile = req.user.mobile_no ? String(req.user.mobile_no).replace(/\D/g, '').slice(-10) : null;
+    const isAdmin = Boolean(req.user.is_admin || req.admin || req.user.role === 'Admin' || req.user.role === 'SuperAdmin');
+
     const {
       booking_id,
       claimed_amount,
@@ -478,11 +538,31 @@ router.post("/api/payments/report-missing", userAuth, async (req, res) => {
     if (amount <= 0) return fail(res, "Claimed amount must be greater than zero", 400);
     if (!booking_id) return fail(res, "Booking ID is required", 400);
 
+    const bookingIdNum = Number(booking_id) || 0;
+    const serialStr = String(booking_id || '').trim();
+
     const [booking] = await sql`
-      SELECT b.*, p.plot_id
+      SELECT b.*, 
+             COALESCE(b.plot_id, p.plot_id, 0) AS resolved_plot_id
       FROM bookings b
-      JOIN plots p ON p.plot_id = b.plot_id
-      WHERE b.booking_id = ${booking_id} AND b.user_id = ${userId}
+      LEFT JOIN plots p ON p.plot_id = b.plot_id
+      WHERE (
+        (${bookingIdNum} > 0 AND b.booking_id = ${bookingIdNum})
+        OR (${serialStr.length} > 0 AND (b.booking_serial = ${serialStr} OR b.booking_serial ILIKE ${'%' + serialStr + '%'}))
+      )
+      AND (
+        ${isAdmin} = TRUE
+        OR b.user_id = ${userId}
+        OR b.user_id IN (
+          SELECT u.user_id FROM users u 
+          WHERE u.user_id = ${userId}
+             OR (${userMemberId} IS NOT NULL AND u.member_id = ${userMemberId})
+             OR (${userEmail} IS NOT NULL AND LOWER(u.email) = ${userEmail})
+             OR (${userMobile} IS NOT NULL AND RIGHT(regexp_replace(COALESCE(u.mobile_no, ''), '\\D', '', 'g'), 10) = ${userMobile})
+        )
+      )
+      ORDER BY b.booking_id DESC
+      LIMIT 1
     `;
     if (!booking) return fail(res, "Booking not found", 404);
 
@@ -496,7 +576,7 @@ router.post("/api/payments/report-missing", userAuth, async (req, res) => {
         claimed_collector_name, proof_document_url, complaint_status,
         remarks
       ) VALUES (
-        ${complaintSerial}, ${userId}, ${booking_id}, ${booking.plot_id},
+        ${complaintSerial}, ${booking.user_id || userId}, ${booking.booking_id}, ${booking.resolved_plot_id || booking.plot_id},
         ${amount}, ${claimed_payment_date || new Date().toISOString().split('T')[0]},
         ${claimed_payment_mode || 'Cash'}, ${claimed_utr_number || null},
         ${claimed_cheque_number || null}, ${claimed_receipt_no || null},
@@ -516,18 +596,46 @@ router.post("/api/payments/report-missing", userAuth, async (req, res) => {
 // ─── 3. CUSTOMER: PLOT PAYMENT DOSSIER (8 Dedicated Tabs) ────────
 router.get("/api/plots/:plotId/payment-dossier", userAuth, async (req, res) => {
   try {
-    const userId = req.user.user_id || req.user.userId;
-    const plotId = req.params.plotId;
+    const userId = req.user.user_id || req.user.userId || req.user.id;
+    const userMemberId = req.user.member_id || null;
+    const userEmail = req.user.email ? String(req.user.email).trim().toLowerCase() : null;
+    const userMobile = req.user.mobile_no ? String(req.user.mobile_no).replace(/\D/g, '').slice(-10) : null;
+    const isAdmin = Boolean(req.user.is_admin || req.admin || req.user.role === 'Admin' || req.user.role === 'SuperAdmin');
+    const plotParam = req.params.plotId;
+    const plotIdNum = Number(plotParam) || 0;
+    const plotParamStr = String(plotParam || '').trim();
 
     // Fetch booking for this plot & user
     const [booking] = await sql`
-      SELECT b.*, p.plot_number, p.plot_area, p.area_unit, p.rate_per_sqft,
-             p.base_price, p.plot_status, p.plc_charges,
-             s.site_name, s.location as site_location
+      SELECT b.*, 
+             COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+             COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+             COALESCE(p.area_unit, 'sq.ft') AS area_unit,
+             COALESCE(p.rate_per_sqft, 0) AS rate_per_sqft,
+             COALESCE(b.base_price, p.base_price, 0) AS base_price,
+             COALESCE(p.plot_status, 'Booked') AS plot_status,
+             COALESCE(p.plc_charges, 0) AS plc_charges,
+             COALESCE(s.site_name, s2.site_name, 'MMR Project') AS site_name,
+             COALESCE(s.location, s2.full_address, 'Uttar Pradesh, India') AS site_location
       FROM bookings b
-      JOIN plots p ON p.plot_id = b.plot_id
-      JOIN sites s ON s.site_id = p.site_id
-      WHERE b.plot_id = ${plotId} AND b.user_id = ${userId}
+      LEFT JOIN plots p ON p.plot_id = b.plot_id
+      LEFT JOIN sites s ON s.site_id = p.site_id
+      LEFT JOIN sites s2 ON s2.site_id = b.site_id
+      WHERE (
+        (${plotIdNum} > 0 AND (b.plot_id = ${plotIdNum} OR p.plot_id = ${plotIdNum} OR b.booking_id = ${plotIdNum}))
+        OR (${plotParamStr.length} > 0 AND (b.booking_serial = ${plotParamStr} OR b.booking_serial ILIKE ${'%' + plotParamStr + '%'} OR b.plot_number ILIKE ${'%' + plotParamStr + '%'}))
+      )
+      AND (
+        ${isAdmin} = TRUE
+        OR b.user_id = ${userId}
+        OR b.user_id IN (
+          SELECT u.user_id FROM users u 
+          WHERE u.user_id = ${userId}
+             OR (${userMemberId} IS NOT NULL AND u.member_id = ${userMemberId})
+             OR (${userEmail} IS NOT NULL AND LOWER(u.email) = ${userEmail})
+             OR (${userMobile} IS NOT NULL AND RIGHT(regexp_replace(COALESCE(u.mobile_no, ''), '\\D', '', 'g'), 10) = ${userMobile})
+        )
+      )
       ORDER BY b.booking_id DESC LIMIT 1
     `;
 
@@ -808,8 +916,11 @@ router.post("/api/admin/cash-collections/create", adminAuth, async (req, res) =>
     if (!customer_id || !booking_id) return fail(res, "Customer and Booking IDs are required", 400);
 
     const [booking] = await sql`
-      SELECT b.*, p.plot_id, p.site_id FROM bookings b
-      JOIN plots p ON p.plot_id = b.plot_id
+      SELECT b.*, 
+             COALESCE(b.plot_id, p.plot_id, 0) AS plot_id, 
+             COALESCE(p.site_id, b.site_id, 0) AS site_id 
+      FROM bookings b
+      LEFT JOIN plots p ON p.plot_id = b.plot_id
       WHERE b.booking_id = ${booking_id}
     `;
     if (!booking) return fail(res, "Booking not found", 404);
@@ -1002,8 +1113,11 @@ router.patch("/api/admin/missing-payments/:id/resolve", adminAuth, async (req, r
 
     if (status === "ApprovedAndLinked" && create_payment_entry && !linkedPaymentId) {
       const [booking] = await sql`
-        SELECT b.*, p.site_id FROM bookings b
-        JOIN plots p ON p.plot_id = b.plot_id
+        SELECT b.*, 
+               COALESCE(b.site_id, p.site_id, 0) AS site_id,
+               COALESCE(b.plot_id, p.plot_id, 0) AS plot_id
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
         WHERE b.booking_id = ${complaint.booking_id}
       `;
 

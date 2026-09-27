@@ -1,7 +1,15 @@
 import express from "express";
 import multer from "multer";
-import { userAuth } from "../middleware/auth.middleware.js";
-import { createAssociateEnrollment, printAssociateEnrollment, getMyAssociateEnrollment } from "../controllers/associateEnrollmentController.js";
+import { userAuth, adminAuth } from "../middleware/auth.middleware.js";
+import { 
+  createAssociateEnrollment, 
+  printAssociateEnrollment, 
+  getMyAssociateEnrollment,
+  getAdminAssociateEnrollments,
+  getAdminAssociateEnrollmentById,
+  updateAdminAssociateEnrollment,
+  deleteAdminAssociateEnrollment
+} from "../controllers/associateEnrollmentController.js";
 
 const router = express.Router();
 
@@ -12,6 +20,12 @@ const upload = multer({
     fileSize: 5 * 1024 * 1024 // 5 MB limit per photo
   }
 });
+
+// Admin routes
+router.get(["/admin/associate-enrollments", "/admin/associate-enrollment"], adminAuth, getAdminAssociateEnrollments);
+router.get(["/admin/associate-enrollments/:id", "/admin/associate-enrollment/:id"], adminAuth, getAdminAssociateEnrollmentById);
+router.put(["/admin/associate-enrollments/:id", "/admin/associate-enrollment/:id"], adminAuth, updateAdminAssociateEnrollment);
+router.delete(["/admin/associate-enrollments/:id", "/admin/associate-enrollment/:id"], adminAuth, deleteAdminAssociateEnrollment);
 
 // GET /api/associate-enrollment/me
 // Returns current authenticated associate's enrollment details if submitted
@@ -41,3 +55,4 @@ router.get(
 );
 
 export default router;
+
