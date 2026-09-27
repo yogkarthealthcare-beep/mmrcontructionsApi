@@ -8571,8 +8571,8 @@ app.post("/api/admin/associates",
         VALUES (
           'Associate', ${fullName}, ${email}, ${mobileNo}, ${passwordHash},
           ${memberId}, ${invitationCode}, ${sponsorUserId}, ${accountStatus},
-          'Completed', TRUE, TRUE,
-          NOW(), TRUE, TRUE, ${req.admin.admin_id}, NOW()
+          'Pending', TRUE, TRUE,
+          NOW(), TRUE, FALSE, ${req.admin.admin_id}, NOW()
         )
         RETURNING user_id, member_id, user_type, full_name, email, mobile_no,
                   account_status, invitation_code, registered_at, updated_at`;
@@ -11266,12 +11266,11 @@ app.get("/api/admin/associates/:id",
       await requireMlmSchema();
       const [profile] = await sql`
         SELECT u.*, sp.full_name AS sponsor_name, sp.member_id AS sponsor_member_id,
-               COALESCE(u.enrollment_status, CASE WHEN ae.id IS NOT NULL THEN 'Completed' WHEN u.account_status = 'Active' THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
+               COALESCE(u.enrollment_status, CASE WHEN ae.id IS NOT NULL THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
                CASE 
-                 WHEN COALESCE(u.is_verified, FALSE) = TRUE THEN TRUE
                  WHEN ae.id IS NOT NULL THEN TRUE
                  WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
-                 WHEN u.account_status = 'Active' THEN TRUE
+                 WHEN u.is_enrolled = TRUE THEN TRUE
                  ELSE FALSE
                END AS is_verified,
                ae.id AS associate_enrollment_id,
@@ -11281,10 +11280,10 @@ app.get("/api/admin/associates/:id",
         FROM users u
         LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
         LEFT JOIN (
-          SELECT DISTINCT ON (user_id) id, user_id
+          SELECT DISTINCT ON (user_id, contact_no_1) id, user_id, contact_no_1
           FROM associate_enrollment
-          ORDER BY user_id, created_at DESC NULLS LAST
-        ) ae ON ae.user_id = u.user_id
+          ORDER BY user_id NULLS LAST, contact_no_1 NULLS LAST, created_at DESC NULLS LAST
+        ) ae ON (ae.user_id = u.user_id OR (ae.contact_no_1 IS NOT NULL AND ae.contact_no_1 = u.mobile_no))
         LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
         LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
         WHERE u.user_id = ${req.params.id} AND u.user_type = 'Associate'`;
@@ -11376,12 +11375,11 @@ app.get("/api/admin/associates",
       const rows = await sql`
         SELECT u.user_id, u.member_id, u.full_name, u.email, u.mobile_no, u.account_status,
                u.invitation_code, u.registered_at, sp.full_name AS sponsor_name,
-               COALESCE(u.enrollment_status, CASE WHEN ae.id IS NOT NULL THEN 'Completed' WHEN u.account_status = 'Active' THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
+               COALESCE(u.enrollment_status, CASE WHEN ae.id IS NOT NULL THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
                CASE 
-                 WHEN COALESCE(u.is_verified, FALSE) = TRUE THEN TRUE
                  WHEN ae.id IS NOT NULL THEN TRUE
                  WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
-                 WHEN u.account_status = 'Active' THEN TRUE
+                 WHEN u.is_enrolled = TRUE THEN TRUE
                  ELSE FALSE
                END AS is_verified,
                ae.id AS associate_enrollment_id,
@@ -11392,10 +11390,10 @@ app.get("/api/admin/associates",
         FROM users u
         LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
         LEFT JOIN (
-          SELECT DISTINCT ON (user_id) id, user_id
+          SELECT DISTINCT ON (user_id, contact_no_1) id, user_id, contact_no_1
           FROM associate_enrollment
-          ORDER BY user_id, created_at DESC NULLS LAST
-        ) ae ON ae.user_id = u.user_id
+          ORDER BY user_id NULLS LAST, contact_no_1 NULLS LAST, created_at DESC NULLS LAST
+        ) ae ON (ae.user_id = u.user_id OR (ae.contact_no_1 IS NOT NULL AND ae.contact_no_1 = u.mobile_no))
         LEFT JOIN (
           SELECT DISTINCT ON (associate_user_id) *
           FROM associate_sales_tracker
