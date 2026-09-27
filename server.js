@@ -8513,6 +8513,105 @@ app.put("/api/admin/customers/:id",
   }
 );
 
+app.post("/api/admin/associates",
+  verifyAdminToken,
+  role("SuperAdmin", "Admin", "FinanceManager", "SiteManager"),
+  async (req, res) => {
+    try {
+      const fullName = String(req.body.full_name || "").trim();
+      const email = String(req.body.email || "").toLowerCase().trim();
+      const mobileNo = String(req.body.mobile_no || req.body.phone || "").replace(/\D/g, "");
+      const password = String(req.body.password || "password123");
+      const confirmPassword = String(req.body.confirm_password || req.body.password || "password123");
+      const accountStatus = String(req.body.account_status || "Active").trim();
+      const sponsorCode = String(req.body.sponsor_code || "").trim();
+      const rankName = String(req.body.rank_name || "Associate").trim();
+      const address = String(req.body.address || "").trim();
+      const city = String(req.body.city || "").trim();
+      const state = String(req.body.state || "").trim();
+      const pinCode = String(req.body.pin_code || req.body.pincode || "").trim();
+
+      if (!fullName) return err(res, "Name is required", 400);
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err(res, "Valid email is required", 400);
+      if (!mobileNo) return err(res, "Phone number is required", 400);
+      if (!password) return err(res, "Password is required", 400);
+      if (password.length < 6) return err(res, "Password must be at least 6 characters", 400);
+      if (password !== confirmPassword) return err(res, "Confirm password must match password", 400);
+      if (!["Active", "Pending", "Suspended", "Blacklisted"].includes(accountStatus)) {
+        return err(res, "Invalid status", 400);
+      }
+
+      const cleanMobile10 = String(mobileNo).replace(/\D/g, "").slice(-10);
+
+      const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${email}`;
+      const [dupInvestorEmail] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`;
+      if (dupEmail || dupInvestorEmail) return err(res, "Email already exists in another Customer, Associate, or Investor account", 409);
+
+      const [dupMobile] = await sql`SELECT user_id FROM users WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile10}`;
+      const [dupInvestorMobile] = await sql`SELECT id FROM investor_users WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile10} AND deleted_at IS NULL LIMIT 1`;
+      if (dupMobile || dupInvestorMobile) return err(res, "Phone number already exists in another Customer, Associate, or Investor account", 409);
+
+      let sponsorUserId = null;
+      if (sponsorCode) {
+        const [sp] = await sql`SELECT user_id FROM users WHERE member_id = ${sponsorCode} OR invitation_code = ${sponsorCode}`;
+        if (sp) sponsorUserId = sp.user_id;
+      }
+
+      const passwordHash = await bcrypt.hash(password, 12);
+      const memberId = await genMemberID("Associate");
+      const invitationCode = genInvitationCode();
+
+      const [associate] = await sql`
+        INSERT INTO users (
+          user_type, full_name, email, mobile_no, password_hash,
+          member_id, invitation_code, sponsor_user_id, account_status,
+          enrollment_status, is_otp_verified, email_verified,
+          email_verified_at, is_active, is_verified, approved_by_admin_id, approved_at
+        )
+        VALUES (
+          'Associate', ${fullName}, ${email}, ${mobileNo}, ${passwordHash},
+          ${memberId}, ${invitationCode}, ${sponsorUserId}, ${accountStatus},
+          'Completed', TRUE, TRUE,
+          NOW(), TRUE, TRUE, ${req.admin.admin_id}, NOW()
+        )
+        RETURNING user_id, member_id, user_type, full_name, email, mobile_no,
+                  account_status, invitation_code, registered_at, updated_at`;
+
+      if (address || city || state || pinCode) {
+        await sql`
+          INSERT INTO user_addresses (user_id, address_type, address_line1, city, state, pin_code)
+          VALUES (${associate.user_id}, 'Permanent', ${address || null}, ${city || null}, ${state || null}, ${pinCode || null})`;
+      }
+
+      // Initialize wallet
+      await sql`
+        INSERT INTO user_wallets (user_id, balance, total_earned, total_withdrawn, locked_balance, is_frozen)
+        VALUES (${associate.user_id}, 0, 0, 0, 0, FALSE)
+        ON CONFLICT (user_id) DO NOTHING`;
+
+      // Assign initial rank tracker
+      const [rankObj] = await sql`SELECT rank_id FROM associate_ranks WHERE rank_name = ${rankName} LIMIT 1`;
+      const rankId = rankObj?.rank_id || 1;
+      await sql`
+        INSERT INTO associate_sales_tracker (associate_user_id, current_rank_id, total_gaj_sold, total_commission_earned)
+        VALUES (${associate.user_id}, ${rankId}, 0, 0)
+        ON CONFLICT (associate_user_id) DO UPDATE SET current_rank_id = ${rankId}`;
+
+      await syncMlmTreeAndReferrals().catch(() => {});
+
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+        VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
+                'AssociateManagement', 'Created', 'users', ${associate.user_id},
+                ${JSON.stringify({ email, mobile_no: mobileNo, member_id: memberId, status: accountStatus })})`;
+
+      return ok(res, associate, "Associate created successfully", 201);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
 app.put("/api/admin/associates/:id",
   verifyAdminToken,
   role("SuperAdmin", "Admin", "FinanceManager", "SiteManager"),
@@ -11167,11 +11266,25 @@ app.get("/api/admin/associates/:id",
       await requireMlmSchema();
       const [profile] = await sql`
         SELECT u.*, sp.full_name AS sponsor_name, sp.member_id AS sponsor_member_id,
+               COALESCE(u.enrollment_status, CASE WHEN ae.id IS NOT NULL THEN 'Completed' WHEN u.account_status = 'Active' THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
+               CASE 
+                 WHEN COALESCE(u.is_verified, FALSE) = TRUE THEN TRUE
+                 WHEN ae.id IS NOT NULL THEN TRUE
+                 WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
+                 WHEN u.account_status = 'Active' THEN TRUE
+                 ELSE FALSE
+               END AS is_verified,
+               ae.id AS associate_enrollment_id,
                COALESCE(r.rank_name, 'Associate') AS rank_name,
                COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
                COALESCE(t.total_commission_earned, 0) AS total_commission_earned
         FROM users u
         LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
+        LEFT JOIN (
+          SELECT DISTINCT ON (user_id) id, user_id
+          FROM associate_enrollment
+          ORDER BY user_id, created_at DESC NULLS LAST
+        ) ae ON ae.user_id = u.user_id
         LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
         LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
         WHERE u.user_id = ${req.params.id} AND u.user_type = 'Associate'`;
@@ -11263,12 +11376,26 @@ app.get("/api/admin/associates",
       const rows = await sql`
         SELECT u.user_id, u.member_id, u.full_name, u.email, u.mobile_no, u.account_status,
                u.invitation_code, u.registered_at, sp.full_name AS sponsor_name,
+               COALESCE(u.enrollment_status, CASE WHEN ae.id IS NOT NULL THEN 'Completed' WHEN u.account_status = 'Active' THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
+               CASE 
+                 WHEN COALESCE(u.is_verified, FALSE) = TRUE THEN TRUE
+                 WHEN ae.id IS NOT NULL THEN TRUE
+                 WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
+                 WHEN u.account_status = 'Active' THEN TRUE
+                 ELSE FALSE
+               END AS is_verified,
+               ae.id AS associate_enrollment_id,
                COALESCE(r.rank_name, 'Associate') AS rank_name,
                COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
                COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
                COUNT(*) OVER() AS total_count
         FROM users u
         LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
+        LEFT JOIN (
+          SELECT DISTINCT ON (user_id) id, user_id
+          FROM associate_enrollment
+          ORDER BY user_id, created_at DESC NULLS LAST
+        ) ae ON ae.user_id = u.user_id
         LEFT JOIN (
           SELECT DISTINCT ON (associate_user_id) *
           FROM associate_sales_tracker
