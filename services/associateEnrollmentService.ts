@@ -94,6 +94,12 @@ export async function registerAssociateEnrollment(
 
   // Perform inside transaction so that failure in any step rolls back everything
   await sql.begin(async (tx: any) => {
+    let userRow: any = null;
+    if (userId) {
+      const [u] = await tx`SELECT user_id, member_id, mobile_no, email, pan_number, aadhar_number FROM users WHERE user_id = ${userId}`;
+      userRow = u;
+    }
+
     // 1. Check if an enrollment record already exists
     const [existing] = await tx`
       SELECT id, applicant_photo_path 
@@ -102,6 +108,12 @@ export async function registerAssociateEnrollment(
          OR aadhar_no = ${aadharStr}
          OR (${contactStr !== ''} AND contact_no_1 = ${contactStr})
          OR (${emailStr !== null} AND LOWER(email) = ${emailStr || ''})
+         OR (${Boolean(userRow)} AND (
+            id = ${userRow?.member_id || ''}
+            OR contact_no_1 = ${userRow?.mobile_no || ''}
+            OR (email IS NOT NULL AND LOWER(email) = LOWER(${userRow?.email || ''}))
+         ))
+      ORDER BY created_at DESC
       LIMIT 1
     `;
 

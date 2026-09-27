@@ -253,29 +253,113 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
     let newSubmissionId = null;
 
     await sql.begin(async (tx) => {
-      const [newRow] = await tx`
-        INSERT INTO customer_enrollment_submissions (
-          user_id, form_date, application_no, project_name, property_type, property_type_other, plot_flat_no, block_tower, size_area, rate_per_unit, basic_sale_price, plc_dev_charges, total_property_value,
-          applicant_name, fh_name, date_of_birth, age, gender, marital_status, nationality, nationality_other, pan_no, aadhar_no, occupation,
-          present_address, present_city, present_state_pin, permanent_address, permanent_city, permanent_state_pin, mobile_1, mobile_2, email_1, photo_first_applicant_url,
-          co_applicant_name, co_fh_name, co_relation, co_date_of_birth, co_age, co_gender, co_pan_no, co_aadhar_no, co_present_address, co_mobile, co_email, photo_co_applicant_url,
-          booking_amount, booking_amount_words, payment_mode, txn_cheque_no, txn_date, drawn_bank_branch,
-          acc_holder_name, acc_bank_branch, acc_number, ifsc_code,
-          associate_name, associate_id, associate_mobile, associate_signature_name,
-          declaration_accepted, signature_sole_first_applicant_url, signature_co_applicant_url, signature_authorized_signatory_url, terms_accepted, terms_accepted_at
-        ) VALUES (
-          ${user_id}, ${formDateVal}, ${b.applicationNo || appNo}, ${b.projectName || null}, ${b.propertyType || null}, ${b.propertyTypeOther || null}, ${b.plotFlatNo || null}, ${b.blockTower || null}, ${b.sizeArea || null}, ${rateVal}, ${bsp}, ${plc}, ${totalVal},
-          ${b.applicantName}, ${b.fhName || null}, ${dobVal}, ${ageVal}, ${b.gender || null}, ${b.maritalStatus || null}, ${b.nationality || null}, ${b.nationalityOther || null}, ${b.pan || null}, ${b.aadhar || null}, ${b.occupation || null},
-          ${b.presentAddress || null}, ${b.presentCity || null}, ${b.presentStatePin || null}, ${b.permanentAddress || null}, ${b.permanentCity || null}, ${b.permanentStatePin || null}, ${b.mobile1}, ${b.mobile2 || null}, ${b.email1 || null}, ${photoFirstUrl},
-          ${b.coApplicantName || null}, ${b.coFhName || null}, ${b.coRelation || null}, ${coDobVal}, ${coAgeVal}, ${b.coGender || null}, ${b.coPan || null}, ${b.coAadhar || null}, ${b.coPresentAddress || null}, ${b.coMobile || null}, ${b.coEmail || null}, ${photoCoUrl},
-          ${bookingAmountVal}, ${b.bookingAmountWords || null}, ${b.paymentMode || null}, ${b.txnNo || null}, ${txnDateVal}, ${b.drawnBankBranch || null},
-          ${b.accHolderName || null}, ${b.accBankBranch || null}, ${b.accNumber || null}, ${b.ifscCode || null},
-          ${b.associateName || null}, ${b.associateId || null}, ${b.associateMobile || null}, ${b.associateSignatureName || null},
-          ${b.declarationAccepted || false}, ${sigSoleUrl}, ${sigCoUrl}, ${sigAuthUrl}, ${true}, NOW()
-        ) RETURNING id
-      `;
+      let existingSub = null;
+      if (user_id) {
+        const [ex] = await tx`SELECT id, photo_first_applicant_url, photo_co_applicant_url, signature_sole_first_applicant_url, signature_co_applicant_url FROM customer_enrollment_submissions WHERE user_id = ${user_id} ORDER BY created_at DESC LIMIT 1`;
+        existingSub = ex;
+      }
 
-      newSubmissionId = newRow.id;
+      if (existingSub) {
+        newSubmissionId = existingSub.id;
+        const finalPhoto1 = photoFirstUrl || existingSub.photo_first_applicant_url || null;
+        const finalPhoto2 = photoCoUrl || existingSub.photo_co_applicant_url || null;
+        const finalSigSole = sigSoleUrl || existingSub.signature_sole_first_applicant_url || null;
+        const finalSigCo = sigCoUrl || existingSub.signature_co_applicant_url || null;
+
+        await tx`
+          UPDATE customer_enrollment_submissions SET
+            form_date = ${formDateVal},
+            project_name = ${b.projectName || null},
+            property_type = ${b.propertyType || null},
+            property_type_other = ${b.propertyTypeOther || null},
+            plot_flat_no = ${b.plotFlatNo || null},
+            block_tower = ${b.blockTower || null},
+            size_area = ${b.sizeArea || null},
+            rate_per_unit = ${rateVal},
+            basic_sale_price = ${bsp},
+            plc_dev_charges = ${plc},
+            total_property_value = ${totalVal},
+            applicant_name = ${b.applicantName},
+            fh_name = ${b.fhName || null},
+            date_of_birth = ${dobVal},
+            age = ${ageVal},
+            gender = ${b.gender || null},
+            marital_status = ${b.maritalStatus || null},
+            nationality = ${b.nationality || null},
+            nationality_other = ${b.nationalityOther || null},
+            pan_no = ${b.pan || null},
+            aadhar_no = ${b.aadhar || null},
+            occupation = ${b.occupation || null},
+            present_address = ${b.presentAddress || null},
+            present_city = ${b.presentCity || null},
+            present_state_pin = ${b.presentStatePin || null},
+            permanent_address = ${b.permanentAddress || null},
+            permanent_city = ${b.permanentCity || null},
+            permanent_state_pin = ${b.permanentStatePin || null},
+            mobile_1 = ${b.mobile1},
+            mobile_2 = ${b.mobile2 || null},
+            email_1 = ${b.email1 || null},
+            photo_first_applicant_url = COALESCE(${finalPhoto1}, photo_first_applicant_url),
+            photo_co_applicant_url = COALESCE(${finalPhoto2}, photo_co_applicant_url),
+            co_applicant_name = ${b.coApplicantName || null},
+            co_fh_name = ${b.coFhName || null},
+            co_relation = ${b.coRelation || null},
+            co_date_of_birth = ${coDobVal},
+            co_age = ${coAgeVal},
+            co_gender = ${b.coGender || null},
+            co_pan_no = ${b.coPan || null},
+            co_aadhar_no = ${b.coAadhar || null},
+            co_present_address = ${b.coPresentAddress || null},
+            co_mobile = ${b.coMobile || null},
+            co_email = ${b.coEmail || null},
+            booking_amount = ${bookingAmountVal},
+            booking_amount_words = ${b.bookingAmountWords || null},
+            payment_mode = ${b.paymentMode || null},
+            txn_cheque_no = ${b.txnNo || null},
+            txn_date = ${txnDateVal},
+            drawn_bank_branch = ${b.drawnBankBranch || null},
+            acc_holder_name = ${b.accHolderName || null},
+            acc_bank_branch = ${b.accBankBranch || null},
+            acc_number = ${b.accNumber || null},
+            ifsc_code = ${b.ifscCode || null},
+            associate_name = ${b.associateName || null},
+            associate_id = ${b.associateId || null},
+            associate_mobile = ${b.associateMobile || null},
+            associate_signature_name = ${b.associateSignatureName || null},
+            declaration_accepted = ${b.declarationAccepted || false},
+            signature_sole_first_applicant_url = COALESCE(${finalSigSole}, signature_sole_first_applicant_url),
+            signature_co_applicant_url = COALESCE(${finalSigCo}, signature_co_applicant_url),
+            terms_accepted = ${true},
+            terms_accepted_at = NOW(),
+            updated_at = NOW()
+          WHERE id = ${newSubmissionId}
+        `;
+
+        await tx`DELETE FROM customer_nominees WHERE submission_id = ${newSubmissionId}`;
+      } else {
+        const [newRow] = await tx`
+          INSERT INTO customer_enrollment_submissions (
+            user_id, form_date, application_no, project_name, property_type, property_type_other, plot_flat_no, block_tower, size_area, rate_per_unit, basic_sale_price, plc_dev_charges, total_property_value,
+            applicant_name, fh_name, date_of_birth, age, gender, marital_status, nationality, nationality_other, pan_no, aadhar_no, occupation,
+            present_address, present_city, present_state_pin, permanent_address, permanent_city, permanent_state_pin, mobile_1, mobile_2, email_1, photo_first_applicant_url,
+            co_applicant_name, co_fh_name, co_relation, co_date_of_birth, co_age, co_gender, co_pan_no, co_aadhar_no, co_present_address, co_mobile, co_email, photo_co_applicant_url,
+            booking_amount, booking_amount_words, payment_mode, txn_cheque_no, txn_date, drawn_bank_branch,
+            acc_holder_name, acc_bank_branch, acc_number, ifsc_code,
+            associate_name, associate_id, associate_mobile, associate_signature_name,
+            declaration_accepted, signature_sole_first_applicant_url, signature_co_applicant_url, signature_authorized_signatory_url, terms_accepted, terms_accepted_at
+          ) VALUES (
+            ${user_id}, ${formDateVal}, ${b.applicationNo || appNo}, ${b.projectName || null}, ${b.propertyType || null}, ${b.propertyTypeOther || null}, ${b.plotFlatNo || null}, ${b.blockTower || null}, ${b.sizeArea || null}, ${rateVal}, ${bsp}, ${plc}, ${totalVal},
+            ${b.applicantName}, ${b.fhName || null}, ${dobVal}, ${ageVal}, ${b.gender || null}, ${b.maritalStatus || null}, ${b.nationality || null}, ${b.nationalityOther || null}, ${b.pan || null}, ${b.aadhar || null}, ${b.occupation || null},
+            ${b.presentAddress || null}, ${b.presentCity || null}, ${b.presentStatePin || null}, ${b.permanentAddress || null}, ${b.permanentCity || null}, ${b.permanentStatePin || null}, ${b.mobile1}, ${b.mobile2 || null}, ${b.email1 || null}, ${photoFirstUrl},
+            ${b.coApplicantName || null}, ${b.coFhName || null}, ${b.coRelation || null}, ${coDobVal}, ${coAgeVal}, ${b.coGender || null}, ${b.coPan || null}, ${b.coAadhar || null}, ${b.coPresentAddress || null}, ${b.coMobile || null}, ${b.coEmail || null}, ${photoCoUrl},
+            ${bookingAmountVal}, ${b.bookingAmountWords || null}, ${b.paymentMode || null}, ${b.txnNo || null}, ${txnDateVal}, ${b.drawnBankBranch || null},
+            ${b.accHolderName || null}, ${b.accBankBranch || null}, ${b.accNumber || null}, ${b.ifscCode || null},
+            ${b.associateName || null}, ${b.associateId || null}, ${b.associateMobile || null}, ${b.associateSignatureName || null},
+            ${b.declarationAccepted || false}, ${sigSoleUrl}, ${sigCoUrl}, ${sigAuthUrl}, ${true}, NOW()
+          ) RETURNING id
+        `;
+        newSubmissionId = newRow.id;
+      }
 
       // Insert Nominees
       if (b.nominees && Array.isArray(b.nominees)) {
