@@ -319,7 +319,7 @@ export async function getAdminAssociateEnrollments(req: Request, res: Response):
         )
         LEFT JOIN associate_address pa ON e.id = pa.associate_id AND pa.address_type = 'permanent'
         LEFT JOIN associate_sponsor asp ON e.id = asp.associate_id
-        WHERE (u.user_type = 'Associate' OR u.role = 'Associate')
+        WHERE u.user_type = 'Associate'
           AND (
             u.full_name ILIKE ${s}
             OR u.mobile_no ILIKE ${s}
@@ -370,7 +370,7 @@ export async function getAdminAssociateEnrollments(req: Request, res: Response):
         )
         LEFT JOIN associate_address pa ON e.id = pa.associate_id AND pa.address_type = 'permanent'
         LEFT JOIN associate_sponsor asp ON e.id = asp.associate_id
-        WHERE u.user_type = 'Associate' OR u.role = 'Associate'
+        WHERE u.user_type = 'Associate'
         ORDER BY COALESCE(e.created_at, u.registered_at) DESC
       `;
     }
