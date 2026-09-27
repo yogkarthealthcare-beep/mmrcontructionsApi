@@ -200,8 +200,32 @@ const processBase64 = async (dataUrl, filename, userId) => {
 // Accepts authenticated customer submission
 router.post("/customer-enrollment", authUser, async (req, res) => {
   try {
-    const user_id = req.user.user_id || req.user.id; // From JWT
+    const authUserId = req.user.user_id || req.user.id; // From JWT
     const b = req.body;
+
+    let user_id = authUserId;
+    if ((b.customer_user_id || b.target_user_id) && (req.user?.user_type === "Associate" || req.user?.is_admin || req.user?.role === "Associate")) {
+      const candidateId = Number(b.customer_user_id || b.target_user_id);
+      if (candidateId) {
+        if (!req.user?.is_admin) {
+          const [verifiedMember] = await sql`
+            SELECT user_id FROM users
+            WHERE user_id = ${candidateId}
+              AND (
+                sponsor_user_id = ${authUserId}
+                OR EXISTS (
+                  SELECT 1 FROM mlm_tree_closure c
+                  WHERE c.ancestor_user_id = ${authUserId} AND c.descendant_user_id = ${candidateId}
+                )
+              )`;
+          if (verifiedMember) {
+            user_id = candidateId;
+          }
+        } else {
+          user_id = candidateId;
+        }
+      }
+    }
 
     if (!b.applicantName || !b.mobile1) {
       return err(res, "Applicant Name and Mobile No 1 are required.");

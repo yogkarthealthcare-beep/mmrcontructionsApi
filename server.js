@@ -2641,7 +2641,11 @@ const verifyUserToken = async (req, res, next) => {
 };
 
 const requireAssociate = (req, res, next) => {
-  if (req.user?.user_type !== "Associate")
+  const isAssoc = req.user?.user_type === "Associate" ||
+                  req.user?.role === "Associate" ||
+                  Boolean(req.user?.is_associate) ||
+                  Boolean(req.user?.is_admin || req.user?.admin_id);
+  if (!isAssoc)
     return err(res, "Associate access required", 403);
   return next();
 };
@@ -7246,6 +7250,485 @@ app.post("/api/associate/payouts/request", verifyUserToken, requireAssociate, as
       RETURNING *`;
     return ok(res, payout, "Payout request submitted", 201);
   } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+/* =========================================================================
+   ─────────────────────────────────────────────────────────────────────────
+   ASSOCIATE PANEL: CUSTOMER MANAGEMENT, PLOT BOOKING & INVOICE VISIBILITY
+   ─────────────────────────────────────────────────────────────────────────
+========================================================================= */
+
+// 1. Associate creates new customer / team member
+app.post("/api/associate/customers", verifyUserToken, requireAssociate, async (req, res) => {
+  try {
+    const { full_name, mobile_no, email, password } = req.body || {};
+    if (!full_name || !mobile_no || !email || !password) {
+      return err(res, "Full Name, Mobile Number, Email, and Password are all required.", 400);
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanMobile = String(mobile_no).replace(/\D/g, "");
+
+    if (cleanMobile.length < 10) {
+      return err(res, "Please enter a valid 10-digit mobile number.", 400);
+    }
+
+    // Duplicate checks
+    const [dupMobile] = await sql`
+      SELECT user_id FROM users 
+      WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}`;
+    const [dupInvestorMobile] = await sql`
+      SELECT id FROM investor_users 
+      WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile} 
+        AND (deleted_at IS NULL) LIMIT 1`;
+    if (dupMobile || dupInvestorMobile) {
+      return err(res, "Mobile number is already registered in the system.", 409);
+    }
+
+    const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${cleanEmail}`;
+    const [dupInvestorEmail] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${cleanEmail} AND (deleted_at IS NULL) LIMIT 1`;
+    if (dupEmail || dupInvestorEmail) {
+      return err(res, "Email address is already registered in the system.", 409);
+    }
+
+    // Sponsor ID is strictly enforced as the logged-in Associate
+    const sponsorUserId = req.user.user_id;
+    const [sponsor] = await sql`
+      SELECT user_id, full_name, member_id, invitation_code 
+      FROM users 
+      WHERE user_id = ${sponsorUserId}`;
+    if (!sponsor) {
+      return err(res, "Sponsor Associate profile not found.", 404);
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    const [sequence] = await sql`
+      SELECT COALESCE(MAX(
+        CASE
+          WHEN member_id ~ '^MMR[0-9]+$' THEN SUBSTRING(member_id FROM 4)::integer
+          WHEN member_id ~ '^MMR-[AC]-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
+          ELSE 0 END
+      ), 0) + 1 AS next_value FROM users`;
+    const memberId = `MMR${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
+
+    const [createdUser] = await sql`
+      INSERT INTO users (
+        member_id, user_type, full_name, mobile_no, email, password_hash,
+        sponsor_user_id, account_status, email_verified, is_otp_verified,
+        created_at, updated_at
+      ) VALUES (
+        ${memberId}, 'Customer', ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
+        ${sponsorUserId}, 'Active', true, true,
+        NOW(), NOW()
+      )
+      RETURNING user_id, member_id, user_type, full_name, email, mobile_no, account_status, created_at`;
+
+    await sql`
+      INSERT INTO user_wallets (user_id, balance, total_earned, total_withdrawn)
+      VALUES (${createdUser.user_id}, 0, 0, 0)
+      ON CONFLICT (user_id) DO NOTHING`;
+
+    try {
+      await sql`
+        INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
+        VALUES (${sponsorUserId}, ${createdUser.user_id}, 'Approved', NOW())
+        ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
+    } catch (_) {}
+
+    try {
+      await syncMlmTreeAndReferrals();
+    } catch (_) {}
+
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+      VALUES ('Associate', ${sponsorUserId}, ${sponsor.full_name}, 'TeamManagement', 'CustomerEnrolled', 'users', ${createdUser.user_id})`;
+
+    return ok(res, {
+      user_id: createdUser.user_id,
+      member_id: createdUser.member_id,
+      full_name: createdUser.full_name,
+      email: createdUser.email,
+      mobile_no: createdUser.mobile_no,
+      user_type: createdUser.user_type,
+      account_status: createdUser.account_status,
+      sponsor_user_id: sponsorUserId,
+      sponsor_name: sponsor.full_name,
+      sponsor_member_id: sponsor.member_id || `ASSOC${sponsor.user_id}`
+    }, "Customer account created successfully and added to your team.", 201);
+  } catch (e) {
+    console.error("[Associate Add Customer Error]:", e);
+    return err(res, e.message);
+  }
+});
+
+// 2. Associate lists all authorized team members with plot booking & payment summary
+app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async (req, res) => {
+  try {
+    const associateId = req.user.user_id;
+    await syncMlmTreeAndReferrals().catch(() => {});
+
+    const members = await sql`
+      WITH downline AS (
+        SELECT descendant_user_id AS user_id, depth
+        FROM mlm_tree_closure
+        WHERE ancestor_user_id = ${associateId} AND depth > 0
+        UNION
+        SELECT user_id, 1 AS depth
+        FROM users
+        WHERE sponsor_user_id = ${associateId}
+      ),
+      latest_bookings AS (
+        SELECT DISTINCT ON (b.user_id)
+          b.booking_id,
+          b.booking_serial,
+          b.user_id,
+          b.plot_id,
+          b.booking_status,
+          b.payment_type,
+          b.advance_amount,
+          b.created_at AS booking_date,
+          COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+          COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+          COALESCE(b.base_price, p.base_price, 0) AS base_price,
+          COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
+          COALESCE(s.site_id, s2.site_id, p.site_id) AS site_id
+        FROM bookings b
+        LEFT JOIN plots p ON b.plot_id = p.plot_id
+        LEFT JOIN sites s ON p.site_id = s.site_id
+        LEFT JOIN sites s2 ON b.site_id = s2.site_id
+        WHERE b.booking_status != 'Cancelled'
+        ORDER BY b.user_id, b.created_at DESC
+      ),
+      invoice_totals AS (
+        SELECT
+          inv.user_id,
+          COALESCE(SUM(inv.grand_total), 0) AS total_invoiced,
+          COALESCE(SUM(inv.paid_amount), 0) AS total_paid,
+          COALESCE(SUM(inv.balance_amount), 0) AS total_balance,
+          COUNT(inv.invoice_id) AS invoice_count
+        FROM invoices inv
+        GROUP BY inv.user_id
+      ),
+      enrollment_data AS (
+        SELECT DISTINCT ON (sub.user_id)
+          sub.user_id,
+          sub.id AS enrollment_id,
+          sub.application_no,
+          sub.created_at AS enrollment_date
+        FROM customer_enrollment_submissions sub
+        ORDER BY sub.user_id, sub.created_at DESC
+      )
+      SELECT
+        u.user_id,
+        u.member_id,
+        u.full_name,
+        u.mobile_no,
+        u.email,
+        u.user_type,
+        u.account_status,
+        u.sponsor_user_id,
+        u.registered_at,
+        u.created_at,
+        d.depth AS level,
+        -- Booking details
+        lb.booking_id,
+        lb.booking_serial,
+        lb.plot_id,
+        lb.plot_number,
+        lb.plot_area,
+        lb.site_id,
+        lb.site_name,
+        lb.booking_status,
+        lb.payment_type,
+        lb.advance_amount,
+        lb.base_price,
+        lb.booking_date,
+        -- Payment & Invoice details
+        COALESCE(lb.base_price, it.total_invoiced, 0)::numeric AS total_plot_amount,
+        COALESCE(it.total_paid, lb.advance_amount, 0)::numeric AS total_paid_amount,
+        GREATEST(0, (COALESCE(lb.base_price, it.total_invoiced, 0) - COALESCE(it.total_paid, lb.advance_amount, 0)))::numeric AS total_unpaid_amount,
+        COALESCE(it.invoice_count, 0) AS invoice_count,
+        -- Enrollment info
+        ed.enrollment_id,
+        ed.application_no,
+        (ed.enrollment_id IS NOT NULL) AS has_enrollment
+      FROM downline d
+      JOIN users u ON d.user_id = u.user_id
+      LEFT JOIN latest_bookings lb ON u.user_id = lb.user_id
+      LEFT JOIN invoice_totals it ON u.user_id = it.user_id
+      LEFT JOIN enrollment_data ed ON u.user_id = ed.user_id
+      GROUP BY
+        u.user_id, u.member_id, u.full_name, u.mobile_no, u.email, u.user_type,
+        u.account_status, u.sponsor_user_id, u.registered_at, u.created_at, d.depth,
+        lb.booking_id, lb.booking_serial, lb.plot_id, lb.plot_number, lb.plot_area,
+        lb.site_id, lb.site_name, lb.booking_status, lb.payment_type, lb.advance_amount,
+        lb.base_price, lb.booking_date, it.total_invoiced, it.total_paid, it.total_balance,
+        it.invoice_count, ed.enrollment_id, ed.application_no
+      ORDER BY d.depth ASC, u.created_at DESC`;
+
+    return ok(res, members);
+  } catch (e) {
+    console.error("[Associate Team Members Error]:", e);
+    return err(res, e.message);
+  }
+});
+
+// 3. Associate books a plot for their authorized team member
+app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (req, res) => {
+  try {
+    const associateId = req.user.user_id;
+    const {
+      team_member_user_id,
+      site_id,
+      plot_id,
+      payment_option = "PartWise", // "OneTime" | "PartWise" | "EMI"
+      booking_amount = 0,
+      payment_method = "Cash / Bank",
+      notes = ""
+    } = req.body || {};
+
+    if (!team_member_user_id || !plot_id) {
+      return err(res, "Team Member and Plot selection are required.", 400);
+    }
+
+    if (payment_option === "EMI" || payment_option === "Installment") {
+      return err(res, "Installment (EMI) option is currently unavailable. Please choose One-Time or Part-Wise Payment.", 400);
+    }
+
+    // ── 1. Backend Authorization: Verify team member belongs to this Associate ──
+    const [teamMember] = await sql`
+      SELECT u.user_id, u.full_name, u.email, u.mobile_no, u.member_id, u.sponsor_user_id
+      FROM users u
+      WHERE u.user_id = ${Number(team_member_user_id)}
+        AND (
+          u.sponsor_user_id = ${associateId}
+          OR EXISTS (
+            SELECT 1 FROM mlm_tree_closure c
+            WHERE c.ancestor_user_id = ${associateId} AND c.descendant_user_id = u.user_id
+          )
+        )
+      LIMIT 1`;
+
+    if (!teamMember) {
+      return err(res, "Unauthorized: The selected customer is not a member of your authorized downline team.", 403);
+    }
+
+    // ── 2. Verify Plot Availability ──
+    const [plot] = await sql`
+      SELECT p.*, s.site_name, s.city, s.full_address
+      FROM plots p
+      JOIN sites s ON p.site_id = s.site_id
+      WHERE p.plot_id = ${Number(plot_id)} AND p.is_active = TRUE
+      LIMIT 1`;
+
+    if (!plot) {
+      return err(res, "Selected plot was not found or is currently inactive.", 404);
+    }
+
+    if (plot.plot_status !== "Vacant") {
+      return err(res, `Plot ${plot.plot_number} is ${plot.plot_status} and not available for new booking.`, 409);
+    }
+
+    const totalPlotPrice = Number(plot.base_price || (Number(plot.plot_area || 0) * 1000) || 0);
+    let initialPaid = 0;
+
+    if (payment_option === "OneTime") {
+      initialPaid = Number(booking_amount) > 0 ? Number(booking_amount) : totalPlotPrice;
+    } else {
+      // Part-Wise Payment (0% Interest)
+      initialPaid = Number(booking_amount || 0);
+      if (initialPaid <= 0) {
+        return err(res, "Please specify an initial booking amount for Part-Wise Payment.", 400);
+      }
+      if (initialPaid > totalPlotPrice) {
+        return err(res, `Initial payment (₹${initialPaid}) cannot exceed Total Plot Value (₹${totalPlotPrice}).`, 400);
+      }
+    }
+
+    const remainingBalance = Math.max(0, totalPlotPrice - initialPaid);
+
+    // ── 3. Generate Booking Serial ──
+    const [seq] = await sql`
+      SELECT COALESCE(MAX(CAST(SUBSTRING(booking_serial FROM 10) AS INT)), 0) + 1 AS n
+      FROM bookings WHERE booking_serial LIKE 'MMR-' || to_char(NOW(), 'YYYY') || '-%'`;
+    const serial = `MMR-${new Date().getFullYear()}-${String(seq?.n || 1).padStart(5, "0")}`;
+
+    const [associate] = await sql`SELECT user_id, full_name, member_id FROM users WHERE user_id = ${associateId}`;
+
+    // ── 4. Insert Booking (Status: Pending awaiting Admin Approval) ──
+    const [booking] = await sql`
+      INSERT INTO bookings (
+        booking_serial, user_id, plot_id, site_id, payment_type,
+        advance_amount, booking_status, payment_method, notes, created_at, updated_at
+      )
+      VALUES (
+        ${serial}, ${teamMember.user_id}, ${plot.plot_id}, ${plot.site_id},
+        ${payment_option === "OneTime" ? "FullPayment" : "Partial"},
+        ${initialPaid}, 'PaymentPending', ${payment_method || 'Cash / Bank'},
+        ${notes || `Assisted booking by Associate ${associate?.full_name || ''} (${associate?.member_id || associateId})`},
+        NOW(), NOW()
+      )
+      RETURNING booking_id, booking_serial, booking_status, created_at`;
+
+    // ── 5. Reserve Plot Status to InProcess ──
+    await sql`UPDATE plots SET plot_status = 'InProcess', updated_at = NOW() WHERE plot_id = ${plot.plot_id}`;
+    await sql`
+      INSERT INTO plot_status_history (plot_id, old_status, new_status, reason)
+      VALUES (${plot.plot_id}, 'Vacant', 'InProcess', ${`Booking request submitted by Associate ${associate?.full_name || ''} for ${teamMember.full_name}`})`;
+
+    // ── 6. Create Invoice Record (Single Source of Truth) ──
+    const formattedInvNum = `MMR-INV-${booking.booking_id}`;
+    const invData = {
+      invoice_number: formattedInvNum,
+      invoice_type: payment_option === "OneTime" ? "Full Plot Payment" : "Plot Booking Advance (Part-Wise)",
+      booking_id: booking.booking_id,
+      booking_serial: booking.booking_serial,
+      customer_name: teamMember.full_name,
+      mobile_no: teamMember.mobile_no || "",
+      email: teamMember.email || "",
+      associate_name: associate?.full_name || "",
+      associate_id: associate?.member_id || `ASSOC${associateId}`,
+      site_name: plot.site_name,
+      plot_number: plot.plot_number,
+      plot_size: `${plot.plot_area || ''} Sq.Yd.`.trim(),
+      total_plot_price: totalPlotPrice,
+      down_payment: initialPaid,
+      grand_total: totalPlotPrice,
+      paid_amount: initialPaid,
+      balance_amount: remainingBalance,
+      payment_method: payment_method || "Cash / Bank",
+      payment_date: new Date().toISOString().split('T')[0],
+      payment_option: payment_option,
+      interest_amount: 0,
+      notes: notes || "Associate assisted booking"
+    };
+
+    try {
+      await sql`
+        INSERT INTO invoices (
+          invoice_number, booking_id, user_id, associate_id, order_id,
+          invoice_date, subtotal, grand_total, paid_amount, balance_amount,
+          payment_method, payment_status, order_status, invoice_data, created_at, updated_at
+        ) VALUES (
+          ${formattedInvNum}, ${booking.booking_id}, ${teamMember.user_id}, ${associateId}, ${booking.booking_serial},
+          NOW(), ${totalPlotPrice}, ${totalPlotPrice}, ${initialPaid}, ${remainingBalance},
+          ${payment_method || 'Cash / Bank'},
+          ${initialPaid >= totalPlotPrice ? 'Paid' : (initialPaid > 0 ? 'Partial' : 'Pending')},
+          'Pending',
+          ${sql.json(invData)},
+          NOW(), NOW()
+        )
+        ON CONFLICT (booking_id) DO UPDATE SET
+          paid_amount = EXCLUDED.paid_amount,
+          balance_amount = EXCLUDED.balance_amount,
+          invoice_data = EXCLUDED.invoice_data,
+          updated_at = NOW()`;
+    } catch (invErr) {
+      console.warn("[Associate Booking Invoice non-critical warning]:", invErr.message);
+    }
+
+    // ── 7. Audit Log & Customer Notification ──
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+      VALUES ('Associate', ${associateId}, ${associate?.full_name || 'Associate'}, 'PlotBooking', 'BookingInitiated', 'bookings', ${booking.booking_id})`;
+
+    await addUserNotification({
+      userId: teamMember.user_id,
+      title: "Plot Booking Initiated",
+      message: `Associate ${associate?.full_name || ''} has initiated plot booking (${serial}) for Plot ${plot.plot_number} at ${plot.site_name}. Awaiting admin approval.`
+    }).catch(() => {});
+
+    return ok(res, {
+      booking_id: booking.booking_id,
+      booking_serial: booking.booking_serial,
+      invoice_number: formattedInvNum,
+      customer_name: teamMember.full_name,
+      customer_id: teamMember.member_id,
+      plot_number: plot.plot_number,
+      site_name: plot.site_name,
+      total_plot_price: totalPlotPrice,
+      paid_amount: initialPaid,
+      balance_amount: remainingBalance,
+      payment_option: payment_option,
+      booking_status: "Pending Approval"
+    }, "Plot booking request submitted successfully. Awaiting admin review.", 201);
+  } catch (e) {
+    console.error("[Associate Plot Booking Error]:", e);
+    return err(res, e.message);
+  }
+});
+
+// 4. Associate views invoices and payment records for a specific authorized team member
+app.get("/api/associate/team-members/:userId/invoices", verifyUserToken, requireAssociate, async (req, res) => {
+  try {
+    const associateId = req.user.user_id;
+    const targetUserId = Number(req.params.userId);
+
+    // Verify target user is in this associate's authorized downline
+    const [teamMember] = await sql`
+      SELECT u.user_id, u.full_name, u.email, u.mobile_no, u.member_id
+      FROM users u
+      WHERE u.user_id = ${targetUserId}
+        AND (
+          u.sponsor_user_id = ${associateId}
+          OR EXISTS (
+            SELECT 1 FROM mlm_tree_closure c
+            WHERE c.ancestor_user_id = ${associateId} AND c.descendant_user_id = u.user_id
+          )
+        )
+      LIMIT 1`;
+
+    if (!teamMember) {
+      return err(res, "Unauthorized: You do not have permission to view invoices for this user.", 403);
+    }
+
+    const invoices = await sql`
+      SELECT
+        inv.invoice_id,
+        inv.invoice_number,
+        inv.order_id,
+        inv.booking_id,
+        inv.user_id,
+        inv.associate_id,
+        inv.invoice_date,
+        inv.subtotal,
+        inv.grand_total,
+        inv.paid_amount,
+        inv.balance_amount,
+        inv.payment_method,
+        inv.payment_status,
+        inv.order_status,
+        inv.invoice_data,
+        inv.created_at,
+        b.booking_serial,
+        COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+        COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name
+      FROM invoices inv
+      LEFT JOIN bookings b ON inv.booking_id = b.booking_id
+      LEFT JOIN plots p ON b.plot_id = p.plot_id
+      LEFT JOIN sites s ON p.site_id = s.site_id
+      LEFT JOIN sites s2 ON b.site_id = s2.site_id
+      WHERE inv.user_id = ${targetUserId}
+      ORDER BY inv.created_at DESC`;
+
+    const [summary] = await sql`
+      SELECT
+        COALESCE(SUM(inv.grand_total), 0)::numeric AS total_amount,
+        COALESCE(SUM(inv.paid_amount), 0)::numeric AS total_paid,
+        GREATEST(0, (COALESCE(SUM(inv.grand_total), 0) - COALESCE(SUM(inv.paid_amount), 0)))::numeric AS total_unpaid
+      FROM invoices inv
+      WHERE inv.user_id = ${targetUserId}`;
+
+    return ok(res, {
+      customer: teamMember,
+      invoices,
+      summary: summary || { total_amount: 0, total_paid: 0, total_unpaid: 0 }
+    });
+  } catch (e) {
+    console.error("[Associate Team Member Invoices Error]:", e);
     return err(res, e.message);
   }
 });

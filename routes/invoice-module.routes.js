@@ -179,6 +179,18 @@ async function canAccessInvoice(reqUser = {}, invoice = {}) {
       SELECT 1 FROM referral_registrations
       WHERE sponsor_user_id = ${currentUserId} AND referred_user_id = ${invoice.user_id}`;
     if (ref) return true;
+
+    // Check direct sponsor in users table
+    const [u] = await sql`
+      SELECT 1 FROM users
+      WHERE user_id = ${invoice.user_id} AND sponsor_user_id = ${currentUserId}`;
+    if (u) return true;
+
+    // Check downline in MLM tree closure
+    const [closure] = await sql`
+      SELECT 1 FROM mlm_tree_closure
+      WHERE ancestor_user_id = ${currentUserId} AND descendant_user_id = ${invoice.user_id}`;
+    if (closure) return true;
   }
   return false;
 }
