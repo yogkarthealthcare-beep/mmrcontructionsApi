@@ -8291,8 +8291,8 @@ app.get("/api/admin/users/:id",
       // Fallback 2: Associate Enrollment Submissions
       const [assoc] = await sql`
         SELECT ae.*, aa.local_address AS perm_address, aa.city AS perm_city, aa.state AS perm_state, aa.pin_code AS perm_pin,
-               ab.bank_name, ab.acc_holder, ab.acc_no, ab.ifsc, ab.branch_name,
-               an.nominee_name, an.relationship AS nom_rel, an.nominee_contact
+               ab.bank_name, ab.account_holder_name, ab.account_no, ab.ifsc_code, ab.branch_name,
+               an.nominee_name, an.relationship AS nom_rel
         FROM associate_enrollment ae
         LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
         LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
@@ -8317,9 +8317,9 @@ app.get("/api/admin/users/:id",
           bank = {
             bank_detail_id: bank?.bank_detail_id || null,
             user_id: uid,
-            account_holder_name: assoc.acc_holder || user.full_name,
-            account_number: assoc.acc_no || null,
-            ifsc_code: assoc.ifsc || null,
+            account_holder_name: assoc.account_holder_name || user.full_name,
+            account_number: assoc.account_no || null,
+            ifsc_code: assoc.ifsc_code || null,
             branch_name: assoc.branch_name || null,
             bank_name: assoc.bank_name || null,
             is_verified: true
@@ -8331,7 +8331,7 @@ app.get("/api/admin/users/:id",
             user_id: uid,
             nominee_name: assoc.nominee_name || null,
             relationship: assoc.nom_rel || null,
-            nominee_mobile: assoc.nominee_contact || null
+            nominee_mobile: null
           };
         }
       }
