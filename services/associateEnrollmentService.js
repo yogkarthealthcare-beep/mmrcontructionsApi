@@ -66,15 +66,22 @@ export const associateEnrollmentSchema = z.object({
 export async function registerAssociateEnrollment(data, applicantPhotoPath, nomineePhotoPath, userId = null) {
     const year = new Date().getFullYear();
     let generatedId = "";
+
+    const panStr = String(data.panNo || '').trim().toUpperCase();
+    const aadharStr = String(data.aadharNo || '').trim();
+    const contactStr = String(data.contact1 || '').trim();
+    const emailStr = data.email ? String(data.email).trim().toLowerCase() : null;
+
     // Perform inside transaction so that failure in any step rolls back everything
     await sql.begin(async (tx) => {
-        // Check if an enrollment record already exists for this PAN, Aadhar, Mobile, or user_id
+        // 1. Check if an enrollment record already exists
         const [existing] = await tx`
           SELECT id, applicant_photo_path 
           FROM associate_enrollment 
-          WHERE UPPER(pan_no) = UPPER(${data.panNo})
-             OR aadhar_no = ${data.aadharNo}
-             OR (${data.contact1} IS NOT NULL AND contact_no_1 = ${data.contact1})
+          WHERE UPPER(pan_no) = ${panStr}
+             OR aadhar_no = ${aadharStr}
+             OR (${contactStr !== ''} AND contact_no_1 = ${contactStr})
+             OR (${emailStr !== null} AND LOWER(email) = ${emailStr || ''})
           LIMIT 1
         `;
 
@@ -95,9 +102,9 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
                 contact_no_2 = ${data.contact2 || null},
                 nationality = ${data.nationality || 'Indian'},
                 residential_status = ${data.residentialStatus || null},
-                pan_no = ${data.panNo.toUpperCase()},
-                aadhar_no = ${data.aadharNo},
-                email = ${data.email || null},
+                pan_no = ${panStr},
+                aadhar_no = ${aadharStr},
+                email = ${emailStr},
                 occupation = ${data.occupation || null},
                 annual_income = ${data.annualIncome || null},
                 education = ${data.education || null},
@@ -105,7 +112,7 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
                 religion = ${data.religion || null},
                 applicant_photo_path = COALESCE(${finalApplicantPhoto}, applicant_photo_path),
                 sign_date = ${data.signDate || null},
-                terms_accepted = ${data.termsAccepted},
+                terms_accepted = ${Boolean(data.termsAccepted)},
                 terms_accepted_at = NOW(),
                 updated_at = NOW()
               WHERE id = ${generatedId}
@@ -124,7 +131,7 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
               FROM associate_enrollment 
               WHERE id LIKE ${`MMR-ASC-${year}-%`}
             `;
-            const count = (maxResult?.max_num || 0) + 1;
+            const count = Number(maxResult?.max_num || 0) + 1;
             generatedId = `MMR-ASC-${year}-${String(count).padStart(4, "0")}`;
 
             // 2. Insert master: associate_enrollment
@@ -138,9 +145,9 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
               ) VALUES (
                 ${generatedId}, ${data.fullName}, ${data.dob}, ${data.gender}, ${data.fatherName || null}, ${data.motherName || null}, ${data.spouseName || null},
                 ${data.contact1}, ${data.contact2 || null}, ${data.nationality || 'Indian'}, ${data.residentialStatus || null},
-                ${data.panNo.toUpperCase()}, ${data.aadharNo}, ${data.email || null}, ${data.occupation || null}, ${data.annualIncome || null}, ${data.education || null},
+                ${panStr}, ${aadharStr}, ${emailStr}, ${data.occupation || null}, ${data.annualIncome || null}, ${data.education || null},
                 ${data.category || null}, ${data.religion || null}, ${applicantPhotoPath || null}, ${data.signDate || null},
-                ${data.termsAccepted}, NOW(), 'pending'
+                ${Boolean(data.termsAccepted)}, NOW(), 'pending'
               )
             `;
         }
@@ -206,31 +213,16 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
 
         // 7. Sync profile in users table
         try {
+            const uidNum = Number(userId) || 0;
             await tx`
               UPDATE users SET
                 enrollment_status = 'Completed',
-                pan_number = COALESCE(NULLIF(${data.panNo}, ''), pan_number),
-                aadhar_number = COALESCE(NULLIF(${data.aadharNo}, ''), aadhar_number),
-                father_name = COALESCE(NULLIF(${data.fatherName || null}, ''), father_name),
-                mother_name = COALESCE(NULLIF(${data.motherName || null}, ''), mother_name),
-                spouse_name = COALESCE(NULLIF(${data.spouseName || null}, ''), spouse_name),
-                address = COALESCE(NULLIF(${data.permAddress || null}, ''), address),
-                city = COALESCE(NULLIF(${data.permCity || null}, ''), city),
-                state = COALESCE(NULLIF(${data.permState || null}, ''), state),
-                pincode = COALESCE(NULLIF(${data.permPin || null}, ''), pincode),
-                bank_name = COALESCE(NULLIF(${data.bankName || null}, ''), bank_name),
-                account_number = COALESCE(NULLIF(${data.accNo || null}, ''), account_number),
-                ifsc_code = COALESCE(NULLIF(${data.ifsc || null}, ''), ifsc_code),
-                account_holder_name = COALESCE(NULLIF(${data.accHolder || null}, ''), account_holder_name),
-                nominee_name = COALESCE(NULLIF(${data.nomineeName || null}, ''), nominee_name),
-                nominee_relationship = COALESCE(NULLIF(${data.nomineeRelationship || null}, ''), nominee_relationship),
-                sponsor_id = COALESCE(NULLIF(${data.sponsorCode || null}, ''), sponsor_id),
-                sponsor_name = COALESCE(NULLIF(${data.sponsorName || null}, ''), sponsor_name),
-                profile_picture_url = COALESCE(NULLIF(${applicantPhotoPath || null}, ''), profile_picture_url),
+                pan_number = COALESCE(NULLIF(${panStr}, ''), pan_number),
+                aadhar_number = COALESCE(NULLIF(${aadharStr}, ''), aadhar_number),
                 updated_at = NOW()
-              WHERE (${userId || null} IS NOT NULL AND user_id = ${userId})
-                 OR (${data.contact1} IS NOT NULL AND mobile_no = ${data.contact1})
-                 OR (${data.email || null} IS NOT NULL AND LOWER(email) = LOWER(${data.email}))
+              WHERE (${uidNum > 0} AND user_id = ${uidNum})
+                 OR (${contactStr !== ''} AND mobile_no = ${contactStr})
+                 OR (${emailStr !== null} AND LOWER(email) = ${emailStr || ''})
             `;
         } catch (uErr) {
             console.warn("[AssociateEnrollment] User profile update skipped:", uErr.message);

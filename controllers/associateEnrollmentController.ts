@@ -156,7 +156,7 @@ export async function printAssociateEnrollment(req: Request, res: Response): Pro
  */
 export async function getMyAssociateEnrollment(req: Request, res: Response): Promise<Response> {
   try {
-    const userId = (req as any).user?.user_id;
+    const userId = (req as any).user?.user_id || (req as any).user?.id || (req as any).user?.userId;
     if (!userId) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
@@ -170,6 +170,11 @@ export async function getMyAssociateEnrollment(req: Request, res: Response): Pro
     if (!user) {
       return res.status(404).json({ success: false, message: "User not found" });
     }
+
+    const panVal = user.pan_number ? String(user.pan_number).trim().toUpperCase() : null;
+    const aadharVal = user.aadhar_number ? String(user.aadhar_number).trim() : null;
+    const mobileVal = user.mobile_no ? String(user.mobile_no).trim() : null;
+    const emailVal = user.email ? String(user.email).trim().toLowerCase() : null;
 
     const [enrollment] = await sql`
       SELECT e.*,
@@ -187,10 +192,10 @@ export async function getMyAssociateEnrollment(req: Request, res: Response): Pro
       LEFT JOIN associate_nominee n       ON e.id = n.associate_id
       LEFT JOIN associate_sponsor sp      ON e.id = sp.associate_id
       WHERE (
-        (${user.pan_number || null} IS NOT NULL AND UPPER(e.pan_no) = UPPER(${user.pan_number}))
-        OR (${user.aadhar_number || null} IS NOT NULL AND e.aadhar_no = ${user.aadhar_number})
-        OR (${user.mobile_no || null} IS NOT NULL AND e.contact_no_1 = ${user.mobile_no})
-        OR (${user.email || null} IS NOT NULL AND LOWER(e.email) = LOWER(${user.email}))
+        (${panVal !== null} AND UPPER(e.pan_no) = ${panVal || ''})
+        OR (${aadharVal !== null} AND e.aadhar_no = ${aadharVal || ''})
+        OR (${mobileVal !== null} AND e.contact_no_1 = ${mobileVal || ''})
+        OR (${emailVal !== null} AND LOWER(e.email) = ${emailVal || ''})
       )
       ORDER BY e.created_at DESC
       LIMIT 1
@@ -295,10 +300,10 @@ export async function getAdminAssociateEnrollments(req: Request, res: Response):
           COALESCE(asp.sponsor_name, sp.full_name) AS sponsor_name,
           COALESCE(asp.sponsor_contact, sp.mobile_no) AS sponsor_contact,
           COALESCE(e.category, 'General') AS category,
-          COALESCE(pa.state, u.state, 'Uttar Pradesh') AS perm_state,
-          COALESCE(pa.city, u.city) AS perm_city,
-          COALESCE(pa.state, u.state, 'Uttar Pradesh') AS state,
-          COALESCE(pa.city, u.city) AS city,
+          COALESCE(pa.state, 'Uttar Pradesh') AS perm_state,
+          COALESCE(pa.city, 'Kanpur') AS perm_city,
+          COALESCE(pa.state, 'Uttar Pradesh') AS state,
+          COALESCE(pa.city, 'Kanpur') AS city,
           COALESCE(e.created_at, u.registered_at) AS created_at,
           e.sign_date,
           COALESCE(e.status, 'Pending') AS app_status,
@@ -346,10 +351,10 @@ export async function getAdminAssociateEnrollments(req: Request, res: Response):
           COALESCE(asp.sponsor_name, sp.full_name) AS sponsor_name,
           COALESCE(asp.sponsor_contact, sp.mobile_no) AS sponsor_contact,
           COALESCE(e.category, 'General') AS category,
-          COALESCE(pa.state, u.state, 'Uttar Pradesh') AS perm_state,
-          COALESCE(pa.city, u.city) AS perm_city,
-          COALESCE(pa.state, u.state, 'Uttar Pradesh') AS state,
-          COALESCE(pa.city, u.city) AS city,
+          COALESCE(pa.state, 'Uttar Pradesh') AS perm_state,
+          COALESCE(pa.city, 'Kanpur') AS perm_city,
+          COALESCE(pa.state, 'Uttar Pradesh') AS state,
+          COALESCE(pa.city, 'Kanpur') AS city,
           COALESCE(e.created_at, u.registered_at) AS created_at,
           e.sign_date,
           COALESCE(e.status, 'Pending') AS app_status,
