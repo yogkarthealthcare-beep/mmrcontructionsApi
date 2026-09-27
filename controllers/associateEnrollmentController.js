@@ -6,7 +6,7 @@ import { associateEnrollmentSchema, registerAssociateEnrollment } from "../servi
  */
 export async function createAssociateEnrollment(req, res) {
     try {
-        const userId = req.user?.user_id || "guest";
+        const userId = req.user?.user_id || req.user?.userId || req.user?.id || null;
         const files = req.files;
         // 1. Validate the form body using Zod schema
         const validatedData = associateEnrollmentSchema.parse(req.body);
@@ -18,7 +18,7 @@ export async function createAssociateEnrollment(req, res) {
             const uploadResult = await saveFileToVPS(applicantFile.buffer, {
                 originalName: applicantFile.originalname,
                 module: "associate",
-                entityId: userId.toString(),
+                entityId: (userId || "guest").toString(),
                 subCategory: "enrollments"
             });
             applicantPhotoUrl = uploadResult.url;
@@ -28,13 +28,13 @@ export async function createAssociateEnrollment(req, res) {
             const uploadResult = await saveFileToVPS(nomineeFile.buffer, {
                 originalName: nomineeFile.originalname,
                 module: "associate",
-                entityId: userId.toString(),
+                entityId: (userId || "guest").toString(),
                 subCategory: "enrollments"
             });
             nomineePhotoUrl = uploadResult.url;
         }
         // 3. Register associate via the service layer
-        const result = await registerAssociateEnrollment(validatedData, applicantPhotoUrl, nomineePhotoUrl);
+        const result = await registerAssociateEnrollment(validatedData, applicantPhotoUrl, nomineePhotoUrl, userId);
         return res.status(200).json({
             success: true,
             message: "Associate enrollment submitted successfully.",

@@ -61,93 +61,181 @@ export const associateEnrollmentSchema = z.object({
     sponsorContact: z.string().optional().nullable()
 });
 /**
- * Register a new associate enrollment and related details in a single database transaction.
+ * Register or update an associate enrollment and related details in a single database transaction.
  */
-export async function registerAssociateEnrollment(data, applicantPhotoPath, nomineePhotoPath) {
+export async function registerAssociateEnrollment(data, applicantPhotoPath, nomineePhotoPath, userId = null) {
     const year = new Date().getFullYear();
     let generatedId = "";
     // Perform inside transaction so that failure in any step rolls back everything
     await sql.begin(async (tx) => {
-        // 1. Generate unique chronological Associate ID
-        // Format: MMR-ASC-YYYY-XXXX (where XXXX is a sequential 4-digit number starting at 0001)
-        const [countResult] = await tx `
-      SELECT COUNT(*)::integer as cnt 
-      FROM associate_enrollment 
-      WHERE id LIKE ${`MMR-ASC-${year}-%`}
-    `;
-        const count = (countResult?.cnt || 0) + 1;
-        generatedId = `MMR-ASC-${year}-${String(count).padStart(4, "0")}`;
-        // 2. Insert master: associate_enrollment
-        await tx `
-      INSERT INTO associate_enrollment (
-        id, full_name, dob, gender, father_name, mother_name, spouse_name,
-        contact_no_1, contact_no_2, nationality, residential_status,
-        pan_no, aadhar_no, email, occupation, annual_income, education,
-        category, religion, applicant_photo_path, sign_date,
-        terms_accepted, terms_accepted_at, status
-      ) VALUES (
-        ${generatedId}, ${data.fullName}, ${data.dob}, ${data.gender}, ${data.fatherName || null}, ${data.motherName || null}, ${data.spouseName || null},
-        ${data.contact1}, ${data.contact2 || null}, ${data.nationality}, ${data.residentialStatus || null},
-        ${data.panNo.toUpperCase()}, ${data.aadharNo}, ${data.email || null}, ${data.occupation || null}, ${data.annualIncome || null}, ${data.education || null},
-        ${data.category || null}, ${data.religion || null}, ${applicantPhotoPath}, ${data.signDate || null},
-        ${data.termsAccepted}, NOW(), 'pending'
-      )
-    `;
+        // Check if an enrollment record already exists for this PAN, Aadhar, Mobile, or user_id
+        const [existing] = await tx`
+          SELECT id, applicant_photo_path 
+          FROM associate_enrollment 
+          WHERE UPPER(pan_no) = UPPER(${data.panNo})
+             OR aadhar_no = ${data.aadharNo}
+             OR (${data.contact1} IS NOT NULL AND contact_no_1 = ${data.contact1})
+          LIMIT 1
+        `;
+
+        if (existing) {
+            generatedId = existing.id;
+            const finalApplicantPhoto = applicantPhotoPath || existing.applicant_photo_path || null;
+
+            // Update master record
+            await tx`
+              UPDATE associate_enrollment SET
+                full_name = ${data.fullName},
+                dob = ${data.dob},
+                gender = ${data.gender},
+                father_name = ${data.fatherName || null},
+                mother_name = ${data.motherName || null},
+                spouse_name = ${data.spouseName || null},
+                contact_no_1 = ${data.contact1},
+                contact_no_2 = ${data.contact2 || null},
+                nationality = ${data.nationality || 'Indian'},
+                residential_status = ${data.residentialStatus || null},
+                pan_no = ${data.panNo.toUpperCase()},
+                aadhar_no = ${data.aadharNo},
+                email = ${data.email || null},
+                occupation = ${data.occupation || null},
+                annual_income = ${data.annualIncome || null},
+                education = ${data.education || null},
+                category = ${data.category || null},
+                religion = ${data.religion || null},
+                applicant_photo_path = COALESCE(${finalApplicantPhoto}, applicant_photo_path),
+                sign_date = ${data.signDate || null},
+                terms_accepted = ${data.termsAccepted},
+                terms_accepted_at = NOW(),
+                updated_at = NOW()
+              WHERE id = ${generatedId}
+            `;
+
+            // Refresh child tables
+            await tx`DELETE FROM associate_address WHERE associate_id = ${generatedId}`;
+            await tx`DELETE FROM associate_bank_details WHERE associate_id = ${generatedId}`;
+            await tx`DELETE FROM associate_nominee WHERE associate_id = ${generatedId}`;
+            await tx`DELETE FROM associate_sponsor WHERE associate_id = ${generatedId}`;
+        } else {
+            // 1. Generate unique chronological Associate ID
+            // Format: MMR-ASC-YYYY-XXXX (where XXXX is a sequential 4-digit number starting at 0001)
+            const [maxResult] = await tx`
+              SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM '[0-9]+$') AS INTEGER)), 0) as max_num
+              FROM associate_enrollment 
+              WHERE id LIKE ${`MMR-ASC-${year}-%`}
+            `;
+            const count = (maxResult?.max_num || 0) + 1;
+            generatedId = `MMR-ASC-${year}-${String(count).padStart(4, "0")}`;
+
+            // 2. Insert master: associate_enrollment
+            await tx`
+              INSERT INTO associate_enrollment (
+                id, full_name, dob, gender, father_name, mother_name, spouse_name,
+                contact_no_1, contact_no_2, nationality, residential_status,
+                pan_no, aadhar_no, email, occupation, annual_income, education,
+                category, religion, applicant_photo_path, sign_date,
+                terms_accepted, terms_accepted_at, status
+              ) VALUES (
+                ${generatedId}, ${data.fullName}, ${data.dob}, ${data.gender}, ${data.fatherName || null}, ${data.motherName || null}, ${data.spouseName || null},
+                ${data.contact1}, ${data.contact2 || null}, ${data.nationality || 'Indian'}, ${data.residentialStatus || null},
+                ${data.panNo.toUpperCase()}, ${data.aadharNo}, ${data.email || null}, ${data.occupation || null}, ${data.annualIncome || null}, ${data.education || null},
+                ${data.category || null}, ${data.religion || null}, ${applicantPhotoPath || null}, ${data.signDate || null},
+                ${data.termsAccepted}, NOW(), 'pending'
+              )
+            `;
+        }
+
         // 3. Insert address: permanent & local
         if (data.permAddress) {
-            await tx `
-        INSERT INTO associate_address (
-          associate_id, address_type, local_address, city, state, country, pin_code
-        ) VALUES (
-          ${generatedId}, 'permanent', ${data.permAddress}, ${data.permCity || null}, ${data.permState || null}, ${data.permCountry}, ${data.permPin || null}
-        )
-      `;
+            await tx`
+              INSERT INTO associate_address (
+                associate_id, address_type, local_address, city, state, country, pin_code
+              ) VALUES (
+                ${generatedId}, 'permanent', ${data.permAddress}, ${data.permCity || null}, ${data.permState || null}, ${data.permCountry || 'India'}, ${data.permPin || null}
+              )
+            `;
         }
         if (data.localAddress) {
-            await tx `
-        INSERT INTO associate_address (
-          associate_id, address_type, local_address, city, state, country, pin_code
-        ) VALUES (
-          ${generatedId}, 'local', ${data.localAddress}, ${data.localCity || null}, ${data.localState || null}, ${data.localCountry}, ${data.localPin || null}
-        )
-      `;
+            await tx`
+              INSERT INTO associate_address (
+                associate_id, address_type, local_address, city, state, country, pin_code
+              ) VALUES (
+                ${generatedId}, 'local', ${data.localAddress}, ${data.localCity || null}, ${data.localState || null}, ${data.localCountry || 'India'}, ${data.localPin || null}
+              )
+            `;
         }
+
         // 4. Insert bank details
         if (data.bankName || data.accNo || data.ifsc) {
-            await tx `
-        INSERT INTO associate_bank_details (
-          associate_id, bank_name, account_holder_name, account_no, ifsc_code,
-          micr_code, branch_name, branch_code, swift_code, branch_country
-        ) VALUES (
-          ${generatedId}, ${data.bankName || null}, ${data.accHolder || null}, ${data.accNo || null}, ${data.ifsc || null},
-          ${data.micr || null}, ${data.branchName || null}, ${data.branchCode || null}, ${data.swift || null}, ${data.branchCountry}
-        )
-      `;
+            await tx`
+              INSERT INTO associate_bank_details (
+                associate_id, bank_name, account_holder_name, account_no, ifsc_code,
+                micr_code, branch_name, branch_code, swift_code, branch_country
+              ) VALUES (
+                ${generatedId}, ${data.bankName || null}, ${data.accHolder || null}, ${data.accNo || null}, ${data.ifsc || null},
+                ${data.micr || null}, ${data.branchName || null}, ${data.branchCode || null}, ${data.swift || null}, ${data.branchCountry || 'India'}
+              )
+            `;
         }
+
         // 5. Insert nominee details
         if (data.nomineeName) {
-            await tx `
-        INSERT INTO associate_nominee (
-          associate_id, nominee_name, dob, gender, nationality, residential_status,
-          relationship, pan_name, pan_no, aadhar_name, aadhar_no, address, photo_path
-        ) VALUES (
-          ${generatedId}, ${data.nomineeName}, ${data.nomineeDob || null}, ${data.nomineeGender || null},
-          ${data.nomineeNationality}, ${data.nomineeResStatus || null}, ${data.nomineeRelationship || null},
-          ${data.nomineePanName || null}, ${data.nomineePanNo || null}, ${data.nomineeAadharName || null},
-          ${data.nomineeAadharNo || null}, ${data.nomineeAddress || null}, ${nomineePhotoPath}
-        )
-      `;
+            await tx`
+              INSERT INTO associate_nominee (
+                associate_id, nominee_name, dob, gender, nationality, residential_status,
+                relationship, pan_name, pan_no, aadhar_name, aadhar_no, address, photo_path
+              ) VALUES (
+                ${generatedId}, ${data.nomineeName}, ${data.nomineeDob || null}, ${data.nomineeGender || null},
+                ${data.nomineeNationality || 'Indian'}, ${data.nomineeResStatus || null}, ${data.nomineeRelationship || null},
+                ${data.nomineePanName || null}, ${data.nomineePanNo || null}, ${data.nomineeAadharName || null},
+                ${data.nomineeAadharNo || null}, ${data.nomineeAddress || null}, ${nomineePhotoPath || null}
+              )
+            `;
         }
+
         // 6. Insert sponsor details
         if (data.sponsorName || data.sponsorCode) {
-            await tx `
-        INSERT INTO associate_sponsor (
-          associate_id, sponsor_name, sponsor_code, sponsor_contact
-        ) VALUES (
-          ${generatedId}, ${data.sponsorName || null}, ${data.sponsorCode || null}, ${data.sponsorContact || null}
-        )
-      `;
+            await tx`
+              INSERT INTO associate_sponsor (
+                associate_id, sponsor_name, sponsor_code, sponsor_contact
+              ) VALUES (
+                ${generatedId}, ${data.sponsorName || null}, ${data.sponsorCode || null}, ${data.sponsorContact || null}
+              )
+            `;
+        }
+
+        // 7. Sync profile in users table
+        try {
+            await tx`
+              UPDATE users SET
+                enrollment_status = 'Completed',
+                pan_number = COALESCE(NULLIF(${data.panNo}, ''), pan_number),
+                aadhar_number = COALESCE(NULLIF(${data.aadharNo}, ''), aadhar_number),
+                father_name = COALESCE(NULLIF(${data.fatherName || null}, ''), father_name),
+                mother_name = COALESCE(NULLIF(${data.motherName || null}, ''), mother_name),
+                spouse_name = COALESCE(NULLIF(${data.spouseName || null}, ''), spouse_name),
+                address = COALESCE(NULLIF(${data.permAddress || null}, ''), address),
+                city = COALESCE(NULLIF(${data.permCity || null}, ''), city),
+                state = COALESCE(NULLIF(${data.permState || null}, ''), state),
+                pincode = COALESCE(NULLIF(${data.permPin || null}, ''), pincode),
+                bank_name = COALESCE(NULLIF(${data.bankName || null}, ''), bank_name),
+                account_number = COALESCE(NULLIF(${data.accNo || null}, ''), account_number),
+                ifsc_code = COALESCE(NULLIF(${data.ifsc || null}, ''), ifsc_code),
+                account_holder_name = COALESCE(NULLIF(${data.accHolder || null}, ''), account_holder_name),
+                nominee_name = COALESCE(NULLIF(${data.nomineeName || null}, ''), nominee_name),
+                nominee_relationship = COALESCE(NULLIF(${data.nomineeRelationship || null}, ''), nominee_relationship),
+                sponsor_id = COALESCE(NULLIF(${data.sponsorCode || null}, ''), sponsor_id),
+                sponsor_name = COALESCE(NULLIF(${data.sponsorName || null}, ''), sponsor_name),
+                profile_picture_url = COALESCE(NULLIF(${applicantPhotoPath || null}, ''), profile_picture_url),
+                updated_at = NOW()
+              WHERE (${userId || null} IS NOT NULL AND user_id = ${userId})
+                 OR (${data.contact1} IS NOT NULL AND mobile_no = ${data.contact1})
+                 OR (${data.email || null} IS NOT NULL AND LOWER(email) = LOWER(${data.email}))
+            `;
+        } catch (uErr) {
+            console.warn("[AssociateEnrollment] User profile update skipped:", uErr.message);
         }
     });
+
     return { associateId: generatedId };
 }

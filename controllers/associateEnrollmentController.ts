@@ -8,7 +8,7 @@ import { associateEnrollmentSchema, registerAssociateEnrollment } from "../servi
  */
 export async function createAssociateEnrollment(req: Request, res: Response): Promise<Response> {
   try {
-    const userId = (req as any).user?.user_id || "guest";
+    const userId = (req as any).user?.user_id || (req as any).user?.userId || (req as any).user?.id || null;
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
 
     // 1. Validate the form body using Zod schema
@@ -23,7 +23,7 @@ export async function createAssociateEnrollment(req: Request, res: Response): Pr
       const uploadResult = await saveFileToVPS(applicantFile.buffer, {
         originalName: applicantFile.originalname,
         module: "associate",
-        entityId: userId.toString(),
+        entityId: (userId || "guest").toString(),
         subCategory: "enrollments"
       });
       applicantPhotoUrl = uploadResult.url;
@@ -34,7 +34,7 @@ export async function createAssociateEnrollment(req: Request, res: Response): Pr
       const uploadResult = await saveFileToVPS(nomineeFile.buffer, {
         originalName: nomineeFile.originalname,
         module: "associate",
-        entityId: userId.toString(),
+        entityId: (userId || "guest").toString(),
         subCategory: "enrollments"
       });
       nomineePhotoUrl = uploadResult.url;
@@ -44,7 +44,8 @@ export async function createAssociateEnrollment(req: Request, res: Response): Pr
     const result = await registerAssociateEnrollment(
       validatedData,
       applicantPhotoUrl,
-      nomineePhotoUrl
+      nomineePhotoUrl,
+      userId
     );
 
     return res.status(200).json({
