@@ -4471,7 +4471,7 @@ app.post("/api/auth/register-quick", async (req, res) => {
           INSERT INTO users (
             member_id, user_type, full_name, mobile_no, email, password_hash,
             sponsor_user_id, account_status, email_verified, is_otp_verified,
-            created_at, updated_at
+            registered_at, updated_at
           ) VALUES (
             ${memberId}, ${user_type}, ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
             ${sponsorUserId}, 'Active', true, true,
@@ -7318,13 +7318,13 @@ app.post("/api/associate/customers", verifyUserToken, requireAssociate, async (r
       INSERT INTO users (
         member_id, user_type, full_name, mobile_no, email, password_hash,
         sponsor_user_id, account_status, email_verified, is_otp_verified,
-        created_at, updated_at
+        registered_at, updated_at
       ) VALUES (
         ${memberId}, 'Customer', ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
         ${sponsorUserId}, 'Active', true, true,
         NOW(), NOW()
       )
-      RETURNING user_id, member_id, user_type, full_name, email, mobile_no, account_status, created_at`;
+      RETURNING user_id, member_id, user_type, full_name, email, mobile_no, account_status, registered_at`;
 
     await sql`
       INSERT INTO user_wallets (user_id, balance, total_earned, total_withdrawn)
