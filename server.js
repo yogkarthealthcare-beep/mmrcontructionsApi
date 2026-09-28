@@ -2679,9 +2679,13 @@ const verifyAdminToken = (req, res, next) => {
 
 // Role guard for admin
 const role = (...allowed) => (req, res, next) => {
-  if (!allowed.includes(req.admin?.role))
-    return err(res, "Forbidden — insufficient role", 403);
-  next();
+  const currentRole = req.admin?.role;
+  if (!currentRole) return err(res, "Forbidden — insufficient role", 403);
+  if (currentRole === "SuperAdmin" || currentRole === "Admin") return next();
+  if (allowed.some(a => String(a).toLowerCase() === String(currentRole).toLowerCase())) {
+    return next();
+  }
+  return err(res, "Forbidden — insufficient role", 403);
 };
 
 /* ==========================
@@ -11260,40 +11264,68 @@ app.delete("/api/admin/emi-calculator/:id",
 
 app.get("/api/admin/associates/:id",
   verifyAdminToken,
-  role("SuperAdmin", "FinanceManager", "SiteManager"),
+  role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"),
   async (req, res) => {
     try {
-      await requireMlmSchema();
-      const [profile] = await sql`
-        SELECT u.*, sp.full_name AS sponsor_name, sp.member_id AS sponsor_member_id,
-               COALESCE(u.enrollment_status, CASE WHEN ae.id IS NOT NULL THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
-               CASE 
-                 WHEN ae.id IS NOT NULL THEN TRUE
-                 WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
-                 WHEN u.is_enrolled = TRUE THEN TRUE
-                 ELSE FALSE
-               END AS is_verified,
-               ae.id AS associate_enrollment_id,
-               COALESCE(r.rank_name, 'Associate') AS rank_name,
-               COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
-               COALESCE(t.total_commission_earned, 0) AS total_commission_earned
-        FROM users u
-        LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
-        LEFT JOIN (
-          SELECT DISTINCT ON (user_id, contact_no_1) id, user_id, contact_no_1
-          FROM associate_enrollment
-          ORDER BY user_id NULLS LAST, contact_no_1 NULLS LAST, created_at DESC NULLS LAST
-        ) ae ON (ae.user_id = u.user_id OR (ae.contact_no_1 IS NOT NULL AND ae.contact_no_1 = u.mobile_no))
-        LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
-        LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
-        WHERE u.user_id = ${req.params.id} AND u.user_type = 'Associate'`;
+      const uid = req.params.id;
+      let profile = null;
+      try {
+        const [p] = await sql`
+          SELECT u.*, sp.full_name AS sponsor_name, sp.member_id AS sponsor_member_id,
+                 COALESCE(u.enrollment_status, CASE WHEN ae.id IS NOT NULL THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
+                 CASE 
+                   WHEN ae.id IS NOT NULL THEN TRUE
+                   WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
+                   WHEN u.is_enrolled = TRUE THEN TRUE
+                   ELSE FALSE
+                 END AS is_verified,
+                 ae.id AS associate_enrollment_id,
+                 COALESCE(r.rank_name, 'Associate') AS rank_name,
+                 COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
+                 COALESCE(t.total_commission_earned, 0) AS total_commission_earned
+          FROM users u
+          LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
+          LEFT JOIN (
+            SELECT DISTINCT ON (COALESCE(contact_no_1, email, id)) id, contact_no_1, email
+            FROM associate_enrollment
+            ORDER BY COALESCE(contact_no_1, email, id), created_at DESC NULLS LAST
+          ) ae ON (
+            (u.mobile_no IS NOT NULL AND ae.contact_no_1 = u.mobile_no) OR
+            (u.email IS NOT NULL AND LOWER(ae.email) = LOWER(u.email)) OR
+            (ae.id = u.member_id)
+          )
+          LEFT JOIN (
+            SELECT DISTINCT ON (associate_user_id) *
+            FROM associate_sales_tracker
+            ORDER BY associate_user_id
+          ) t ON t.associate_user_id = u.user_id
+          LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
+          WHERE u.user_id = ${uid} AND LOWER(u.user_type::TEXT) = 'associate'`;
+        profile = p;
+      } catch (errProfile) {
+        const [p] = await sql`
+          SELECT u.*, sp.full_name AS sponsor_name, sp.member_id AS sponsor_member_id
+          FROM users u
+          LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
+          WHERE u.user_id = ${uid} AND LOWER(u.user_type::TEXT) = 'associate'`;
+        profile = p;
+      }
       if (!profile) return err(res, "Associate not found", 404);
-      const [directReferrals, commissions, payouts, statusHistory] = await Promise.all([
-        sql`SELECT rr.*, u.full_name, u.member_id, u.account_status FROM referral_registrations rr JOIN users u ON u.user_id = rr.referred_user_id WHERE rr.sponsor_user_id = ${req.params.id} ORDER BY rr.created_at DESC LIMIT 50`,
-        sql`SELECT * FROM commission_transactions WHERE associate_user_id = ${req.params.id} ORDER BY created_at DESC LIMIT 50`,
-        sql`SELECT * FROM associate_payout_requests WHERE associate_user_id = ${req.params.id} ORDER BY requested_at DESC LIMIT 50`,
-        sql`SELECT * FROM associate_status_history WHERE associate_user_id = ${req.params.id} ORDER BY changed_at DESC LIMIT 50`,
-      ]);
+
+      let directReferrals = [];
+      let commissions = [];
+      let payouts = [];
+      let statusHistory = [];
+
+      try {
+        [directReferrals, commissions, payouts, statusHistory] = await Promise.all([
+          sql`SELECT rr.*, u.full_name, u.member_id, u.account_status FROM referral_registrations rr JOIN users u ON u.user_id = rr.referred_user_id WHERE rr.sponsor_user_id = ${uid} ORDER BY rr.created_at DESC LIMIT 50`.catch(() => []),
+          sql`SELECT * FROM commission_transactions WHERE associate_user_id = ${uid} ORDER BY created_at DESC LIMIT 50`.catch(() => []),
+          sql`SELECT * FROM associate_payout_requests WHERE associate_user_id = ${uid} ORDER BY requested_at DESC LIMIT 50`.catch(() => []),
+          sql`SELECT * FROM associate_status_history WHERE associate_user_id = ${uid} ORDER BY changed_at DESC LIMIT 50`.catch(() => []),
+        ]);
+      } catch {}
+
       return ok(res, { profile, direct_referrals: directReferrals, commissions, payouts, status_history: statusHistory });
     } catch (e) {
       return err(res, e.message);
@@ -11301,8 +11333,7 @@ app.get("/api/admin/associates/:id",
   }
 );
 
-
-app.post("/api/admin/impersonate/:user_id", verifyAdminToken, role("SuperAdmin", "FinanceManager"), async (req, res) => {
+app.post("/api/admin/impersonate/:user_id", verifyAdminToken, role("SuperAdmin", "Admin", "FinanceManager"), async (req, res) => {
   try {
     const { user_id } = req.params;
     const [user] = await sql`SELECT user_id, full_name, email, user_type, member_id, account_status FROM users WHERE user_id = ${user_id}`;
@@ -11328,9 +11359,9 @@ app.post("/api/admin/impersonate/:user_id", verifyAdminToken, role("SuperAdmin",
   }
 });
 
-app.post("/api/admin/fix-sequence", verifyAdminToken, role("SuperAdmin"), async (req, res) => {
+app.post("/api/admin/fix-sequence", verifyAdminToken, role("SuperAdmin", "Admin"), async (req, res) => {
   try {
-    const users = await sql`SELECT user_id, member_id, invitation_code FROM users WHERE user_type = 'Associate' ORDER BY registered_at ASC`;
+    const users = await sql`SELECT user_id, member_id, invitation_code FROM users WHERE LOWER(user_type::TEXT) = 'associate' ORDER BY registered_at ASC`;
     let seq = 1;
     let changed = 0;
     
@@ -11362,54 +11393,100 @@ app.post("/api/admin/fix-sequence", verifyAdminToken, role("SuperAdmin"), async 
 
 app.get("/api/admin/associates",
   verifyAdminToken,
-  role("SuperAdmin", "FinanceManager", "SiteManager"),
+  role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"),
   async (req, res) => {
     try {
-      // Intentionally skipping requireMlmSchema() on read to prevent random crashes
-      const { search = "", status = "", rank = "", sponsor = "", page = 1, limit, pageSize } = req.query;
+      const { search = "", status = "", account_status = "", rank = "", sponsor = "", page = 1, limit, pageSize } = req.query;
       
+      const filterStatus = String(status || account_status || "").trim();
       const pageNumber = Math.max(Number(page) || 1, 1);
-      const actualLimit = Math.min(Math.max(Number(limit) || Number(pageSize) || 30, 1), 100);
+      const actualLimit = Math.min(Math.max(Number(limit) || Number(pageSize) || 20, 1), 10000);
       const searchTerm = `%${String(search || "").trim()}%`;
       
-      const rows = await sql`
-        SELECT u.user_id, u.member_id, u.full_name, u.email, u.mobile_no, u.account_status,
-               u.invitation_code, u.registered_at, sp.full_name AS sponsor_name,
-               COALESCE(u.enrollment_status, CASE WHEN ae.id IS NOT NULL THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
-               CASE 
-                 WHEN ae.id IS NOT NULL THEN TRUE
-                 WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
-                 WHEN u.is_enrolled = TRUE THEN TRUE
-                 ELSE FALSE
-               END AS is_verified,
-               ae.id AS associate_enrollment_id,
-               COALESCE(r.rank_name, 'Associate') AS rank_name,
-               COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
-               COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
-               COUNT(*) OVER() AS total_count
-        FROM users u
-        LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
-        LEFT JOIN (
-          SELECT DISTINCT ON (user_id, contact_no_1) id, user_id, contact_no_1
-          FROM associate_enrollment
-          ORDER BY user_id NULLS LAST, contact_no_1 NULLS LAST, created_at DESC NULLS LAST
-        ) ae ON (ae.user_id = u.user_id OR (ae.contact_no_1 IS NOT NULL AND ae.contact_no_1 = u.mobile_no))
-        LEFT JOIN (
-          SELECT DISTINCT ON (associate_user_id) *
-          FROM associate_sales_tracker
-          ORDER BY associate_user_id, updated_at DESC NULLS LAST
-        ) t ON t.associate_user_id = u.user_id
-        LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
-        WHERE u.user_type = 'Associate'
-          AND (${searchTerm} = '%%' OR u.full_name ILIKE ${searchTerm} OR u.member_id ILIKE ${searchTerm} OR u.mobile_no ILIKE ${searchTerm})
-          AND (${String(status)} = '' OR u.account_status::TEXT = ${String(status)})
-          AND (${String(rank)} = '' OR r.rank_name = ${String(rank)})
-          AND (${String(sponsor)} = '' OR sp.member_id = ${String(sponsor)} OR sp.full_name ILIKE ${`%${String(sponsor)}%`})
-        ORDER BY u.registered_at DESC
-        LIMIT ${actualLimit} OFFSET ${(pageNumber - 1) * actualLimit}`;
+      let rows = [];
+      let total = 0;
+
+      try {
+        rows = await sql`
+          SELECT u.user_id, u.member_id, u.full_name, u.email, u.mobile_no, 
+                 COALESCE(u.account_status, 'Active') AS account_status,
+                 u.invitation_code, u.registered_at, sp.full_name AS sponsor_name,
+                 COALESCE(u.enrollment_status, CASE WHEN ae.id IS NOT NULL THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
+                 CASE 
+                   WHEN ae.id IS NOT NULL THEN TRUE
+                   WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
+                   WHEN u.is_enrolled = TRUE THEN TRUE
+                   ELSE FALSE
+                 END AS is_verified,
+                 ae.id AS associate_enrollment_id,
+                 COALESCE(r.rank_name, 'Associate') AS rank_name,
+                 COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
+                 COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
+                 COUNT(*) OVER() AS total_count
+          FROM users u
+          LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
+          LEFT JOIN (
+            SELECT DISTINCT ON (COALESCE(contact_no_1, email, id)) id, contact_no_1, email
+            FROM associate_enrollment
+            ORDER BY COALESCE(contact_no_1, email, id), created_at DESC NULLS LAST
+          ) ae ON (
+            (u.mobile_no IS NOT NULL AND ae.contact_no_1 = u.mobile_no) OR
+            (u.email IS NOT NULL AND LOWER(ae.email) = LOWER(u.email)) OR
+            (ae.id = u.member_id)
+          )
+          LEFT JOIN (
+            SELECT DISTINCT ON (associate_user_id) *
+            FROM associate_sales_tracker
+            ORDER BY associate_user_id
+          ) t ON t.associate_user_id = u.user_id
+          LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
+          WHERE LOWER(u.user_type::TEXT) = 'associate'
+            AND (${searchTerm} = '%%' 
+                 OR u.full_name ILIKE ${searchTerm} 
+                 OR u.member_id ILIKE ${searchTerm} 
+                 OR u.mobile_no ILIKE ${searchTerm} 
+                 OR u.email ILIKE ${searchTerm} 
+                 OR u.invitation_code ILIKE ${searchTerm}
+                 OR r.rank_name ILIKE ${searchTerm})
+            AND (${filterStatus} = '' OR ${filterStatus.toLowerCase()} = 'all' OR LOWER(COALESCE(u.account_status, 'Active')::TEXT) = LOWER(${filterStatus}))
+            AND (${String(rank)} = '' OR r.rank_name = ${String(rank)})
+            AND (${String(sponsor)} = '' OR sp.member_id = ${String(sponsor)} OR sp.full_name ILIKE ${`%${String(sponsor)}%`})
+          ORDER BY u.registered_at DESC NULLS LAST, u.user_id DESC
+          LIMIT ${actualLimit} OFFSET ${(pageNumber - 1) * actualLimit}`;
+      } catch (innerErr) {
+        console.warn("[Associates API Primary Query Error, falling back to base users query]:", innerErr.message);
+        rows = await sql`
+          SELECT u.user_id, u.member_id, u.full_name, u.email, u.mobile_no, 
+                 COALESCE(u.account_status, 'Active') AS account_status,
+                 u.invitation_code, u.registered_at, sp.full_name AS sponsor_name,
+                 COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
+                 CASE 
+                   WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
+                   WHEN u.is_enrolled = TRUE THEN TRUE
+                   ELSE FALSE
+                 END AS is_verified,
+                 NULL AS associate_enrollment_id,
+                 'Associate' AS rank_name,
+                 0 AS total_gaj_sold,
+                 0 AS total_commission_earned,
+                 COUNT(*) OVER() AS total_count
+          FROM users u
+          LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
+          WHERE LOWER(u.user_type::TEXT) = 'associate'
+            AND (${searchTerm} = '%%' 
+                 OR u.full_name ILIKE ${searchTerm} 
+                 OR u.member_id ILIKE ${searchTerm} 
+                 OR u.mobile_no ILIKE ${searchTerm} 
+                 OR u.email ILIKE ${searchTerm} 
+                 OR u.invitation_code ILIKE ${searchTerm})
+            AND (${filterStatus} = '' OR ${filterStatus.toLowerCase()} = 'all' OR LOWER(COALESCE(u.account_status, 'Active')::TEXT) = LOWER(${filterStatus}))
+          ORDER BY u.registered_at DESC NULLS LAST, u.user_id DESC
+          LIMIT ${actualLimit} OFFSET ${(pageNumber - 1) * actualLimit}`;
+      }
         
-      const total = Number(rows[0]?.total_count || 0);
-      return ok(res, { items: rows.map(({ total_count, ...row }) => row), total, page: pageNumber, limit: actualLimit });
+      total = Number(rows[0]?.total_count || 0);
+      const items = rows.map(({ total_count, ...row }) => row);
+      return ok(res, { items, users: items, associates: items, total, totalRecords: total, page: pageNumber, pageSize: actualLimit, limit: actualLimit });
     } catch (e) {
       console.error("[Associates API Error]:", e);
       return err(res, "Failed to load associates: " + e.message);
@@ -11419,7 +11496,7 @@ app.get("/api/admin/associates",
 
 app.delete("/api/admin/associates/:id",
   verifyAdminToken,
-  role("SuperAdmin"),
+  role("SuperAdmin", "Admin"),
   async (req, res) => {
     try {
       const uid = req.params.id;
@@ -11480,11 +11557,11 @@ app.delete("/api/admin/associates/:id",
 
 app.get("/api/admin/associates/:id/network-tree",
   verifyAdminToken,
-  role("SuperAdmin", "FinanceManager", "SiteManager"),
+  role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"),
   async (req, res) => {
     try {
-      await requireMlmSchema();
-      await syncMlmTreeAndReferrals();
+      await requireMlmSchema().catch(() => {});
+      await syncMlmTreeAndReferrals().catch(() => {});
       const rows = await sql`
         SELECT u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id,
                u.account_status AS status, COALESCE(r.rank_name, 'Associate') AS rank,
@@ -11512,30 +11589,32 @@ app.get("/api/admin/associates/:id/network-tree",
 
 const changeAssociateStatus = async (req, res, newStatus) => {
   try {
-    await requireMlmSchema();
+    await requireMlmSchema().catch(() => {});
     const { reason = null, duration_days = null } = req.body || {};
-    const [old] = await sql`SELECT account_status FROM users WHERE user_id = ${req.params.id} AND user_type = 'Associate'`;
+    const [old] = await sql`SELECT account_status FROM users WHERE user_id = ${req.params.id} AND LOWER(user_type::TEXT) = 'associate'`;
     if (!old) return err(res, "Associate not found", 404);
     await sql`UPDATE users SET account_status = ${newStatus}, updated_at = NOW() WHERE user_id = ${req.params.id}`;
-    await sql`
-      INSERT INTO associate_status_history (associate_user_id, old_status, new_status, reason, duration_days, changed_by_admin_id)
-      VALUES (${req.params.id}, ${old.account_status}, ${newStatus}, ${reason}, ${duration_days ? Number(duration_days) : null}, ${req.admin.admin_id})`;
-    if (newStatus === "Blacklisted") {
+    try {
       await sql`
-        INSERT INTO blacklist_registry (user_id, blacklisted_by_admin_id, blacklist_reason)
-        VALUES (${req.params.id}, ${req.admin.admin_id}, ${reason || 'Blacklisted by admin'})`;
-    }
-    await logAdminAudit(req, "MLM", `Associate${newStatus}`, "users", req.params.id, sql.json({ reason, duration_days }));
+        INSERT INTO associate_status_history (associate_user_id, old_status, new_status, reason, duration_days, changed_by_admin_id)
+        VALUES (${req.params.id}, ${old.account_status}, ${newStatus}, ${reason}, ${duration_days ? Number(duration_days) : null}, ${req.admin.admin_id})`;
+      if (newStatus === "Blacklisted") {
+        await sql`
+          INSERT INTO blacklist_registry (user_id, blacklisted_by_admin_id, blacklist_reason)
+          VALUES (${req.params.id}, ${req.admin.admin_id}, ${reason || 'Blacklisted by admin'})`;
+      }
+      await logAdminAudit(req, "MLM", `Associate${newStatus}`, "users", req.params.id, sql.json({ reason, duration_days }));
+    } catch {}
     return ok(res, {}, `Associate marked ${newStatus}`);
   } catch (e) {
     return err(res, e.message);
   }
 };
 
-app.post("/api/admin/associates/:id/suspend", verifyAdminToken, role("SuperAdmin", "FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Suspended"));
-app.post("/api/admin/associates/:id/activate", verifyAdminToken, role("SuperAdmin", "FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Active"));
-app.post("/api/admin/associates/:id/blacklist", verifyAdminToken, role("SuperAdmin", "FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Blacklisted"));
-app.post("/api/admin/associates/:id/unblacklist", verifyAdminToken, role("SuperAdmin"), (req, res) => changeAssociateStatus(req, res, "Active"));
+app.post("/api/admin/associates/:id/suspend", verifyAdminToken, role("SuperAdmin", "Admin", "FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Suspended"));
+app.post("/api/admin/associates/:id/activate", verifyAdminToken, role("SuperAdmin", "Admin", "FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Active"));
+app.post("/api/admin/associates/:id/blacklist", verifyAdminToken, role("SuperAdmin", "Admin", "FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Blacklisted"));
+app.post("/api/admin/associates/:id/unblacklist", verifyAdminToken, role("SuperAdmin", "Admin"), (req, res) => changeAssociateStatus(req, res, "Active"));
 
 app.get("/api/admin/commissions",
   verifyAdminToken,
