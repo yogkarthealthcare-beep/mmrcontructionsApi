@@ -7355,9 +7355,13 @@ app.post("/api/associate/customers", verifyUserToken, requireAssociate, async (r
       await syncMlmTreeAndReferrals();
     } catch (_) {}
 
-    await sql`
-      INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-      VALUES ('Associate', ${sponsorUserId}, ${sponsor.full_name}, 'TeamManagement', 'CustomerEnrolled', 'users', ${createdUser.user_id})`;
+    try {
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+        VALUES ('User', ${sponsorUserId}, ${sponsor.full_name}, 'TeamManagement', 'CustomerEnrolled', 'users', ${createdUser.user_id})`;
+    } catch (auditErr) {
+      console.warn('[associate add-customer] audit_log warning:', auditErr.message);
+    }
 
     return ok(res, {
       user_id: createdUser.user_id,
@@ -7644,9 +7648,13 @@ app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (re
     }
 
     // ── 7. Audit Log & Customer Notification ──
-    await sql`
-      INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-      VALUES ('Associate', ${associateId}, ${associate?.full_name || 'Associate'}, 'PlotBooking', 'BookingInitiated', 'bookings', ${booking.booking_id})`;
+    try {
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+        VALUES ('User', ${associateId}, ${associate?.full_name || 'Associate'}, 'PlotBooking', 'BookingInitiated', 'bookings', ${booking.booking_id})`;
+    } catch (auditErr) {
+      console.warn('[associate booking] audit_log warning:', auditErr.message);
+    }
 
     await addUserNotification({
       userId: teamMember.user_id,
