@@ -4483,9 +4483,14 @@ app.post("/api/auth/register-quick", async (req, res) => {
           )
           RETURNING user_id, member_id, user_type, full_name, email, mobile_no`;
 
-        await sql`
-          INSERT INTO user_wallets (user_id, balance, total_earned, total_withdrawn)
-          VALUES (${createdUser.user_id}, 0, 0, 0)`;
+        try {
+          await sql`
+            INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
+            VALUES (${createdUser.user_id}, ${user_type || 'Customer'}, 0, 0, 0, 0, 0)
+            ON CONFLICT (user_id) DO NOTHING`;
+        } catch (wErr) {
+          console.warn('[register] user_wallets warning:', wErr.message);
+        };
         
         await sql`
           INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
@@ -6413,7 +6418,7 @@ app.post("/api/emi/:emiId/pay-online", verifyUserToken, async (req, res) => {
           UPDATE user_wallets SET
             available_balance = available_balance - ${payableAmount},
             updated_at = NOW()
-          WHERE wallet_id = ${wallet.wallet_id}
+          WHERE (id = ${wallet.id || wallet.wallet_id} OR user_id = ${userId})
         `;
 
         // Log wallet debit transaction
@@ -7330,10 +7335,14 @@ app.post("/api/associate/customers", verifyUserToken, requireAssociate, async (r
       )
       RETURNING user_id, member_id, user_type, full_name, email, mobile_no, account_status, registered_at`;
 
-    await sql`
-      INSERT INTO user_wallets (user_id, balance, total_earned, total_withdrawn)
-      VALUES (${createdUser.user_id}, 0, 0, 0)
-      ON CONFLICT (user_id) DO NOTHING`;
+    try {
+      await sql`
+        INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
+        VALUES (${createdUser.user_id}, 'Customer', 0, 0, 0, 0, 0)
+        ON CONFLICT (user_id) DO NOTHING`;
+    } catch (wErr) {
+      console.warn('[associate add-customer] user_wallets warning:', wErr.message);
+    };
 
     try {
       await sql`
@@ -8588,10 +8597,14 @@ app.post("/api/admin/associates",
       }
 
       // Initialize wallet
-      await sql`
-        INSERT INTO user_wallets (user_id, balance, total_earned, total_withdrawn, locked_balance, is_frozen)
-        VALUES (${associate.user_id}, 0, 0, 0, 0, FALSE)
-        ON CONFLICT (user_id) DO NOTHING`;
+      try {
+        await sql`
+          INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
+          VALUES (${associate.user_id}, 'Associate', 0, 0, 0, 0, 0)
+          ON CONFLICT (user_id) DO NOTHING`;
+      } catch (wErr) {
+        console.warn('[admin add-associate] user_wallets warning:', wErr.message);
+      };
 
       // Assign initial rank tracker
       const [rankObj] = await sql`SELECT rank_id FROM associate_ranks WHERE rank_name = ${rankName} LIMIT 1`;
