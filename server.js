@@ -1636,30 +1636,48 @@ const ensureAssociateReferralLink = async (req, associate) => {
 const syncMlmTreeAndReferrals = async () => {
   try {
     await requireMlmSchema();
+
+    // 1. Self closure (depth 0)
     await sql`
       INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
       SELECT user_id, user_id, 0 FROM users
       ON CONFLICT (ancestor_user_id, descendant_user_id) DO NOTHING`;
 
+    // 2. Multi-level ancestors using Recursive CTE
+    await sql`
+      WITH RECURSIVE hierarchy AS (
+        SELECT sponsor_user_id AS ancestor_user_id, user_id AS descendant_user_id, 1 AS depth
+        FROM users
+        WHERE sponsor_user_id IS NOT NULL AND sponsor_user_id <> user_id
+        
+        UNION ALL
+        
+        SELECT u.sponsor_user_id AS ancestor_user_id, h.descendant_user_id, h.depth + 1
+        FROM users u
+        JOIN hierarchy h ON u.user_id = h.ancestor_user_id
+        WHERE u.sponsor_user_id IS NOT NULL AND u.sponsor_user_id <> u.user_id
+          AND h.depth < 30
+      )
+      INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+      SELECT ancestor_user_id, descendant_user_id, depth
+      FROM hierarchy
+      ON CONFLICT (ancestor_user_id, descendant_user_id) DO NOTHING`;
+
+    // 3. Ensure referral_registrations are synced for all sponsored users
+    await sql`
+      INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
+      SELECT sponsor_user_id, user_id, 'Approved', NOW()
+      FROM users
+      WHERE sponsor_user_id IS NOT NULL AND sponsor_user_id <> user_id
+      ON CONFLICT (referred_user_id) DO UPDATE SET 
+        status = 'Approved',
+        sponsor_user_id = EXCLUDED.sponsor_user_id,
+        approved_at = COALESCE(referral_registrations.approved_at, NOW())`;
+
+    // 4. Ensure mlm_network levels are updated
     const sponsoredUsers = await sql`
-      SELECT user_id, sponsor_user_id, invitation_code FROM users WHERE sponsor_user_id IS NOT NULL`;
-
+      SELECT user_id, sponsor_user_id FROM users WHERE sponsor_user_id IS NOT NULL AND sponsor_user_id <> user_id`;
     for (const u of sponsoredUsers) {
-      try {
-        const [existingRef] = await sql`SELECT id FROM referral_registrations WHERE referred_user_id = ${u.user_id} LIMIT 1`;
-        if (existingRef) {
-          await sql`
-            UPDATE referral_registrations
-            SET status = 'Approved', approved_at = NOW(), sponsor_user_id = COALESCE(sponsor_user_id, ${u.sponsor_user_id})
-            WHERE referred_user_id = ${u.user_id}`;
-        } else {
-          await sql`
-            INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
-            VALUES (${u.sponsor_user_id}, ${u.user_id}, 'Approved', NOW())
-            ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
-        }
-      } catch (e) {}
-
       try {
         const [existingNet] = await sql`SELECT id FROM mlm_network WHERE associate_user_id = ${u.user_id} LIMIT 1`;
         if (!existingNet) {
@@ -1669,22 +1687,6 @@ const syncMlmTreeAndReferrals = async () => {
               COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${u.sponsor_user_id}), 0) + 1)
             ON CONFLICT (associate_user_id) DO NOTHING`;
         }
-      } catch (e) {}
-
-      try {
-        await sql`
-          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-          VALUES (${u.sponsor_user_id}, ${u.user_id}, 1)
-          ON CONFLICT (ancestor_user_id, descendant_user_id) DO NOTHING`;
-      } catch (e) {}
-
-      try {
-        await sql`
-          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-          SELECT ancestor_user_id, ${u.user_id}, depth + 1
-          FROM mlm_tree_closure
-          WHERE descendant_user_id = ${u.sponsor_user_id}
-          ON CONFLICT (ancestor_user_id, descendant_user_id) DO NOTHING`;
       } catch (e) {}
     }
   } catch (err) {
@@ -6967,21 +6969,30 @@ app.get("/api/associate/network", verifyUserToken, requireAssociate, async (req,
   try {
     await syncMlmTreeAndReferrals();
     const network = await sql`
+      WITH downline AS (
+        SELECT descendant_user_id AS user_id, depth
+        FROM mlm_tree_closure
+        WHERE ancestor_user_id = ${req.user.user_id} AND depth > 0
+        UNION
+        SELECT user_id, 1 AS depth
+        FROM users
+        WHERE sponsor_user_id = ${req.user.user_id}
+      )
       SELECT u.user_id, u.member_id, u.full_name, u.mobile_no,
-             u.email, u.sponsor_user_id, u.account_status, u.registered_at,
+             u.email, u.user_type, u.sponsor_user_id, u.account_status, u.registered_at,
              COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
              COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
              COALESCE((
                SELECT SUM(c.net_amount) FROM commission_transactions c
                WHERE c.associate_user_id = u.user_id AND c.commission_status = 'Pending'
              ), 0) AS pending_commission,
-             c.depth AS level
-      FROM mlm_tree_closure c
-      JOIN users u ON c.descendant_user_id = u.user_id
+             MIN(d.depth) AS level
+      FROM downline d
+      JOIN users u ON d.user_id = u.user_id
       LEFT JOIN associate_sales_tracker t ON u.user_id = t.associate_user_id
-      WHERE c.ancestor_user_id = ${req.user.user_id}
-        AND c.depth > 0
-      ORDER BY c.depth, u.registered_at DESC`;
+      WHERE u.user_id <> ${req.user.user_id}
+      GROUP BY u.user_id, u.member_id, u.full_name, u.mobile_no, u.email, u.user_type, u.sponsor_user_id, u.account_status, u.registered_at, t.total_gaj_sold, t.total_commission_earned
+      ORDER BY MIN(d.depth), u.registered_at DESC`;
 
     return ok(res, network);
   } catch (e) {
@@ -7185,25 +7196,53 @@ app.get("/api/associate/network/tree", verifyUserToken, requireAssociate, async 
   try {
     await requireMlmSchema();
     await syncMlmTreeAndReferrals();
-    const rows = await sql`
+
+    // 1. Fetch authenticated Associate profile as the root node
+    const [rootUser] = await sql`
       SELECT u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id,
              u.account_status AS status, COALESCE(r.rank_name, 'Associate') AS rank,
              COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
              COALESCE(t.total_commission_earned, 0) AS commission_earned
-      FROM mlm_tree_closure c
-      JOIN users u ON u.user_id = c.descendant_user_id
+      FROM users u
       LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
       LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
-      WHERE c.ancestor_user_id = ${req.user.user_id}
-      ORDER BY c.depth, u.full_name`;
+      WHERE u.user_id = ${req.user.user_id}
+      LIMIT 1`;
+
+    // 2. Query downline combining mlm_tree_closure with direct sponsors
+    const rows = await sql`
+      WITH downline AS (
+        SELECT descendant_user_id AS user_id, depth
+        FROM mlm_tree_closure
+        WHERE ancestor_user_id = ${req.user.user_id} AND depth > 0
+        UNION
+        SELECT user_id, 1 AS depth
+        FROM users
+        WHERE sponsor_user_id = ${req.user.user_id}
+      )
+      SELECT u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id,
+             u.account_status AS status, COALESCE(r.rank_name, 'Associate') AS rank,
+             COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
+             COALESCE(t.total_commission_earned, 0) AS commission_earned,
+             MIN(d.depth) AS depth
+      FROM downline d
+      JOIN users u ON u.user_id = d.user_id
+      LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
+      LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
+      WHERE u.user_id <> ${req.user.user_id}
+      GROUP BY u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id, u.account_status, r.rank_name, t.total_gaj_sold, t.total_commission_earned
+      ORDER BY MIN(d.depth), u.full_name`;
+
+    const rootNode = rootUser ? { ...rootUser, children: [] } : { user_id: req.user.user_id, member_id: `MMR${req.user.user_id}`, full_name: req.user.full_name || 'Associate', children: [] };
     const byId = new Map(rows.map(row => [row.user_id, { ...row, children: [] }]));
-    const root = byId.get(req.user.user_id) || { children: [] };
-    for (const node of byId.values()) {
-      if (node.user_id === req.user.user_id) continue;
+    byId.set(req.user.user_id, rootNode);
+
+    for (const node of rows) {
+      const nodeObj = byId.get(node.user_id);
       const parent = byId.get(node.sponsor_user_id);
-      (parent || root).children.push(node);
+      (parent || rootNode).children.push(nodeObj);
     }
-    return ok(res, root);
+    return ok(res, rootNode);
   } catch (e) {
     return err(res, e.message);
   }
@@ -7448,8 +7487,8 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
         u.account_status,
         u.sponsor_user_id,
         u.registered_at,
-        u.created_at,
-        d.depth AS level,
+        COALESCE(u.registered_at, u.updated_at, NOW()) AS created_at,
+        MIN(d.depth) AS level,
         -- Booking details
         lb.booking_id,
         lb.booking_serial,
@@ -7477,14 +7516,15 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
       LEFT JOIN latest_bookings lb ON u.user_id = lb.user_id
       LEFT JOIN invoice_totals it ON u.user_id = it.user_id
       LEFT JOIN enrollment_data ed ON u.user_id = ed.user_id
+      WHERE u.user_id <> ${associateId}
       GROUP BY
         u.user_id, u.member_id, u.full_name, u.mobile_no, u.email, u.user_type,
-        u.account_status, u.sponsor_user_id, u.registered_at, u.created_at, d.depth,
+        u.account_status, u.sponsor_user_id, u.registered_at, u.updated_at,
         lb.booking_id, lb.booking_serial, lb.plot_id, lb.plot_number, lb.plot_area,
         lb.site_id, lb.site_name, lb.booking_status, lb.payment_type, lb.advance_amount,
         lb.base_price, lb.booking_date, it.total_invoiced, it.total_paid, it.total_balance,
         it.invoice_count, ed.enrollment_id, ed.application_no
-      ORDER BY d.depth ASC, u.created_at DESC`;
+      ORDER BY MIN(d.depth) ASC, u.registered_at DESC`;
 
     return ok(res, members);
   } catch (e) {
