@@ -11276,7 +11276,6 @@ app.get("/api/admin/associates/:id",
                  CASE 
                    WHEN ae.id IS NOT NULL THEN TRUE
                    WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
-                   WHEN u.is_enrolled = TRUE THEN TRUE
                    ELSE FALSE
                  END AS is_verified,
                  ae.id AS associate_enrollment_id,
@@ -11416,7 +11415,6 @@ app.get("/api/admin/associates",
                  CASE 
                    WHEN ae.id IS NOT NULL THEN TRUE
                    WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
-                   WHEN u.is_enrolled = TRUE THEN TRUE
                    ELSE FALSE
                  END AS is_verified,
                  ae.id AS associate_enrollment_id,
@@ -11464,7 +11462,6 @@ app.get("/api/admin/associates",
                  COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
                  CASE 
                    WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
-                   WHEN u.is_enrolled = TRUE THEN TRUE
                    ELSE FALSE
                  END AS is_verified,
                  NULL AS associate_enrollment_id,
