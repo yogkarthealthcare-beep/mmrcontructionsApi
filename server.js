@@ -11285,20 +11285,21 @@ app.get("/api/admin/associates/:id",
                  COALESCE(t.total_commission_earned, 0) AS total_commission_earned
           FROM users u
           LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
-          LEFT JOIN (
-            SELECT DISTINCT ON (COALESCE(contact_no_1, email, id)) id, contact_no_1, email
-            FROM associate_enrollment
-            ORDER BY COALESCE(contact_no_1, email, id), created_at DESC NULLS LAST
-          ) ae ON (
-            (u.mobile_no IS NOT NULL AND ae.contact_no_1 = u.mobile_no) OR
-            (u.email IS NOT NULL AND LOWER(ae.email) = LOWER(u.email)) OR
-            (ae.id = u.member_id)
-          )
-          LEFT JOIN (
-            SELECT DISTINCT ON (associate_user_id) *
-            FROM associate_sales_tracker
-            ORDER BY associate_user_id
-          ) t ON t.associate_user_id = u.user_id
+          LEFT JOIN LATERAL (
+            SELECT ae_sub.id, ae_sub.contact_no_1, ae_sub.email
+            FROM associate_enrollment ae_sub
+            WHERE (u.mobile_no IS NOT NULL AND ae_sub.contact_no_1 = u.mobile_no)
+               OR (u.email IS NOT NULL AND LOWER(ae_sub.email) = LOWER(u.email))
+               OR (ae_sub.id = u.member_id)
+            ORDER BY ae_sub.created_at DESC NULLS LAST
+            LIMIT 1
+          ) ae ON true
+          LEFT JOIN LATERAL (
+            SELECT t_sub.current_rank_id, t_sub.total_gaj_sold, t_sub.total_commission_earned
+            FROM associate_sales_tracker t_sub
+            WHERE t_sub.associate_user_id = u.user_id
+            LIMIT 1
+          ) t ON true
           LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
           WHERE u.user_id = ${uid} AND LOWER(u.user_type::TEXT) = 'associate'`;
         profile = p;
@@ -11425,20 +11426,21 @@ app.get("/api/admin/associates",
                  COUNT(*) OVER() AS total_count
           FROM users u
           LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
-          LEFT JOIN (
-            SELECT DISTINCT ON (COALESCE(contact_no_1, email, id)) id, contact_no_1, email
-            FROM associate_enrollment
-            ORDER BY COALESCE(contact_no_1, email, id), created_at DESC NULLS LAST
-          ) ae ON (
-            (u.mobile_no IS NOT NULL AND ae.contact_no_1 = u.mobile_no) OR
-            (u.email IS NOT NULL AND LOWER(ae.email) = LOWER(u.email)) OR
-            (ae.id = u.member_id)
-          )
-          LEFT JOIN (
-            SELECT DISTINCT ON (associate_user_id) *
-            FROM associate_sales_tracker
-            ORDER BY associate_user_id
-          ) t ON t.associate_user_id = u.user_id
+          LEFT JOIN LATERAL (
+            SELECT ae_sub.id, ae_sub.contact_no_1, ae_sub.email
+            FROM associate_enrollment ae_sub
+            WHERE (u.mobile_no IS NOT NULL AND ae_sub.contact_no_1 = u.mobile_no)
+               OR (u.email IS NOT NULL AND LOWER(ae_sub.email) = LOWER(u.email))
+               OR (ae_sub.id = u.member_id)
+            ORDER BY ae_sub.created_at DESC NULLS LAST
+            LIMIT 1
+          ) ae ON true
+          LEFT JOIN LATERAL (
+            SELECT t_sub.current_rank_id, t_sub.total_gaj_sold, t_sub.total_commission_earned
+            FROM associate_sales_tracker t_sub
+            WHERE t_sub.associate_user_id = u.user_id
+            LIMIT 1
+          ) t ON true
           LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
           WHERE LOWER(u.user_type::TEXT) = 'associate'
             AND (${searchTerm} = '%%' 
