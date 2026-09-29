@@ -37,6 +37,7 @@ import { runHistoricalPaymentMigration } from './services/unifiedPaymentMigratio
 import fileStorageService, { saveFileToVPS, deleteFileFromStorage, getStorageRoot } from "./services/fileStorage.service.js";
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
+import { getVersionInfo } from "./services/version.service.js";
 import GatewayFactory from "./payment/GatewayFactory.js";
 import { ensureEmiSchedulesForBooking, ensureInvoiceForEmi, ensureReceiptForEmi } from "./services/emi.service.js";
 
@@ -5391,7 +5392,7 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
     const [user] = await sql`
       SELECT u.user_id,
              COALESCE(NULLIF(TRIM(u.member_id), ''), NULLIF(TRIM(u.invitation_code), ''), NULLIF(TRIM(ces.application_no), ''), ('MMR' || LPAD(u.user_id::text, 5, '0'))) AS member_id,
-             COALESCE(NULLIF(TRIM(u.user_type::text), ''), CASE WHEN u.is_associate THEN 'Associate' ELSE 'Customer' END) AS user_type,
+             COALESCE(NULLIF(TRIM(u.user_type::text), ''), 'Customer') AS user_type,
              COALESCE(NULLIF(TRIM(u.full_name), ''), NULLIF(TRIM(ces.applicant_name), '')) AS full_name,
              COALESCE(u.date_of_birth, ces.date_of_birth) AS date_of_birth,
              COALESCE(NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(ces.gender), '')) AS gender,
