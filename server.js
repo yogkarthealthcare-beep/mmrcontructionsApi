@@ -5390,24 +5390,24 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
   try {
     const [user] = await sql`
       SELECT u.user_id,
-             COALESCE(NULLIF(TRIM(u.member_id), ''), NULLIF(TRIM(u.invitation_code), ''), NULLIF(TRIM(ces.application_no), ''), NULLIF(TRIM(ae.application_no), ''), ('MMR' || LPAD(u.user_id::text, 5, '0'))) AS member_id,
+             COALESCE(NULLIF(TRIM(u.member_id), ''), NULLIF(TRIM(u.invitation_code), ''), NULLIF(TRIM(ces.application_no), ''), ('MMR' || LPAD(u.user_id::text, 5, '0'))) AS member_id,
              COALESCE(NULLIF(TRIM(u.user_type), ''), CASE WHEN u.is_associate THEN 'Associate' ELSE 'Customer' END) AS user_type,
-             COALESCE(NULLIF(TRIM(u.full_name), ''), NULLIF(TRIM(ces.applicant_name), ''), NULLIF(TRIM(ae.full_name), '')) AS full_name,
-             COALESCE(u.date_of_birth, ces.date_of_birth, ae.date_of_birth) AS date_of_birth,
-             COALESCE(NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(ces.gender), ''), NULLIF(TRIM(ae.gender), '')) AS gender,
-             COALESCE(NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(ces.fh_name), ''), NULLIF(TRIM(ae.father_name), '')) AS father_name,
-             COALESCE(NULLIF(TRIM(u.mother_name), ''), NULLIF(TRIM(ae.mother_name), '')) AS mother_name,
-             COALESCE(NULLIF(TRIM(u.spouse_name), ''), NULLIF(TRIM(ces.co_applicant_name), ''), NULLIF(TRIM(ae.spouse_name), '')) AS spouse_name,
-             COALESCE(NULLIF(TRIM(u.mobile_no), ''), NULLIF(TRIM(ces.mobile_1), ''), NULLIF(TRIM(ae.mobile_no), '')) AS mobile_no,
-             COALESCE(NULLIF(TRIM(u.alternate_mobile), ''), NULLIF(TRIM(ces.mobile_2), ''), NULLIF(TRIM(ces.co_mobile), ''), NULLIF(TRIM(ae.alternate_mobile), '')) AS alternate_mobile,
-             COALESCE(NULLIF(TRIM(u.email), ''), NULLIF(TRIM(ces.email_1), ''), NULLIF(TRIM(ces.co_email), ''), NULLIF(TRIM(ae.email), '')) AS email,
-             COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(ces.pan_no), ''), NULLIF(TRIM(ae.pan_number), '')) AS pan_number,
-             COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(ces.aadhar_no), ''), NULLIF(TRIM(ae.aadhar_number), '')) AS aadhar_number,
+             COALESCE(NULLIF(TRIM(u.full_name), ''), NULLIF(TRIM(ces.applicant_name), '')) AS full_name,
+             COALESCE(u.date_of_birth, ces.date_of_birth) AS date_of_birth,
+             COALESCE(NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(ces.gender), '')) AS gender,
+             COALESCE(NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(ces.fh_name), '')) AS father_name,
+             u.mother_name,
+             COALESCE(NULLIF(TRIM(u.spouse_name), ''), NULLIF(TRIM(ces.co_applicant_name), '')) AS spouse_name,
+             COALESCE(NULLIF(TRIM(u.mobile_no), ''), NULLIF(TRIM(ces.mobile_1), '')) AS mobile_no,
+             COALESCE(NULLIF(TRIM(u.alternate_mobile), ''), NULLIF(TRIM(ces.mobile_2), ''), NULLIF(TRIM(ces.co_mobile), '')) AS alternate_mobile,
+             COALESCE(NULLIF(TRIM(u.email), ''), NULLIF(TRIM(ces.email_1), ''), NULLIF(TRIM(ces.co_email), '')) AS email,
+             COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(ces.pan_no), '')) AS pan_number,
+             COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(ces.aadhar_no), '')) AS aadhar_number,
              COALESCE(u.account_status, 'Active') AS account_status,
              u.email_verified, u.is_otp_verified,
-             COALESCE(u.enrollment_status, CASE WHEN ces.id IS NOT NULL OR ae.id IS NOT NULL THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
-             CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted') OR ces.id IS NOT NULL OR ae.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_verified,
-             COALESCE(k.status, CASE WHEN ces.id IS NOT NULL OR ae.id IS NOT NULL THEN 'Approved' ELSE 'Not Submitted' END) AS kyc_status,
+             COALESCE(u.enrollment_status, CASE WHEN ces.id IS NOT NULL THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
+             CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted') OR ces.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_verified,
+             COALESCE(k.status, CASE WHEN ces.id IS NOT NULL THEN 'Approved' ELSE 'Not Submitted' END) AS kyc_status,
              k.admin_remarks AS kyc_remarks,
              u.invitation_code, u.registered_at,
              u.sponsor_user_id,
@@ -5415,16 +5415,16 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
              COALESCE(sp.full_name, 'Suraj Kumar Verma') AS sponsor_name,
              COALESCE(sp.invitation_code, sp.member_id, u.sponsor_invite_code, 'MMR0001') AS sponsor_id,
              COALESCE(sp.mobile_no, '7071951011') AS sponsor_contact,
-             COALESCE(pa.city, ces.permanent_city, ces.present_city, ae_addr.city) AS city,
-             COALESCE(pa.state, ces.permanent_state_pin, ces.present_state_pin, ae_addr.state) AS state,
-             COALESCE(pa.pin_code, ces.permanent_state_pin, ces.present_state_pin, ae_addr.pin_code) AS pin_code,
-             COALESCE(b.bank_name, ces.acc_bank_branch, ces.drawn_bank_branch, ae_bank.bank_name) AS bank_name,
-             COALESCE(b.branch_name, ces.drawn_bank_branch, ces.acc_bank_branch, ae_bank.branch_name) AS branch_name,
-             COALESCE(b.account_holder_name, ces.acc_holder_name, u.full_name, ces.applicant_name, ae_bank.account_holder_name) AS account_holder_name,
-             COALESCE(b.account_number, ces.acc_number, ae_bank.account_number) AS account_number,
-             COALESCE(b.ifsc_code, ces.ifsc_code, ae_bank.ifsc_code) AS ifsc_code,
-             COALESCE(n.nominee_name, cnom.nominee_name, ces.co_applicant_name, ae_nom.nominee_name) AS nominee_name,
-             COALESCE(n.relationship, cnom.relation, ces.co_relation, ae_nom.relationship) AS nominee_relationship
+             COALESCE(pa.city, ces.permanent_city, ces.present_city) AS city,
+             COALESCE(pa.state, ces.permanent_state_pin, ces.present_state_pin) AS state,
+             COALESCE(pa.pin_code, ces.permanent_state_pin, ces.present_state_pin) AS pin_code,
+             COALESCE(b.bank_name, ces.acc_bank_branch, ces.drawn_bank_branch) AS bank_name,
+             COALESCE(b.branch_name, ces.drawn_bank_branch, ces.acc_bank_branch) AS branch_name,
+             COALESCE(b.account_holder_name, ces.acc_holder_name, u.full_name, ces.applicant_name) AS account_holder_name,
+             COALESCE(b.account_number, ces.acc_number) AS account_number,
+             COALESCE(b.ifsc_code, ces.ifsc_code) AS ifsc_code,
+             COALESCE(n.nominee_name, cnom.nominee_name, ces.co_applicant_name) AS nominee_name,
+             COALESCE(n.relationship, cnom.relation, ces.co_relation) AS nominee_relationship
       FROM users u
       LEFT JOIN users sp               ON u.sponsor_user_id = sp.user_id
       LEFT JOIN user_addresses pa      ON u.user_id = pa.user_id AND pa.address_type = 'Permanent'
@@ -5449,35 +5449,6 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
         ORDER BY created_at ASC
         LIMIT 1
       ) cnom ON TRUE
-      LEFT JOIN LATERAL (
-        SELECT id, application_no, full_name, father_name, mother_name, spouse_name,
-               date_of_birth, gender, mobile_no, alternate_mobile, email, pan_number, aadhar_number
-        FROM associate_enrollment
-        WHERE user_id = u.user_id OR (u.mobile_no IS NOT NULL AND mobile_no = u.mobile_no)
-        ORDER BY (user_id = u.user_id) DESC, created_at DESC
-        LIMIT 1
-      ) ae ON TRUE
-      LEFT JOIN LATERAL (
-        SELECT bank_name, branch_name, account_holder_name, account_number, ifsc_code
-        FROM associate_bank_details
-        WHERE user_id = u.user_id
-        ORDER BY created_at DESC
-        LIMIT 1
-      ) ae_bank ON TRUE
-      LEFT JOIN LATERAL (
-        SELECT city, state, pin_code
-        FROM associate_addresses
-        WHERE user_id = u.user_id
-        ORDER BY created_at DESC
-        LIMIT 1
-      ) ae_addr ON TRUE
-      LEFT JOIN LATERAL (
-        SELECT nominee_name, relationship
-        FROM associate_nominees
-        WHERE user_id = u.user_id
-        ORDER BY created_at DESC
-        LIMIT 1
-      ) ae_nom ON TRUE
       WHERE u.user_id = ${req.user.user_id}`;
 
     if (!user) return err(res, "User not found", 404);
@@ -5586,24 +5557,6 @@ app.put("/api/profile", verifyUserToken, async (req, res) => {
           await sql`INSERT INTO customer_nominees (submission_id, nominee_name, relation) VALUES (${sub.id}, ${nominee_name}, ${nominee_relationship || null})`;
         }
       }
-    }
-
-    // 5. Sync Associate Enrollment (if associate)
-    const [ae] = await sql`
-      SELECT id FROM associate_enrollment 
-      WHERE user_id = ${uid}
-         OR (mobile_no = (SELECT mobile_no FROM users WHERE user_id = ${uid} LIMIT 1))
-      ORDER BY (user_id = ${uid}) DESC, created_at DESC 
-      LIMIT 1`;
-    if (ae) {
-      await sql`
-        UPDATE associate_enrollment SET
-          user_id          = COALESCE(user_id, ${uid}),
-          email            = COALESCE(${email || null}, email),
-          alternate_mobile = COALESCE(${alternate_mobile || null}, alternate_mobile),
-          spouse_name      = COALESCE(${spouse_name || null}, spouse_name),
-          updated_at       = NOW()
-        WHERE id = ${ae.id}`;
     }
 
     return ok(res, {}, "Profile updated successfully");
