@@ -7235,24 +7235,63 @@ const getDefaultSponsorUserId = async () => {
   return defaultUser?.user_id || 1;
 };
 
+const ensureAdminUserAccount = async () => {
+  try {
+    const passwordHash = await bcrypt.hash("Mmr@2026", 12);
+    let [existing] = await sql`
+      SELECT user_id, invitation_code, member_id, full_name, email, user_type, account_status
+      FROM users
+      WHERE LOWER(email) = 'mmrconstructions@hotmail.com' OR mobile_no = '7071951011' OR user_id = 1 OR member_id IN ('MMR00001', 'MMR-ASC-0001', 'MMR0001')
+      ORDER BY user_id ASC
+      LIMIT 1`;
+
+    if (existing) {
+      await sql`
+        UPDATE users
+        SET member_id = 'MMR00001',
+            full_name = 'Suraj Kumar Verma',
+            email = COALESCE(NULLIF(email, ''), 'mmrconstructions@hotmail.com'),
+            mobile_no = COALESCE(NULLIF(mobile_no, ''), '7071951011'),
+            account_status = 'Active',
+            is_active = TRUE,
+            is_verified = TRUE
+        WHERE user_id = ${existing.user_id}`;
+    } else {
+      await sql`
+        INSERT INTO users (user_id, member_id, full_name, email, mobile_no, password_hash, user_type, account_status, invitation_code, is_active, is_verified)
+        VALUES (1, 'MMR00001', 'Suraj Kumar Verma', 'mmrconstructions@hotmail.com', '7071951011', ${passwordHash}, 'Admin', 'Active', 'MMR00001', TRUE, TRUE)
+        ON CONFLICT (user_id) DO UPDATE SET
+          member_id = 'MMR00001',
+          full_name = 'Suraj Kumar Verma',
+          account_status = 'Active',
+          is_active = TRUE,
+          is_verified = TRUE`;
+    }
+  } catch (err) {
+    console.warn("[MMR API] ensureAdminUserAccount warning:", err.message);
+  }
+};
+
 const ensureAdminReferralLink = async (req) => {
   await requireMlmSchema();
+  await ensureAdminUserAccount();
   const passwordHash = await bcrypt.hash("Mmr@2026", 12);
   let [adminAssoc] = await sql`
     SELECT user_id, invitation_code, member_id, full_name, email, user_type, account_status
     FROM users
-    WHERE LOWER(email) = 'mmrconstructions@hotmail.com' OR mobile_no = '7071951011' OR user_id = 1 OR member_id = 'MMR-ASC-0001'
+    WHERE LOWER(email) = 'mmrconstructions@hotmail.com' OR mobile_no = '7071951011' OR user_id = 1 OR member_id IN ('MMR00001', 'MMR-ASC-0001', 'MMR0001')
     ORDER BY user_id ASC
     LIMIT 1`;
 
   if (!adminAssoc) {
     const [inserted] = await sql`
       INSERT INTO users (user_id, member_id, full_name, email, mobile_no, password_hash, user_type, account_status, invitation_code, is_active, is_verified)
-      VALUES (1, 'MMR-ASC-0001', 'Suraj Kumar Verma', 'mmrconstructions@hotmail.com', '7071951011', ${passwordHash}, 'Associate', 'Active', 'MMR0001', TRUE, TRUE)
+      VALUES (1, 'MMR00001', 'Suraj Kumar Verma', 'mmrconstructions@hotmail.com', '7071951011', ${passwordHash}, 'Admin', 'Active', 'MMR00001', TRUE, TRUE)
       ON CONFLICT (user_id) DO UPDATE SET
         full_name = EXCLUDED.full_name,
         email = EXCLUDED.email,
         mobile_no = EXCLUDED.mobile_no,
+        member_id = 'MMR00001',
         account_status = 'Active',
         is_active = TRUE
       RETURNING user_id, invitation_code, member_id, full_name, email, user_type, account_status`;
@@ -7263,7 +7302,7 @@ const ensureAdminReferralLink = async (req) => {
   return {
     user_id: adminAssoc.user_id,
     full_name: adminAssoc.full_name,
-    member_id: adminAssoc.member_id || 'MMR-ASC-0001',
+    member_id: adminAssoc.member_id || 'MMR00001',
     invite_code: link.invite_code,
     referral_url: link.referral_url,
     total_clicks: Number(link.total_clicks || 0),
@@ -8187,8 +8226,23 @@ const getAdminUsersPage = async (query, defaults = {}) => {
   if (defaults.activeOnly) where.push("COALESCE(u.is_active, TRUE) = TRUE");
 
   if (query.search) {
-    params.push(`%${String(query.search).trim()}%`);
+    const rawSearch = String(query.search).trim();
+    params.push(`%${rawSearch}%`);
     const idx = `$${params.length}`;
+
+    // Alphanumeric clean search for matching MMR IDs and numbers (e.g. MMR00001, MMR1, 00001)
+    const cleanSearch = rawSearch.replace(/[^a-zA-Z0-9]/g, "");
+    let extraSearchSql = "";
+    if (cleanSearch) {
+      params.push(`%${cleanSearch}%`);
+      const cleanIdx = `$${params.length}`;
+      extraSearchSql = `
+        OR REPLACE(REPLACE(COALESCE(u.member_id, ''), '-', ''), ' ', '') ILIKE ${cleanIdx}
+        OR REPLACE(REPLACE(COALESCE(u.invitation_code, ''), '-', ''), ' ', '') ILIKE ${cleanIdx}
+        OR CONCAT('MMR', LPAD(CAST(u.user_id AS TEXT), 5, '0')) ILIKE ${cleanIdx}
+      `;
+    }
+
     where.push(`(
       u.full_name ILIKE ${idx}
       OR u.email ILIKE ${idx}
@@ -8196,15 +8250,22 @@ const getAdminUsersPage = async (query, defaults = {}) => {
       OR u.member_id ILIKE ${idx}
       OR u.invitation_code ILIKE ${idx}
       OR CAST(u.user_id AS TEXT) ILIKE ${idx}
+      ${extraSearchSql}
     )`);
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const rows = await sql.unsafe(`
-    SELECT u.user_id, u.member_id, u.user_type, u.full_name, u.mobile_no,
+    SELECT u.user_id,
+           CASE 
+             WHEN u.user_id = 1 THEN 'MMR00001'
+             WHEN u.member_id IS NOT NULL AND u.member_id != '' THEN u.member_id
+             ELSE CONCAT('MMR', LPAD(u.user_id::text, 5, '0'))
+           END AS member_id,
+           u.user_type, u.full_name, u.mobile_no,
            u.email, u.account_status, u.registered_at, u.updated_at,
            COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
-           CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted') THEN TRUE ELSE FALSE END AS is_verified,
+           CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted') OR u.user_id = 1 THEN TRUE ELSE FALSE END AS is_verified,
            COALESCE(pa.address_line1, ces.permanent_address, ces.present_address) AS address,
            COALESCE(pa.city, ces.permanent_city, ces.present_city) AS city,
            COALESCE(pa.state, ces.permanent_state_pin, ces.present_state_pin) AS state,
@@ -8226,7 +8287,7 @@ const getAdminUsersPage = async (query, defaults = {}) => {
       GROUP BY user_id
     ) doc ON doc.user_id = u.user_id
     ${whereSql}
-    ORDER BY ${sortBy} ${sortDir}, u.user_id DESC
+    ORDER BY CASE WHEN u.user_id = 1 THEN 0 ELSE 1 END, ${sortBy} ${sortDir}, u.user_id DESC
     LIMIT $${params.length + 1} OFFSET $${params.length + 2}
   `, [...params, pageSize, offset]);
 
@@ -13590,6 +13651,7 @@ if (shouldStartServer) {
       await Promise.all([
         requireMlmSchema().catch((e) => console.warn("[MMR API] MLM schema warning:", e.message)),
         requireCommissionEngineSchema().catch((e) => console.warn("[MMR API] Commission schema warning:", e.message)),
+        ensureAdminUserAccount().catch((e) => console.warn("[MMR API] Admin account ensure warning:", e.message)),
         ensureHomeExperienceSchema().catch(() => { }),
         ensureHomeSlidersSchema().catch(() => { }),
         ensureSiteHtmlMapSchema().catch(() => { }),
