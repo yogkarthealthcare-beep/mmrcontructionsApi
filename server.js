@@ -5627,10 +5627,34 @@ app.put("/api/profile", verifyUserToken, async (req, res) => {
 
 app.get("/api/profile/documents", verifyUserToken, async (req, res) => {
   try {
-    const docs = await sql`
+    const rawDocs = await sql`
       SELECT document_id, document_type, file_path, file_name, uploaded_at,
              is_verified, rejection_note, review_status, admin_remarks, reupload_requested
-      FROM user_documents WHERE user_id = ${req.user.user_id} AND is_active = TRUE`;
+      FROM user_documents WHERE user_id = ${req.user.user_id} AND is_active = TRUE
+      ORDER BY uploaded_at DESC`;
+
+    const publicBase = (process.env.PUBLIC_API_URL || process.env.API_BASE_URL || "https://api.mmrconstructions.in").replace(/\/$/, "");
+    const normalizeDocUrl = (urlOrPath) => {
+      if (!urlOrPath) return null;
+      const str = String(urlOrPath).trim();
+      if (!str) return null;
+      if (str.startsWith("http://") || str.startsWith("https://") || str.startsWith("data:")) {
+        return str;
+      }
+      const normalized = str.startsWith("/") ? str : `/${str}`;
+      return `${publicBase}${normalized}`;
+    };
+
+    const docs = (rawDocs || []).map((d) => {
+      const fullUrl = normalizeDocUrl(d.file_path);
+      return {
+        ...d,
+        file_path: fullUrl,
+        document_url: fullUrl,
+        url: fullUrl,
+      };
+    });
+
     return ok(res, docs);
   } catch (e) {
     return err(res, e.message);
@@ -9270,7 +9294,6 @@ app.post("/api/admin/users/:id/approve",
         FROM users
         WHERE user_id = ${uid}`;
       if (!user) return err(res, "User not found", 404);
-      if (user.account_status === "Active") return err(res, "Already approved", 400);
 
       const memberId = user.member_id || await genMemberID(user.user_type);
       const invCode = user.user_type === "Associate"
@@ -9279,10 +9302,37 @@ app.post("/api/admin/users/:id/approve",
 
       await sql`
         UPDATE users SET
-          account_status = 'Active', member_id = ${memberId},
+          account_status = 'Active',
+          member_id = ${memberId},
           invitation_code = ${user.user_type === "Associate" ? invCode : user.invitation_code},
-          approved_by_admin_id = ${req.admin.admin_id}, approved_at = NOW(), updated_at = NOW()
+          is_verified = TRUE,
+          enrollment_status = 'Completed',
+          approved_by_admin_id = ${req.admin.admin_id},
+          approved_at = NOW(),
+          updated_at = NOW()
         WHERE user_id = ${uid}`;
+
+      // Mark all active user documents as Approved & Verified
+      await sql`
+        UPDATE user_documents SET
+          is_verified = TRUE,
+          review_status = 'Approved',
+          reupload_requested = FALSE,
+          verified_by_admin_id = ${req.admin.admin_id},
+          verified_at = NOW(),
+          updated_at = NOW()
+        WHERE user_id = ${uid} AND is_active = TRUE`;
+
+      // Update or insert user KYC profile
+      await sql`
+        INSERT INTO user_kyc_profiles (user_id, status, admin_remarks, reviewed_at, reviewed_by_admin_id, updated_at)
+        VALUES (${uid}, 'Approved', ${verify_note || 'Approved by Admin'}, NOW(), ${req.admin.admin_id}, NOW())
+        ON CONFLICT (user_id) DO UPDATE SET
+          status = 'Approved',
+          admin_remarks = EXCLUDED.admin_remarks,
+          reviewed_at = NOW(),
+          reviewed_by_admin_id = EXCLUDED.reviewed_by_admin_id,
+          updated_at = NOW()`;
 
       // For associate: insert tracker + MLM node
       if (user.user_type === "Associate") {
@@ -9330,7 +9380,7 @@ app.post("/api/admin/users/:id/approve",
                 ${JSON.stringify({ member_id: memberId, note: verify_note || "" })})`;
 
       return ok(res, { member_id: memberId, invitation_code: invCode },
-        `User approved. Member ID: ${memberId}`);
+        `User and KYC documents approved successfully. Member ID: ${memberId}`);
     } catch (e) {
       return err(res, e.message);
     }
