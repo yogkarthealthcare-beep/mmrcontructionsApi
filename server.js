@@ -9319,8 +9319,7 @@ app.post("/api/admin/users/:id/approve",
           review_status = 'Approved',
           reupload_requested = FALSE,
           verified_by_admin_id = ${req.admin.admin_id},
-          verified_at = NOW(),
-          updated_at = NOW()
+          verified_at = NOW()
         WHERE user_id = ${uid} AND is_active = TRUE`;
 
       // Update or insert user KYC profile
@@ -13761,6 +13760,7 @@ if (shouldStartServer) {
         requireMlmSchema().catch((e) => console.warn("[MMR API] MLM schema warning:", e.message)),
         requireCommissionEngineSchema().catch((e) => console.warn("[MMR API] Commission schema warning:", e.message)),
         ensureAdminUserAccount().catch((e) => console.warn("[MMR API] Admin account ensure warning:", e.message)),
+        sql`ALTER TABLE user_documents ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`.catch(() => {}),
         ensureHomeExperienceSchema().catch(() => { }),
         ensureHomeSlidersSchema().catch(() => { }),
         ensureSiteHtmlMapSchema().catch(() => { }),
