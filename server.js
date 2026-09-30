@@ -9089,7 +9089,30 @@ app.get("/api/admin/users/:id",
       let [address] = await sql`SELECT * FROM user_addresses WHERE user_id = ${uid} AND address_type = 'Permanent'`;
       let [bank] = await sql`SELECT * FROM user_bank_details WHERE user_id = ${uid}`;
       let [nominee] = await sql`SELECT * FROM user_nominees WHERE user_id = ${uid}`;
-      const documents = await sql`SELECT * FROM user_documents WHERE user_id = ${uid} AND is_active = TRUE`;
+      const rawDocuments = await sql`SELECT * FROM user_documents WHERE user_id = ${uid} AND is_active = TRUE`;
+      const publicBase = (process.env.PUBLIC_API_URL || process.env.API_BASE_URL || "https://api.mmrconstructions.in").replace(/\/$/, "");
+
+      const normalizeDocUrl = (urlOrPath) => {
+        if (!urlOrPath) return null;
+        const str = String(urlOrPath).trim();
+        if (!str) return null;
+        if (str.startsWith("http://") || str.startsWith("https://") || str.startsWith("data:")) {
+          return str;
+        }
+        const normalized = str.startsWith("/") ? str : `/${str}`;
+        return `${publicBase}${normalized}`;
+      };
+
+      const documents = (rawDocuments || []).map((d) => {
+        const fullUrl = normalizeDocUrl(d.file_path || d.document_path || d.url || d.cloudinary_public_id);
+        return {
+          ...d,
+          file_path: fullUrl,
+          document_path: fullUrl,
+          url: fullUrl,
+          file_name: d.file_name || d.document_type || "Document",
+        };
+      });
 
       // Fallback 1: Customer Enrollment Submissions
       const [custSub] = await sql`
@@ -9188,6 +9211,42 @@ app.get("/api/admin/users/:id",
             relationship: assoc.nom_rel || null,
             nominee_mobile: null
           };
+        }
+        if (assoc.applicant_photo_path && !documents.some(d => d.document_type === 'ProfilePhoto' || d.document_type === 'ApplicantPhoto')) {
+          const photoUrl = normalizeDocUrl(assoc.applicant_photo_path);
+          documents.push({
+            document_id: `assoc_photo_${assoc.id}`,
+            user_id: uid,
+            document_type: 'ProfilePhoto',
+            file_path: photoUrl,
+            document_path: photoUrl,
+            url: photoUrl,
+            file_name: 'Applicant Photo'
+          });
+        }
+        if (assoc.nominee_photo_path && !documents.some(d => d.document_type === 'NomineePhoto')) {
+          const nomUrl = normalizeDocUrl(assoc.nominee_photo_path);
+          documents.push({
+            document_id: `assoc_nom_${assoc.id}`,
+            user_id: uid,
+            document_type: 'NomineePhoto',
+            file_path: nomUrl,
+            document_path: nomUrl,
+            url: nomUrl,
+            file_name: 'Nominee Photo'
+          });
+        }
+        if (assoc.applicant_signature_path && !documents.some(d => d.document_type === 'Signature')) {
+          const sigUrl = normalizeDocUrl(assoc.applicant_signature_path);
+          documents.push({
+            document_id: `assoc_sig_${assoc.id}`,
+            user_id: uid,
+            document_type: 'Signature',
+            file_path: sigUrl,
+            document_path: sigUrl,
+            url: sigUrl,
+            file_name: 'Applicant Signature'
+          });
         }
       }
 
