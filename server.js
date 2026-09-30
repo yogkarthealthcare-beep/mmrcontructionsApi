@@ -8371,14 +8371,20 @@ app.post("/api/inquiries", async (req, res) => {
   try {
     await ensureInquirySchema();
     const body = req.body || {};
-    const fullName = String(body.full_name || body.name || "").trim();
-    const mobileNo = String(body.mobile_no || body.mobile || "").replace(/\D/g, "").slice(0, 15);
+    const fullName = String(body.full_name || body.customer_name || body.name || "").trim();
+    let rawMobile = String(body.mobile_no || body.phone || body.mobile || body.contact_no || "").replace(/\D/g, "");
+    if (rawMobile.length === 11 && rawMobile.startsWith("0")) {
+      rawMobile = rawMobile.slice(1);
+    } else if (rawMobile.length === 12 && rawMobile.startsWith("91")) {
+      rawMobile = rawMobile.slice(2);
+    }
+    const mobileNo = rawMobile.slice(-10);
     const email = String(body.email || "").trim().toLowerCase() || null;
-    const siteName = String(body.site_name || body.property_name || body.interest || "").trim() || null;
+    const siteName = String(body.site_name || body.project_name || body.property_name || body.interest || "").trim() || null;
     const siteId = body.site_id ? Number(body.site_id) : null;
     const plotNumber = String(body.plot_number || "").trim() || null;
-    const message = String(body.inquiry_message || body.message || "").trim() || null;
-    const inquiryType = String(body.inquiry_type || body.interest || "General Enquiry").trim() || "General Enquiry";
+    const message = String(body.inquiry_message || body.message || body.requirements || body.remarks || "").trim() || null;
+    const inquiryType = String(body.inquiry_type || body.preferred_plot_size || body.interest || "General Enquiry").trim() || "General Enquiry";
     const sourcePage = String(body.source_page || "Website").trim() || "Website";
     const captchaToken = body.captcha_token;
     const captchaAnswer = body.captcha_answer;
