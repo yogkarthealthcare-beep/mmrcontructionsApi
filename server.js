@@ -6381,6 +6381,18 @@ async function ensureCoreDatabaseSequences() {
             IF max_id > 0 THEN PERFORM setval(seq_name, max_id, true); END IF;
           END IF;
         EXCEPTION WHEN OTHERS THEN NULL; END;
+
+        -- Ensure unique index on emi_schedules (booking_id, installment_no)
+        BEGIN
+          DELETE FROM emi_schedules a USING emi_schedules b
+          WHERE a.emi_id < b.emi_id
+            AND a.booking_id = b.booking_id
+            AND a.installment_no = b.installment_no;
+
+          CREATE UNIQUE INDEX IF NOT EXISTS uq_emi_schedules_booking_installment ON emi_schedules (booking_id, installment_no);
+        EXCEPTION WHEN OTHERS THEN
+          NULL;
+        END;
       END $$;
     `).catch(() => {});
   } catch (e) {
@@ -6475,13 +6487,18 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
     if (payment_type === "EMI") {
       const start = new Date();
       start.setMonth(start.getMonth() + 1);
-      for (let i = 1; i <= Number(plot.emi_tenure_months || 60); i++) {
+      const tenure = Number(plot.emi_tenure_months || 60);
+      for (let i = 1; i <= tenure; i++) {
         const due = new Date(start);
         due.setMonth(due.getMonth() + (i - 1));
-        await sql`
-          INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
-          VALUES (${booking.booking_id}, ${req.user.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi || 0})
-          ON CONFLICT (booking_id, installment_no) DO NOTHING`;
+        try {
+          await sql`
+            INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
+            VALUES (${booking.booking_id}, ${req.user.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi || 0})
+          `;
+        } catch (emiErr) {
+          console.warn(`[MMR API] EMI schedule insert notice (installment ${i}):`, emiErr?.message);
+        }
       }
     }
 
@@ -10041,13 +10058,18 @@ app.post("/api/admin/bookings/:id/confirm",
       const [plot] = await sql`SELECT base_price, monthly_emi, emi_tenure_months FROM plots WHERE plot_id = ${booking.plot_id}`;
       if (booking.payment_type === "EMI") {
         const start = new Date(); start.setMonth(start.getMonth() + 1);
-        for (let i = 1; i <= Number(plot.emi_tenure_months || 60); i++) {
+        const tenure = Number(plot.emi_tenure_months || 60);
+        for (let i = 1; i <= tenure; i++) {
           const due = new Date(start);
           due.setMonth(due.getMonth() + (i - 1));
-          await sql`
-            INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
-            VALUES (${bid}, ${booking.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi || 0})
-            ON CONFLICT (booking_id, installment_no) DO NOTHING`;
+          try {
+            await sql`
+              INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
+              VALUES (${bid}, ${booking.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi || 0})
+            `;
+          } catch (emiErr) {
+            console.warn(`[MMR API] Admin confirm EMI schedule notice (installment ${i}):`, emiErr?.message);
+          }
         }
       }
 
@@ -10158,12 +10180,17 @@ app.patch("/api/admin/bookings/:id/confirm",
       const [plot] = await sql`SELECT base_price, monthly_emi, emi_tenure_months FROM plots WHERE plot_id = ${booking.plot_id}`;
       if (booking.payment_type === "EMI") {
         const start = new Date(); start.setMonth(start.getMonth() + 1);
-        for (let i = 1; i <= Number(plot.emi_tenure_months || 60); i++) {
+        const tenure = Number(plot.emi_tenure_months || 60);
+        for (let i = 1; i <= tenure; i++) {
           const due = new Date(start); due.setMonth(due.getMonth() + (i - 1));
-          await sql`
-            INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
-            VALUES (${bid}, ${booking.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi || 0})
-            ON CONFLICT (booking_id, installment_no) DO NOTHING`;
+          try {
+            await sql`
+              INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
+              VALUES (${bid}, ${booking.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi || 0})
+            `;
+          } catch (emiErr) {
+            console.warn(`[MMR API] Patch confirm EMI schedule notice (installment ${i}):`, emiErr?.message);
+          }
         }
       }
       await sql`
@@ -10171,6 +10198,13 @@ app.patch("/api/admin/bookings/:id/confirm",
           confirmed_by_admin_id = ${req.admin.admin_id}, confirmed_at = NOW(), updated_at = NOW()
         WHERE booking_id = ${bid}`;
       await sql`UPDATE plots SET plot_status = 'Booked', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`;
+      await safeInsertPlotStatusHistory({
+        plot_id: booking.plot_id,
+        old_status: 'InProcess',
+        new_status: 'Booked',
+        changed_by_admin_id: req.admin.admin_id,
+        reason: 'Booking Confirmed'
+      });
       await addPlotBookingHistory({
         plotId: booking.plot_id,
         bookingId: bid,

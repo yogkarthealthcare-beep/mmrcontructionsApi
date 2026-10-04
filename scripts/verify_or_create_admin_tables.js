@@ -98,6 +98,25 @@ async function verifyOrCreateAdminTables() {
       console.warn("invoice_audit_log sequence setup notice:", e.message);
     }
 
+    // Ensure unique index for emi_schedules (booking_id, installment_no)
+    try {
+      await sql.unsafe(`
+        DO $$
+        BEGIN
+          DELETE FROM emi_schedules a USING emi_schedules b
+          WHERE a.emi_id < b.emi_id
+            AND a.booking_id = b.booking_id
+            AND a.installment_no = b.installment_no;
+
+          CREATE UNIQUE INDEX IF NOT EXISTS uq_emi_schedules_booking_installment ON emi_schedules (booking_id, installment_no);
+        EXCEPTION WHEN OTHERS THEN
+          NULL;
+        END $$;
+      `);
+    } catch (e) {
+      console.warn("emi_schedules unique index setup notice:", e.message);
+    }
+
     // Auto-repair all primary key sequences across database tables
     try {
       console.log("=== SYNCHRONIZING ALL DATABASE SEQUENCES ===");

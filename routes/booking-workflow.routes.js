@@ -333,10 +333,14 @@ async function completeBooking(bookingId, payment, adminId = null) {
       for (let i = 1; i <= Number(booking.emi_tenure_months || 60); i++) {
         const due = new Date(start);
         due.setMonth(due.getMonth() + i - 1);
-        await db`
-          INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
-          VALUES (${bookingId}, ${booking.user_id}, ${i}, ${due.toISOString().slice(0, 10)}, ${booking.monthly_emi || 0})
-          ON CONFLICT (booking_id, installment_no) DO NOTHING`;
+        try {
+          await db`
+            INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
+            VALUES (${bookingId}, ${booking.user_id}, ${i}, ${due.toISOString().slice(0, 10)}, ${booking.monthly_emi || 0})
+          `;
+        } catch (emiErr) {
+          console.warn(`[MMR API] Workflow EMI schedule notice (installment ${i}):`, emiErr?.message);
+        }
       }
     }
     await ensureInvoice(db, booking, paymentRow?.payment_id || null);

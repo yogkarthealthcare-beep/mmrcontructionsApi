@@ -43,16 +43,19 @@ export async function ensureEmiSchedulesForBooking(db, booking) {
     const isLast = i === tenure;
     const emiAmount = isLast ? (remainingBalance - (monthlyEmi * (tenure - 1))) : monthlyEmi;
 
-    await db`
-      INSERT INTO emi_schedules (
-        booking_id, user_id, installment_no, due_date, emi_amount,
-        late_fee_amount, total_due, paid_amount, emi_status, created_at, updated_at
-      ) VALUES (
-        ${bookingId}, ${userId}, ${i}, ${due.toISOString().split("T")[0]}, ${Math.max(0, emiAmount)},
-        0.00, ${Math.max(0, emiAmount)}, 0.00, 'Pending', NOW(), NOW()
-      )
-      ON CONFLICT (booking_id, installment_no) DO NOTHING
-    `;
+    try {
+      await db`
+        INSERT INTO emi_schedules (
+          booking_id, user_id, installment_no, due_date, emi_amount,
+          late_fee_amount, total_due, paid_amount, emi_status, created_at, updated_at
+        ) VALUES (
+          ${bookingId}, ${userId}, ${i}, ${due.toISOString().split("T")[0]}, ${Math.max(0, emiAmount)},
+          0.00, ${Math.max(0, emiAmount)}, 0.00, 'Pending', NOW(), NOW()
+        )
+      `;
+    } catch (emiErr) {
+      console.warn(`[MMR API] EMI schedule insert notice (installment ${i}):`, emiErr?.message);
+    }
   }
 }
 
