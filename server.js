@@ -248,6 +248,24 @@ app.use(unifiedPaymentRoutes);
 ensureUnifiedPaymentSchema().then(() => {
   runHistoricalPaymentMigration();
 }).catch(err => console.error("[UnifiedPayment] Initialization error:", err));
+
+export async function ensurePlotManagementSchema() {
+  try {
+    await sql`
+      ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(30) NOT NULL DEFAULT 'PLOT';
+    `;
+    await sql`
+      ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(30);
+    `.catch(() => {});
+    await sql`
+      ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type;
+      ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check;
+    `.catch(() => {});
+  } catch (err) {
+    console.error("[PlotSchema] Schema migration error:", err.message || err);
+  }
+}
+ensurePlotManagementSchema();
 // ─── Cloudinary Config ────────────────────────────────────────
 const envValue = (key) => (process.env[key] || "").trim();
 cloudinary.config({
@@ -1241,6 +1259,17 @@ const requirePlotManagementSchema = (() => {
             COALESCE((SELECT MAX(plot_id) FROM plots), 0) + 1,
             false
           )
+        `.catch(() => {});
+        await sql`ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(20) NOT NULL DEFAULT 'PLOT'`.catch(() => {});
+        await sql`
+          DO $$
+          BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_constraint WHERE conname = 'plots_unit_type_check'
+            ) THEN
+              ALTER TABLE plots ADD CONSTRAINT plots_unit_type_check CHECK (unit_type IN ('PLOT', 'MALL', 'RESTAURANT'));
+            END IF;
+          END $$;
         `.catch(() => {});
       })();
     }
@@ -5717,6 +5746,137 @@ app.post("/api/profile/upload-doc",
 
 /* ==========================
    ─────────────────────────
+   PUBLIC SITE & MAP APIS
+   GET /api/public/sites/availability-summary
+   GET /api/public/sites/:id/plot-map
+   ─────────────────────────
+========================== */
+
+const publicApiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 180,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many requests. Please slow down." }
+});
+
+app.get("/api/public/sites/availability-summary", publicApiLimiter, async (req, res) => {
+  try {
+    res.setHeader("Cache-Control", "public, max-age=15");
+    const summary = await sql`
+      SELECT 
+        s.site_id,
+        s.site_name,
+        COALESCE(s.full_address, s.city, s.state, '') AS location,
+        s.map_image_url,
+        COUNT(p.plot_id)::int AS total,
+        COUNT(p.plot_id) FILTER (WHERE p.plot_status IN ('Vacant', 'Cancelled'))::int AS available,
+        COUNT(p.plot_id) FILTER (WHERE p.plot_status IN ('InProcess', 'Processing', 'Reserved', 'Hold', 'PaymentPending'))::int AS in_process,
+        COUNT(p.plot_id) FILTER (WHERE p.plot_status IN ('Booked', 'Sold', 'Sold Out'))::int AS sold_out,
+        (s.map_image_url IS NOT NULL AND s.map_image_url != '' AND COUNT(pc.plot_id) > 0) AS has_map
+      FROM sites s
+      LEFT JOIN plots p ON p.site_id = s.site_id AND p.is_active = TRUE
+      LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id AND pc.coordinates IS NOT NULL AND jsonb_array_length(pc.coordinates) > 0
+      WHERE s.site_status = 'Active'
+      GROUP BY s.site_id, s.site_name, s.full_address, s.city, s.state, s.map_image_url
+      ORDER BY s.site_id
+    `;
+    return ok(res, summary);
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+app.get("/api/public/sites/:id/plot-map", publicApiLimiter, async (req, res) => {
+  try {
+    res.setHeader("Cache-Control", "public, max-age=15");
+    const siteId = Number(req.params.id);
+    if (!siteId) return err(res, "Invalid site id", 400);
+
+    const [siteRow] = await sql`
+      SELECT site_id, site_name, COALESCE(full_address, city, state, '') AS location, map_image_url
+      FROM sites
+      WHERE site_id = ${siteId} AND site_status = 'Active'
+    `;
+    if (!siteRow) return err(res, "Site not found", 404);
+
+    const rawPlots = await sql`
+      SELECT 
+        p.plot_id,
+        p.plot_number,
+        COALESCE(p.unit_type, 'PLOT') AS unit_type,
+        p.plot_status,
+        p.plot_area,
+        p.base_price,
+        pc.coordinates AS polygon_coordinates,
+        pc.label_x,
+        pc.label_y,
+        b.sold_price,
+        b.sold_at
+      FROM plots p
+      INNER JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id
+      LEFT JOIN LATERAL (
+        SELECT 
+          COALESCE(b.base_price, p.base_price) AS sold_price,
+          COALESCE(b.confirmed_at, b.payment_received_at, b.booking_date, p.updated_at) AS sold_at
+        FROM bookings b
+        WHERE b.plot_id = p.plot_id AND b.booking_status NOT IN ('Cancelled')
+        ORDER BY CASE WHEN b.booking_status IN ('Confirmed', 'Booked') THEN 0 ELSE 1 END, b.created_at DESC
+        LIMIT 1
+      ) b ON TRUE
+      WHERE p.site_id = ${siteId}
+        AND p.is_active = TRUE
+        AND pc.coordinates IS NOT NULL
+        AND jsonb_array_length(pc.coordinates) > 0
+      ORDER BY NULLIF(regexp_replace(p.plot_number, '\\D', '', 'g'), '')::int NULLS LAST, p.plot_number
+    `;
+
+    const plots = rawPlots.map(p => {
+      const rawStatus = String(p.plot_status || 'Vacant').trim().toLowerCase();
+      let public_status = 'AVAILABLE';
+      if (['booked', 'sold', 'sold out'].includes(rawStatus)) {
+        public_status = 'SOLD_OUT';
+      } else if (['inprocess', 'processing', 'reserved', 'hold', 'paymentpending'].includes(rawStatus)) {
+        public_status = 'IN_PROCESS';
+      }
+
+      const areaGaj = Number(p.plot_area || 0);
+      const areaSqft = Math.round(areaGaj * 9);
+      const basePrice = Number(p.base_price || 0);
+      const isSold = public_status === 'SOLD_OUT';
+
+      return {
+        plot_id: Number(p.plot_id),
+        plot_number: String(p.plot_number || ''),
+        unit_type: String(p.unit_type || 'PLOT').toUpperCase(),
+        public_status,
+        area_sqft: areaSqft,
+        area_gaj: areaGaj,
+        price: basePrice > 0 ? basePrice : null,
+        polygon_coordinates: p.polygon_coordinates || [],
+        label_x: p.label_x != null ? Number(p.label_x) : null,
+        label_y: p.label_y != null ? Number(p.label_y) : null,
+        sold_price: isSold ? (Number(p.sold_price || basePrice) || null) : null,
+        sold_at: isSold ? (p.sold_at || null) : null
+      };
+    });
+
+    return ok(res, {
+      site: {
+        site_id: Number(siteRow.site_id),
+        site_name: siteRow.site_name,
+        location: siteRow.location,
+        map_image_url: siteRow.map_image_url || ''
+      },
+      plots
+    });
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+/* ==========================
+   ─────────────────────────
    SITES & PLOTS  (public)
    GET /api/sites
    GET /api/sites/:id
@@ -5938,6 +6098,7 @@ app.get("/api/sites/:id/plots", async (req, res) => {
 
     let plots = await sql`
       SELECT p.plot_id, p.plot_number, p.plot_area, p.plot_category,
+             COALESCE(p.unit_type, 'PLOT') AS unit_type,
              p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months,
              p.file_charge, p.plot_status, p.coordinates_x, p.coordinates_y,
              COALESCE(pc.coordinates, '[]'::jsonb) AS polygon_coordinates,
@@ -6136,11 +6297,11 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
     if (user.kyc_status !== "Approved")
       return err(res, "Your KYC documents must be approved before booking a plot.", 403);
 
-    // Check plot is vacant
-    const [plot] = await sql`SELECT * FROM plots WHERE plot_id = ${plot_id}`;
-    if (!plot) return err(res, "Plot not found", 404);
-    if (plot.plot_status !== "Vacant")
-      return err(res, "Plot is not available for booking", 409);
+    // Check plot is active and available (Vacant or InProcess permitted, Booked/Sold blocked)
+    const [plot] = await sql`SELECT * FROM plots WHERE plot_id = ${plot_id} AND is_active = TRUE`;
+    if (!plot) return err(res, "Plot not found or inactive", 404);
+    if (plot.plot_status === "Booked" || plot.plot_status === "Sold")
+      return err(res, "This plot is already booked or sold and no longer available.", 409);
 
     // Generate serial
     const [seq] = await sql`
@@ -10389,23 +10550,27 @@ app.post("/api/admin/sites/:siteId/detected-plots",
           return err(res, `Plot ${index + 1} has invalid coordinates.`, 400);
         }
         const requestedNumber = String(item.plot_number || `${prefix}-${String(index + 1).padStart(3, "0")}`).trim();
+        const rawUnitType = String(item.unit_type || "PLOT").trim().toUpperCase();
+        const unitType = /^[A-Z0-9_-]{1,30}$/.test(rawUnitType) ? rawUnitType : "PLOT";
+
         let [plot] = item.plot_id
-          ? await sql`SELECT plot_id, plot_number FROM plots WHERE plot_id = ${item.plot_id} AND site_id = ${req.params.siteId} AND is_active = TRUE`
-          : await sql`SELECT plot_id, plot_number FROM plots WHERE site_id = ${req.params.siteId} AND plot_number = ${requestedNumber} AND is_active = TRUE`;
+          ? await sql`SELECT plot_id, site_id, plot_number, unit_type, is_active FROM plots WHERE plot_id = ${item.plot_id} AND site_id = ${req.params.siteId}`
+          : await sql`SELECT plot_id, site_id, plot_number, unit_type, is_active FROM plots WHERE site_id = ${req.params.siteId} AND plot_number = ${requestedNumber}`;
+        
         if (!plot) {
           try {
             [plot] = await sql`
               INSERT INTO plots (
-                site_id, plot_number, plot_area, plot_category, base_price,
+                site_id, plot_number, unit_type, plot_area, plot_category, base_price,
                 down_payment, monthly_emi, emi_tenure_months, file_charge,
                 plot_status, created_by_admin_id
               )
               VALUES (
-                ${req.params.siteId}, ${requestedNumber}, ${Math.max(1, Number(item.plot_area || 1))},
+                ${req.params.siteId}, ${requestedNumber}, ${unitType}, ${Math.max(1, Number(item.plot_area || 1))},
                 '100gaj'::plot_category_enum, ${asNumberOrNull(item.base_price) || 0},
                 0, 0, 60, 0, 'Vacant'::plot_status_enum, ${req.admin.admin_id}
               )
-              RETURNING plot_id, plot_number`;
+              RETURNING plot_id, plot_number, unit_type`;
           } catch (insertErr) {
             if (insertErr.message && insertErr.message.includes('plots_pkey')) {
               await sql`
@@ -10417,22 +10582,36 @@ app.post("/api/admin/sites/:siteId/detected-plots",
               `.catch(() => {});
               [plot] = await sql`
                 INSERT INTO plots (
-                  site_id, plot_number, plot_area, plot_category, base_price,
+                  site_id, plot_number, unit_type, plot_area, plot_category, base_price,
                   down_payment, monthly_emi, emi_tenure_months, file_charge,
                   plot_status, created_by_admin_id
                 )
                 VALUES (
-                  ${req.params.siteId}, ${requestedNumber}, ${Math.max(1, Number(item.plot_area || 1))},
+                  ${req.params.siteId}, ${requestedNumber}, ${unitType}, ${Math.max(1, Number(item.plot_area || 1))},
                   '100gaj'::plot_category_enum, ${asNumberOrNull(item.base_price) || 0},
                   0, 0, 60, 0, 'Vacant'::plot_status_enum, ${req.admin.admin_id}
                 )
-                RETURNING plot_id, plot_number`;
+                RETURNING plot_id, plot_number, unit_type`;
             } else {
               throw insertErr;
             }
           }
           created += 1;
+        } else if (!plot.is_active) {
+          // Reactivate soft-deleted plot
+          await sql`
+            UPDATE plots SET
+              is_active = TRUE,
+              unit_type = ${unitType || plot.unit_type || 'PLOT'},
+              plot_status = 'Vacant',
+              updated_at = NOW()
+            WHERE plot_id = ${plot.plot_id}
+          `;
+          updated += 1;
         } else {
+          if (item.unit_type && item.unit_type !== plot.unit_type) {
+            await sql`UPDATE plots SET unit_type = ${unitType}, updated_at = NOW() WHERE plot_id = ${plot.plot_id}`;
+          }
           updated += 1;
         }
         await sql`
@@ -10445,8 +10624,13 @@ app.post("/api/admin/sites/:siteId/detected-plots",
             label_y = EXCLUDED.label_y,
             updated_by_admin_id = EXCLUDED.updated_by_admin_id,
             updated_at = NOW()`;
-        saved.push({ plot_id: plot.plot_id, plot_number: plot.plot_number, coordinates });
+        saved.push({ plot_id: plot.plot_id, plot_number: plot.plot_number, unit_type: plot.unit_type || unitType, coordinates });
       }
+      await sql`
+        UPDATE sites
+        SET total_plots = (SELECT COUNT(*) FROM plots WHERE site_id = ${req.params.siteId} AND is_active = TRUE)
+        WHERE site_id = ${req.params.siteId}
+      `.catch(() => {});
       await logAdminAudit(req, "SiteManagement", "SaveDetectedPlots", "sites", req.params.siteId, sql.json({ created, updated }));
       return ok(res, { created, updated, plots: saved }, "Detected plot polygons saved.");
     } catch (e) {
@@ -11271,6 +11455,7 @@ app.get("/api/admin/sites/:id/plots",
       const plots = await sql`
         SELECT
           p.plot_id, p.site_id, p.plot_number, p.plot_area, p.plot_category,
+          COALESCE(p.unit_type, 'PLOT') AS unit_type,
           p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months,
           p.file_charge, p.plot_status, p.coordinates_x, p.coordinates_y,
           COALESCE(pc.coordinates, '[]'::jsonb) AS polygon_coordinates,
@@ -11463,14 +11648,57 @@ app.delete("/api/admin/plots/:id",
   role("SuperAdmin", "SiteManager"),
   async (req, res) => {
     try {
-      const [booking] = await sql`SELECT booking_id FROM bookings WHERE plot_id = ${req.params.id} LIMIT 1`;
-      if (booking) return err(res, "Plot has linked booking/payment records. Delete is blocked.", 409);
       const [plot] = await sql`
-        UPDATE plots SET is_active = FALSE, updated_at = NOW()
-        WHERE plot_id = ${req.params.id}
-        RETURNING plot_id`;
-      if (!plot) return err(res, "Plot not found", 404);
-      return ok(res, {}, "Plot deleted safely");
+        SELECT plot_id, site_id, plot_number, unit_type, plot_status, is_active
+        FROM plots
+        WHERE plot_id = ${req.params.id}`;
+      if (!plot) return err(res, "Unit not found", 404);
+
+      if (plot.plot_status !== 'Vacant' && plot.plot_status !== 'Cancelled') {
+        return err(res, `Unit "${plot.plot_number}" cannot be deleted because its status is '${plot.plot_status}'. Only Vacant or Cancelled units can be deleted.`, 409);
+      }
+
+      const [activeBooking] = await sql`
+        SELECT booking_id, booking_status
+        FROM bookings
+        WHERE plot_id = ${req.params.id} AND booking_status != 'Cancelled'
+        LIMIT 1`;
+      if (activeBooking) {
+        return err(res, `Unit "${plot.plot_number}" cannot be deleted because it is linked to active booking #${activeBooking.booking_id} (${activeBooking.booking_status}).`, 409);
+      }
+
+      const [activeLock] = await sql`
+        SELECT lock_id
+        FROM plot_booking_locks
+        WHERE plot_id = ${req.params.id} AND status = 'Active' AND expires_at > NOW()
+        LIMIT 1`.catch(() => []);
+      if (activeLock) {
+        return err(res, `Unit "${plot.plot_number}" cannot be deleted because it currently has an active booking lock.`, 409);
+      }
+
+      const [existingCoords] = await sql`
+        SELECT coordinates
+        FROM plot_polygon_coordinates
+        WHERE plot_id = ${req.params.id}`.catch(() => []);
+
+      await sql`
+        UPDATE plots
+        SET is_active = FALSE, updated_at = NOW()
+        WHERE plot_id = ${req.params.id}`;
+
+      await sql`
+        INSERT INTO plot_polygon_history (plot_id, old_coordinates, new_coordinates, changed_by_admin_id, change_reason)
+        VALUES (${req.params.id}, ${sql.json(existingCoords?.coordinates || [])}, '[]'::jsonb, ${req.admin.admin_id}, ${req.body?.reason || 'Soft deleted by admin in Plot Detector Tool'})
+      `.catch(() => {});
+
+      await sql`
+        UPDATE sites
+        SET total_plots = (SELECT COUNT(*) FROM plots WHERE site_id = ${plot.site_id} AND is_active = TRUE)
+        WHERE site_id = ${plot.site_id}
+      `.catch(() => {});
+
+      await logAdminAudit(req, "PlotManagement", "DeletePlot", "plots", req.params.id, sql.json({ site_id: plot.site_id, plot_number: plot.plot_number }));
+      return ok(res, { plot_id: Number(req.params.id), plot_number: plot.plot_number }, "Unit deleted safely");
     } catch (e) {
       return err(res, e.message);
     }

@@ -425,7 +425,9 @@ router.post("/booking/initiate", userAuth, async (req, res) => {
         WHERE p.plot_id = ${plotId}
         FOR UPDATE`;
       if (!plot) throw Object.assign(new Error("Plot not found."), { status: 404 });
-      if (plot.plot_status !== "Vacant") throw Object.assign(new Error("Plot is currently unavailable or locked."), { status: 409 });
+      if (plot.plot_status === "Booked" || plot.plot_status === "Sold" || plot.is_active === false) {
+        throw Object.assign(new Error("This plot is already booked or sold and no longer available."), { status: 409 });
+      }
 
       const [seq] = await db`SELECT nextval('bookings_booking_id_seq') AS booking_id`;
       const bookingId = Number(seq.booking_id);
