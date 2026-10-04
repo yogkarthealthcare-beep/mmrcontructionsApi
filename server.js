@@ -1235,6 +1235,13 @@ const requirePlotManagementSchema = (() => {
         await sql`CREATE INDEX IF NOT EXISTS idx_plot_images_plot ON plot_images(plot_id, image_order ASC)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_plot_bulk_import_site ON plot_bulk_import_log(site_id, started_at DESC)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_plot_booking_history_plot ON plot_booking_history(plot_id, created_at DESC)`;
+        await sql`
+          SELECT setval(
+            pg_get_serial_sequence('plots', 'plot_id'),
+            COALESCE((SELECT MAX(plot_id) FROM plots), 0) + 1,
+            false
+          )
+        `.catch(() => {});
       })();
     }
     return ready;
@@ -10363,6 +10370,15 @@ app.post("/api/admin/sites/:siteId/detected-plots",
       if (!site) return err(res, "Site not found", 404);
       const incoming = Array.isArray(req.body?.plots) ? req.body.plots : [];
       if (!incoming.length) return err(res, "plots must be a non-empty array.", 400);
+      // Pre-sync PostgreSQL plots_plot_id_seq to prevent "plots_pkey" duplicate key errors
+      await sql`
+        SELECT setval(
+          pg_get_serial_sequence('plots', 'plot_id'),
+          COALESCE((SELECT MAX(plot_id) FROM plots), 0) + 1,
+          false
+        );
+      `.catch(() => {});
+
       const prefix = String(site.site_prefix || sitePrefixFromName(site.site_name)).toUpperCase();
       let created = 0;
       let updated = 0;
@@ -10377,18 +10393,44 @@ app.post("/api/admin/sites/:siteId/detected-plots",
           ? await sql`SELECT plot_id, plot_number FROM plots WHERE plot_id = ${item.plot_id} AND site_id = ${req.params.siteId} AND is_active = TRUE`
           : await sql`SELECT plot_id, plot_number FROM plots WHERE site_id = ${req.params.siteId} AND plot_number = ${requestedNumber} AND is_active = TRUE`;
         if (!plot) {
-          [plot] = await sql`
-            INSERT INTO plots (
-              site_id, plot_number, plot_area, plot_category, base_price,
-              down_payment, monthly_emi, emi_tenure_months, file_charge,
-              plot_status, created_by_admin_id
-            )
-            VALUES (
-              ${req.params.siteId}, ${requestedNumber}, ${Math.max(1, Number(item.plot_area || 1))},
-              '100gaj'::plot_category_enum, ${asNumberOrNull(item.base_price) || 0},
-              0, 0, 60, 0, 'Vacant'::plot_status_enum, ${req.admin.admin_id}
-            )
-            RETURNING plot_id, plot_number`;
+          try {
+            [plot] = await sql`
+              INSERT INTO plots (
+                site_id, plot_number, plot_area, plot_category, base_price,
+                down_payment, monthly_emi, emi_tenure_months, file_charge,
+                plot_status, created_by_admin_id
+              )
+              VALUES (
+                ${req.params.siteId}, ${requestedNumber}, ${Math.max(1, Number(item.plot_area || 1))},
+                '100gaj'::plot_category_enum, ${asNumberOrNull(item.base_price) || 0},
+                0, 0, 60, 0, 'Vacant'::plot_status_enum, ${req.admin.admin_id}
+              )
+              RETURNING plot_id, plot_number`;
+          } catch (insertErr) {
+            if (insertErr.message && insertErr.message.includes('plots_pkey')) {
+              await sql`
+                SELECT setval(
+                  pg_get_serial_sequence('plots', 'plot_id'),
+                  COALESCE((SELECT MAX(plot_id) FROM plots), 0) + 1,
+                  false
+                );
+              `.catch(() => {});
+              [plot] = await sql`
+                INSERT INTO plots (
+                  site_id, plot_number, plot_area, plot_category, base_price,
+                  down_payment, monthly_emi, emi_tenure_months, file_charge,
+                  plot_status, created_by_admin_id
+                )
+                VALUES (
+                  ${req.params.siteId}, ${requestedNumber}, ${Math.max(1, Number(item.plot_area || 1))},
+                  '100gaj'::plot_category_enum, ${asNumberOrNull(item.base_price) || 0},
+                  0, 0, 60, 0, 'Vacant'::plot_status_enum, ${req.admin.admin_id}
+                )
+                RETURNING plot_id, plot_number`;
+            } else {
+              throw insertErr;
+            }
+          }
           created += 1;
         } else {
           updated += 1;
@@ -11297,6 +11339,14 @@ app.post("/api/admin/sites/:id/plots",
       if (!plot_number || !plot_area || base_price == null)
         return err(res, "plot_number, plot_area, base_price required", 400);
 
+      await sql`
+        SELECT setval(
+          pg_get_serial_sequence('plots', 'plot_id'),
+          COALESCE((SELECT MAX(plot_id) FROM plots), 0) + 1,
+          false
+        );
+      `.catch(() => {});
+
       const [plot] = await sql`
         INSERT INTO plots (site_id, plot_number, plot_area, plot_category,
                            base_price, down_payment, monthly_emi, emi_tenure_months,
@@ -11327,6 +11377,14 @@ app.post("/api/admin/plots",
         file_charge, plot_status, coordinates_x, coordinates_y } = req.body;
       if (!site_id || !plot_number || !plot_area || base_price == null)
         return err(res, "site_id, plot_number, plot_area, base_price required", 400);
+
+      await sql`
+        SELECT setval(
+          pg_get_serial_sequence('plots', 'plot_id'),
+          COALESCE((SELECT MAX(plot_id) FROM plots), 0) + 1,
+          false
+        );
+      `.catch(() => {});
 
       const [plot] = await sql`
         INSERT INTO plots (site_id, plot_number, plot_area, plot_category,
