@@ -5780,7 +5780,7 @@ app.get("/api/public/sites/availability-summary", publicApiLimiter, async (req, 
         (s.map_image_url IS NOT NULL AND s.map_image_url != '' AND COUNT(pc.plot_id) > 0) AS has_map
       FROM sites s
       LEFT JOIN plots p ON p.site_id = s.site_id AND p.is_active = TRUE
-      LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id AND pc.coordinates IS NOT NULL AND jsonb_array_length(pc.coordinates) > 0
+      LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id AND pc.coordinates IS NOT NULL
       WHERE s.site_status = 'Active'
       GROUP BY s.site_id, s.site_name, s.full_address, s.city, s.state, s.map_image_url
       ORDER BY s.site_id
@@ -5821,8 +5821,8 @@ app.get("/api/public/sites/:id/plot-map", publicApiLimiter, async (req, res) => 
       INNER JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id
       LEFT JOIN LATERAL (
         SELECT 
-          COALESCE(b.base_price, p.base_price) AS sold_price,
-          COALESCE(b.confirmed_at, b.payment_received_at, b.booking_date, p.updated_at) AS sold_at
+          COALESCE(b.advance_amount, p.base_price) AS sold_price,
+          COALESCE(b.created_at, p.updated_at) AS sold_at
         FROM bookings b
         WHERE b.plot_id = p.plot_id AND b.booking_status NOT IN ('Cancelled')
         ORDER BY CASE WHEN b.booking_status IN ('Confirmed', 'Booked') THEN 0 ELSE 1 END, b.created_at DESC
@@ -5831,7 +5831,6 @@ app.get("/api/public/sites/:id/plot-map", publicApiLimiter, async (req, res) => 
       WHERE p.site_id = ${siteId}
         AND p.is_active = TRUE
         AND pc.coordinates IS NOT NULL
-        AND jsonb_array_length(pc.coordinates) > 0
       ORDER BY NULLIF(regexp_replace(p.plot_number, '\\D', '', 'g'), '')::int NULLS LAST, p.plot_number
     `;
 
