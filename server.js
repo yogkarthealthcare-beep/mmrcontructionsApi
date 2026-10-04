@@ -5772,7 +5772,7 @@ app.get("/api/public/sites/availability-summary", publicApiLimiter, async (req, 
         COUNT(p.plot_id) FILTER (WHERE p.plot_status::text IN ('Vacant', 'Cancelled', 'Available'))::int AS available,
         COUNT(p.plot_id) FILTER (WHERE p.plot_status::text IN ('InProcess', 'Processing', 'Reserved', 'Hold', 'PaymentPending'))::int AS in_process,
         COUNT(p.plot_id) FILTER (WHERE p.plot_status::text IN ('Booked', 'Sold', 'Sold Out'))::int AS sold_out,
-        (s.map_image_url IS NOT NULL AND s.map_image_url != '' AND COUNT(pc.plot_id) > 0) AS has_map
+        (COALESCE(s.map_image_url, '') != '' OR COUNT(p.plot_id) > 0) AS has_map
       FROM sites s
       LEFT JOIN plots p ON p.site_id = s.site_id AND p.is_active = TRUE
       LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id AND pc.coordinates IS NOT NULL
@@ -5813,7 +5813,7 @@ app.get("/api/public/sites/:id/plot-map", publicApiLimiter, async (req, res) => 
         b.sold_price,
         b.sold_at
       FROM plots p
-      INNER JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id
+      LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id
       LEFT JOIN LATERAL (
         SELECT 
           COALESCE(b.advance_amount, p.base_price) AS sold_price,
@@ -5825,7 +5825,6 @@ app.get("/api/public/sites/:id/plot-map", publicApiLimiter, async (req, res) => 
       ) b ON TRUE
       WHERE p.site_id = ${siteId}
         AND p.is_active = TRUE
-        AND pc.coordinates IS NOT NULL
       ORDER BY NULLIF(regexp_replace(p.plot_number, '\\D', '', 'g'), '')::int NULLS LAST, p.plot_number
     `;
 
