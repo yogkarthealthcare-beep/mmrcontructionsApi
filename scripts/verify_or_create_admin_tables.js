@@ -98,6 +98,74 @@ async function verifyOrCreateAdminTables() {
       console.warn("invoice_audit_log sequence setup notice:", e.message);
     }
 
+    // Auto-repair all primary key sequences across database tables
+    try {
+      console.log("=== SYNCHRONIZING ALL DATABASE SEQUENCES ===");
+      await sql.unsafe(`
+        DO $$
+        DECLARE
+          r RECORD;
+          max_val BIGINT;
+        BEGIN
+          FOR r IN (
+            SELECT 
+              c.table_name,
+              c.column_name,
+              pg_get_serial_sequence(quote_ident(c.table_name), c.column_name) AS sequence_name
+            FROM information_schema.columns c
+            JOIN information_schema.tables t 
+              ON t.table_name = c.table_name AND t.table_schema = c.table_schema
+            WHERE c.table_schema = 'public' 
+              AND t.table_type = 'BASE TABLE'
+              AND pg_get_serial_sequence(quote_ident(c.table_name), c.column_name) IS NOT NULL
+          ) LOOP
+            BEGIN
+              EXECUTE format('SELECT COALESCE(MAX(%I), 0) FROM %I', r.column_name, r.table_name) INTO max_val;
+              IF max_val > 0 THEN
+                EXECUTE format('SELECT setval(%L, %s, true)', r.sequence_name, max_val);
+              END IF;
+            EXCEPTION WHEN OTHERS THEN
+              NULL;
+            END;
+          END LOOP;
+        END $$;
+      `);
+
+      // Specifically ensure plot_status_history and core table sequences
+      await sql.unsafe(`
+        DO $$
+        DECLARE
+          seq_name TEXT;
+          max_id BIGINT;
+        BEGIN
+          SELECT pg_get_serial_sequence('plot_status_history', 'history_id') INTO seq_name;
+          IF seq_name IS NULL THEN
+            SELECT pg_get_serial_sequence('plot_status_history', 'id') INTO seq_name;
+          END IF;
+          IF seq_name IS NULL THEN
+            SELECT c.relname FROM pg_class c WHERE c.relkind = 'S' AND c.relname LIKE 'plot_status_history%' LIMIT 1 INTO seq_name;
+          END IF;
+          IF seq_name IS NOT NULL THEN
+            BEGIN
+              SELECT COALESCE(MAX(history_id), 0) FROM plot_status_history INTO max_id;
+            EXCEPTION WHEN OTHERS THEN
+              BEGIN
+                SELECT COALESCE(MAX(id), 0) FROM plot_status_history INTO max_id;
+              EXCEPTION WHEN OTHERS THEN
+                max_id := 0;
+              END;
+            END;
+            IF max_id > 0 THEN
+              PERFORM setval(seq_name, max_id, true);
+            END IF;
+          END IF;
+        END $$;
+      `);
+      console.log("Database sequences synchronized successfully ✅");
+    } catch (seqErr) {
+      console.warn("Sequence auto-repair notice:", seqErr.message);
+    }
+
     // Fetch total admin users count
     const adminCount = await sql`SELECT COUNT(*)::int as count FROM admin_users`;
 

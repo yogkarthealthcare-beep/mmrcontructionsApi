@@ -2392,12 +2392,16 @@ const addPlotBookingHistory = async ({
   triggeredByUser = null,
   plotStatusAtTime = null,
 }) => {
-  await sql`
-    INSERT INTO plot_booking_history
-      (plot_id, booking_id, user_id, event_type, event_note,
-       triggered_by_admin, triggered_by_user, plot_status_at_time)
-    VALUES (${plotId}, ${bookingId}, ${userId}, ${eventType}, ${eventNote},
-            ${triggeredByAdmin}, ${triggeredByUser}, ${plotStatusAtTime})`;
+  try {
+    await sql`
+      INSERT INTO plot_booking_history
+        (plot_id, booking_id, user_id, event_type, event_note,
+         triggered_by_admin, triggered_by_user, plot_status_at_time)
+      VALUES (${plotId}, ${bookingId}, ${userId}, ${eventType}, ${eventNote},
+              ${triggeredByAdmin}, ${triggeredByUser}, ${plotStatusAtTime})`;
+  } catch (err) {
+    console.warn("[MMR API] Plot booking history notice (non-fatal):", err?.message);
+  }
 };
 
 const addUserNotification = async ({ userId, adminId = null, title = null, message, channel = "InApp" }) => {
@@ -6273,6 +6277,152 @@ app.get("/api/bookings", verifyUserToken, async (req, res) => {
   }
 });
 
+async function ensureCoreDatabaseSequences() {
+  try {
+    // 1. Universal sequence synchronizer across all public tables with serial columns
+    await sql.unsafe(`
+      DO $$
+      DECLARE
+        r RECORD;
+        max_val BIGINT;
+      BEGIN
+        FOR r IN (
+          SELECT 
+            c.table_name,
+            c.column_name,
+            pg_get_serial_sequence(quote_ident(c.table_name), c.column_name) AS sequence_name
+          FROM information_schema.columns c
+          JOIN information_schema.tables t 
+            ON t.table_name = c.table_name AND t.table_schema = c.table_schema
+          WHERE c.table_schema = 'public' 
+            AND t.table_type = 'BASE TABLE'
+            AND pg_get_serial_sequence(quote_ident(c.table_name), c.column_name) IS NOT NULL
+        ) LOOP
+          BEGIN
+            EXECUTE format('SELECT COALESCE(MAX(%I), 0) FROM %I', r.column_name, r.table_name) INTO max_val;
+            IF max_val > 0 THEN
+              EXECUTE format('SELECT setval(%L, %s, true)', r.sequence_name, max_val);
+            END IF;
+          EXCEPTION WHEN OTHERS THEN
+            NULL;
+          END;
+        END LOOP;
+      END $$;
+    `).catch(() => {});
+
+    // 2. Specific sequence sync for plot_status_history and core tables
+    await sql.unsafe(`
+      DO $$
+      DECLARE
+        seq_name TEXT;
+        max_id BIGINT;
+      BEGIN
+        -- Sync plot_status_history
+        BEGIN
+          SELECT pg_get_serial_sequence('plot_status_history', 'history_id') INTO seq_name;
+          IF seq_name IS NULL THEN
+            SELECT pg_get_serial_sequence('plot_status_history', 'id') INTO seq_name;
+          END IF;
+          IF seq_name IS NULL THEN
+            SELECT c.relname FROM pg_class c WHERE c.relkind = 'S' AND c.relname LIKE 'plot_status_history%' LIMIT 1 INTO seq_name;
+          END IF;
+          
+          IF seq_name IS NOT NULL THEN
+            BEGIN
+              SELECT COALESCE(MAX(history_id), 0) FROM plot_status_history INTO max_id;
+            EXCEPTION WHEN OTHERS THEN
+              BEGIN
+                SELECT COALESCE(MAX(id), 0) FROM plot_status_history INTO max_id;
+              EXCEPTION WHEN OTHERS THEN
+                max_id := 0;
+              END;
+            END;
+            IF max_id > 0 THEN
+              PERFORM setval(seq_name, max_id, true);
+            END IF;
+          END IF;
+        EXCEPTION WHEN OTHERS THEN
+          NULL;
+        END;
+
+        -- Sync bookings
+        BEGIN
+          SELECT pg_get_serial_sequence('bookings', 'booking_id') INTO seq_name;
+          IF seq_name IS NOT NULL THEN
+            SELECT COALESCE(MAX(booking_id), 0) FROM bookings INTO max_id;
+            IF max_id > 0 THEN PERFORM setval(seq_name, max_id, true); END IF;
+          END IF;
+        EXCEPTION WHEN OTHERS THEN NULL; END;
+
+        -- Sync plots
+        BEGIN
+          SELECT pg_get_serial_sequence('plots', 'plot_id') INTO seq_name;
+          IF seq_name IS NOT NULL THEN
+            SELECT COALESCE(MAX(plot_id), 0) FROM plots INTO max_id;
+            IF max_id > 0 THEN PERFORM setval(seq_name, max_id, true); END IF;
+          END IF;
+        EXCEPTION WHEN OTHERS THEN NULL; END;
+
+        -- Sync plot_booking_history
+        BEGIN
+          SELECT pg_get_serial_sequence('plot_booking_history', 'history_id') INTO seq_name;
+          IF seq_name IS NULL THEN
+            SELECT pg_get_serial_sequence('plot_booking_history', 'id') INTO seq_name;
+          END IF;
+          IF seq_name IS NOT NULL THEN
+            BEGIN
+              SELECT COALESCE(MAX(history_id), 0) FROM plot_booking_history INTO max_id;
+            EXCEPTION WHEN OTHERS THEN
+              BEGIN
+                SELECT COALESCE(MAX(id), 0) FROM plot_booking_history INTO max_id;
+              EXCEPTION WHEN OTHERS THEN
+                max_id := 0;
+              END;
+            END;
+            IF max_id > 0 THEN PERFORM setval(seq_name, max_id, true); END IF;
+          END IF;
+        EXCEPTION WHEN OTHERS THEN NULL; END;
+      END $$;
+    `).catch(() => {});
+  } catch (e) {
+    console.warn("[MMR API] Sequence sync warning:", e?.message);
+  }
+}
+
+async function safeInsertPlotStatusHistory({ plot_id, old_status, new_status, changed_by_admin_id = null, reason = '' }) {
+  try {
+    if (changed_by_admin_id) {
+      await sql`
+        INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_admin_id, reason)
+        VALUES (${plot_id}, ${old_status}::plot_status_enum, ${new_status}::plot_status_enum, ${changed_by_admin_id}, ${reason})
+      `.catch(async (e1) => {
+        if (String(e1?.message || '').includes('unique constraint') || String(e1?.message || '').includes('pkey')) {
+          await ensureCoreDatabaseSequences();
+        }
+        await sql`
+          INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_admin_id, reason)
+          VALUES (${plot_id}, ${old_status}, ${new_status}, ${changed_by_admin_id}, ${reason})
+        `;
+      });
+    } else {
+      await sql`
+        INSERT INTO plot_status_history (plot_id, old_status, new_status, reason)
+        VALUES (${plot_id}, ${old_status}::plot_status_enum, ${new_status}::plot_status_enum, ${reason})
+      `.catch(async (e1) => {
+        if (String(e1?.message || '').includes('unique constraint') || String(e1?.message || '').includes('pkey')) {
+          await ensureCoreDatabaseSequences();
+        }
+        await sql`
+          INSERT INTO plot_status_history (plot_id, old_status, new_status, reason)
+          VALUES (${plot_id}, ${old_status}, ${new_status}, ${reason})
+        `;
+      });
+    }
+  } catch (err) {
+    console.warn("[MMR API] Plot status history insert notice (non-fatal):", err?.message);
+  }
+}
+
 app.post("/api/bookings", verifyUserToken, async (req, res) => {
   try {
     const { plot_id, payment_type, advance_amount } = req.body;
@@ -6303,6 +6453,15 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
     if (plot.plot_status === "Booked" || plot.plot_status === "Sold")
       return err(res, "This plot is already booked or sold and no longer available.", 409);
 
+    // Sync bookings sequence
+    await sql`
+      SELECT setval(
+        pg_get_serial_sequence('bookings', 'booking_id'),
+        COALESCE((SELECT MAX(booking_id) FROM bookings), 0) + 1,
+        false
+      )
+    `.catch(() => {});
+
     // Generate serial
     const [seq] = await sql`
       SELECT COALESCE(MAX(CAST(SUBSTRING(booking_serial FROM 10) AS INT)),0)+1 AS n
@@ -6327,11 +6486,15 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
       }
     }
 
-    // Mark plot Booked immediately so public availability updates on refresh.
-    await sql`UPDATE plots SET plot_status = 'Booked', updated_at = NOW() WHERE plot_id = ${plot_id}`;
-    await sql`
-      INSERT INTO plot_status_history (plot_id, old_status, new_status, reason)
-      VALUES (${plot_id}, 'Vacant', 'Booked', 'Booking submitted by user')`;
+    // Mark plot InProcess immediately so public availability updates on refresh.
+    await sql`UPDATE plots SET plot_status = 'InProcess', updated_at = NOW() WHERE plot_id = ${plot_id}`;
+    await safeInsertPlotStatusHistory({
+      plot_id,
+      old_status: plot.plot_status || 'Vacant',
+      new_status: 'InProcess',
+      reason: 'Booking submitted by user'
+    });
+
     await addPlotBookingHistory({
       plotId: plot_id,
       bookingId: booking.booking_id,
@@ -6339,7 +6502,7 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
       eventType: "BookingSubmitted",
       eventNote: "Booking submitted by user",
       triggeredByUser: req.user.user_id,
-      plotStatusAtTime: "Booked",
+      plotStatusAtTime: "InProcess",
     });
     await addUserNotification({
       userId: req.user.user_id,
@@ -8004,9 +8167,12 @@ app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (re
 
     // ── 5. Reserve Plot Status to InProcess ──
     await sql`UPDATE plots SET plot_status = 'InProcess', updated_at = NOW() WHERE plot_id = ${plot.plot_id}`;
-    await sql`
-      INSERT INTO plot_status_history (plot_id, old_status, new_status, reason)
-      VALUES (${plot.plot_id}, 'Vacant', 'InProcess', ${`Booking request submitted by Associate ${associate?.full_name || ''} for ${teamMember.full_name}`})`;
+    await safeInsertPlotStatusHistory({
+      plot_id: plot.plot_id,
+      old_status: 'Vacant',
+      new_status: 'InProcess',
+      reason: `Booking request submitted by Associate ${associate?.full_name || ''} for ${teamMember.full_name}`
+    });
 
     // ── 6. Create Invoice Record (Single Source of Truth) ──
     const formattedInvNum = `MMR-INV-${booking.booking_id}`;
@@ -9893,9 +10059,13 @@ app.post("/api/admin/bookings/:id/confirm",
 
       await sql`UPDATE plots SET plot_status = 'Booked', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`;
 
-      await sql`
-        INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_admin_id, reason)
-        VALUES (${booking.plot_id}, 'InProcess', 'Booked', ${req.admin.admin_id}, 'Booking Confirmed')`;
+      await safeInsertPlotStatusHistory({
+        plot_id: booking.plot_id,
+        old_status: 'InProcess',
+        new_status: 'Booked',
+        changed_by_admin_id: req.admin.admin_id,
+        reason: 'Booking Confirmed'
+      });
 
       await sql`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
@@ -11623,10 +11793,13 @@ app.put("/api/admin/plots/:id",
         RETURNING plot_id, plot_number, plot_status`;
       if (!plot) return err(res, "Plot not found", 404);
       if (plot_status && plot_status !== oldPlot.plot_status) {
-        await sql`
-          INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_admin_id, reason)
-          VALUES (${req.params.id}, ${oldPlot.plot_status}::plot_status_enum,
-                  ${plot_status}::plot_status_enum, ${req.admin.admin_id}, ${reason})`;
+        await safeInsertPlotStatusHistory({
+          plot_id: req.params.id,
+          old_status: oldPlot.plot_status,
+          new_status: plot_status,
+          changed_by_admin_id: req.admin.admin_id,
+          reason: reason || 'Status updated by admin'
+        });
         await addPlotBookingHistory({
           plotId: req.params.id,
           eventType: "StatusChangedByAdmin",
@@ -11718,10 +11891,13 @@ app.put("/api/admin/plots/:id/status",
       if (!plot) return err(res, "Plot not found", 404);
 
       await sql`UPDATE plots SET plot_status = ${new_status}::plot_status_enum, updated_at = NOW() WHERE plot_id = ${req.params.id}`;
-      await sql`
-        INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_admin_id, reason)
-        VALUES (${req.params.id}, ${plot.plot_status}::plot_status_enum,
-                ${new_status}::plot_status_enum, ${req.admin.admin_id}, ${reason || null})`;
+      await safeInsertPlotStatusHistory({
+        plot_id: req.params.id,
+        old_status: plot.plot_status,
+        new_status: new_status,
+        changed_by_admin_id: req.admin.admin_id,
+        reason: reason || null
+      });
       await addPlotBookingHistory({
         plotId: req.params.id,
         eventType: "StatusChanged",
@@ -13509,10 +13685,13 @@ app.put("/api/admin/plot-detector-2/plots/:plotId",
         RETURNING plot_id, site_id, plot_number, plot_number AS plot_no, plot_area AS area, plot_area, plot_status`;
 
       if (String(oldPlot.plot_status) !== plotStatus) {
-        await sql`
-          INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_admin_id, reason)
-          VALUES (${plotId}, ${oldPlot.plot_status}::plot_status_enum, ${plotStatus}::plot_status_enum,
-                  ${req.admin?.admin_id || null}, 'Plot Detector 2 status update')`;
+        await safeInsertPlotStatusHistory({
+          plot_id: plotId,
+          old_status: oldPlot.plot_status,
+          new_status: plotStatus,
+          changed_by_admin_id: req.admin?.admin_id || null,
+          reason: 'Plot Detector 2 status update'
+        });
       }
 
       await logAdminAudit(req, "PlotDetector2", "UpdatePlot", "plots", plotId, sql.json({
@@ -14043,6 +14222,7 @@ if (shouldStartServer) {
         await requirePlotManagementSchema().catch((e) => console.warn("[MMR API] Plot schema warning:", e.message));
       }
       await Promise.all([
+        ensureCoreDatabaseSequences().catch((e) => console.warn("[MMR API] Sequence sync warning:", e.message)),
         requireMlmSchema().catch((e) => console.warn("[MMR API] MLM schema warning:", e.message)),
         requireCommissionEngineSchema().catch((e) => console.warn("[MMR API] Commission schema warning:", e.message)),
         ensureAdminUserAccount().catch((e) => console.warn("[MMR API] Admin account ensure warning:", e.message)),
