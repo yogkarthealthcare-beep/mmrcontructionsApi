@@ -5774,14 +5774,14 @@ app.get("/api/public/sites/availability-summary", publicApiLimiter, async (req, 
         COALESCE(s.full_address, s.city, s.state, '') AS location,
         s.map_image_url,
         COUNT(p.plot_id)::int AS total,
-        COUNT(p.plot_id) FILTER (WHERE p.plot_status IN ('Vacant', 'Cancelled'))::int AS available,
-        COUNT(p.plot_id) FILTER (WHERE p.plot_status IN ('InProcess', 'Processing', 'Reserved', 'Hold', 'PaymentPending'))::int AS in_process,
-        COUNT(p.plot_id) FILTER (WHERE p.plot_status IN ('Booked', 'Sold', 'Sold Out'))::int AS sold_out,
+        COUNT(p.plot_id) FILTER (WHERE p.plot_status::text IN ('Vacant', 'Cancelled', 'Available'))::int AS available,
+        COUNT(p.plot_id) FILTER (WHERE p.plot_status::text IN ('InProcess', 'Processing', 'Reserved', 'Hold', 'PaymentPending'))::int AS in_process,
+        COUNT(p.plot_id) FILTER (WHERE p.plot_status::text IN ('Booked', 'Sold', 'Sold Out'))::int AS sold_out,
         (s.map_image_url IS NOT NULL AND s.map_image_url != '' AND COUNT(pc.plot_id) > 0) AS has_map
       FROM sites s
       LEFT JOIN plots p ON p.site_id = s.site_id AND p.is_active = TRUE
       LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id AND pc.coordinates IS NOT NULL
-      WHERE s.site_status = 'Active'
+      WHERE s.site_status::text = 'Active'
       GROUP BY s.site_id, s.site_name, s.full_address, s.city, s.state, s.map_image_url
       ORDER BY s.site_id
     `;
@@ -5800,7 +5800,7 @@ app.get("/api/public/sites/:id/plot-map", publicApiLimiter, async (req, res) => 
     const [siteRow] = await sql`
       SELECT site_id, site_name, COALESCE(full_address, city, state, '') AS location, map_image_url
       FROM sites
-      WHERE site_id = ${siteId} AND site_status = 'Active'
+      WHERE site_id = ${siteId} AND site_status::text = 'Active'
     `;
     if (!siteRow) return err(res, "Site not found", 404);
 
@@ -5809,7 +5809,7 @@ app.get("/api/public/sites/:id/plot-map", publicApiLimiter, async (req, res) => 
         p.plot_id,
         p.plot_number,
         COALESCE(p.unit_type, 'PLOT') AS unit_type,
-        p.plot_status,
+        p.plot_status::text AS plot_status,
         p.plot_area,
         p.base_price,
         pc.coordinates AS polygon_coordinates,
@@ -5824,8 +5824,8 @@ app.get("/api/public/sites/:id/plot-map", publicApiLimiter, async (req, res) => 
           COALESCE(b.advance_amount, p.base_price) AS sold_price,
           COALESCE(b.created_at, p.updated_at) AS sold_at
         FROM bookings b
-        WHERE b.plot_id = p.plot_id AND b.booking_status NOT IN ('Cancelled')
-        ORDER BY CASE WHEN b.booking_status IN ('Confirmed', 'Booked') THEN 0 ELSE 1 END, b.created_at DESC
+        WHERE b.plot_id = p.plot_id AND b.booking_status::text NOT IN ('Cancelled')
+        ORDER BY CASE WHEN b.booking_status::text IN ('Confirmed', 'Booked') THEN 0 ELSE 1 END, b.created_at DESC
         LIMIT 1
       ) b ON TRUE
       WHERE p.site_id = ${siteId}
