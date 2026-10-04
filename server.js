@@ -1260,16 +1260,11 @@ const requirePlotManagementSchema = (() => {
             false
           )
         `.catch(() => {});
-        await sql`ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(20) NOT NULL DEFAULT 'PLOT'`.catch(() => {});
+        await sql`ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(50) NOT NULL DEFAULT 'PLOT'`.catch(() => {});
+        await sql`ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(50)`.catch(() => {});
         await sql`
-          DO $$
-          BEGIN
-            IF NOT EXISTS (
-              SELECT 1 FROM pg_constraint WHERE conname = 'plots_unit_type_check'
-            ) THEN
-              ALTER TABLE plots ADD CONSTRAINT plots_unit_type_check CHECK (unit_type IN ('PLOT', 'MALL', 'RESTAURANT'));
-            END IF;
-          END $$;
+          ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type;
+          ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check;
         `.catch(() => {});
       })();
     }
@@ -10741,6 +10736,12 @@ app.post("/api/admin/sites/:siteId/detected-plots",
           COALESCE((SELECT MAX(plot_id) FROM plots), 0) + 1,
           false
         );
+      `.catch(() => {});
+      await sql`
+        ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(50) NOT NULL DEFAULT 'PLOT';
+        ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(50);
+        ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type;
+        ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check;
       `.catch(() => {});
 
       const prefix = String(site.site_prefix || sitePrefixFromName(site.site_name)).toUpperCase();
