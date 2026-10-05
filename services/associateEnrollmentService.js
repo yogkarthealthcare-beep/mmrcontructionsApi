@@ -1,65 +1,116 @@
 import { z } from "zod";
 import sql from "../db.js";
+
+// Helper functions for defense-in-depth sanitization
+function cleanString(val) {
+    if (val === null || val === undefined) return null;
+    const s = String(val).trim();
+    return s === "" ? null : s;
+}
+
+function cleanUpper(val) {
+    if (val === null || val === undefined) return null;
+    const s = String(val).trim().toUpperCase();
+    return s === "" ? null : s;
+}
+
+function cleanDigits(val) {
+    if (val === null || val === undefined) return null;
+    const s = String(val).replace(/[\s-]/g, "").trim();
+    return s === "" ? null : s;
+}
+
+function cleanEmail(val) {
+    if (val === null || val === undefined) return null;
+    const s = String(val).trim().toLowerCase();
+    return s === "" ? null : s;
+}
+
+function normalizeDate(val) {
+    if (val === null || val === undefined) return null;
+    const s = String(val).trim();
+    if (!s) return null;
+    // Match DD-MM-YYYY or DD/MM/YYYY
+    const ddmmyyyy = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+    if (ddmmyyyy) {
+        const [, d, m, y] = ddmmyyyy;
+        return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+    }
+    // Match ISO or YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+        return s.substring(0, 10);
+    }
+    const parsed = new Date(s);
+    if (!isNaN(parsed.getTime())) {
+        return parsed.toISOString().split("T")[0];
+    }
+    return s;
+}
+
 // Validation schema for defense in depth
 export const associateEnrollmentSchema = z.object({
-    fullName: z.string().min(1, "Full name is required"),
-    dob: z.string().min(1, "Date of birth is required"),
-    gender: z.string().min(1, "Gender is required"),
-    fatherName: z.string().optional().nullable(),
-    motherName: z.string().optional().nullable(),
-    spouseName: z.string().optional().nullable(),
-    contact1: z.string().min(10, "Contact number 1 must be at least 10 digits").max(15),
-    contact2: z.string().optional().nullable(),
-    nationality: z.string().default("Indian"),
-    residentialStatus: z.string().optional().nullable(),
-    panNo: z.string().regex(/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/, "Invalid PAN format"),
-    aadharNo: z.string().regex(/^[0-9]{12}$/, "Aadhar number must be 12 digits"),
-    email: z.string().email("Invalid email format").optional().nullable().or(z.literal("")),
-    occupation: z.string().optional().nullable(),
-    annualIncome: z.string().optional().nullable(),
-    education: z.string().optional().nullable(),
-    category: z.string().optional().nullable(),
-    religion: z.string().optional().nullable(),
-    signDate: z.string().optional().nullable(),
-    termsAccepted: z.preprocess((val) => val === "true" || val === true, z.boolean().refine((val) => val === true, "All terms must be accepted")),
+    fullName: z.preprocess((v) => cleanString(v) ?? "", z.string().min(1, "Full name is required")),
+    dob: z.preprocess((v) => normalizeDate(v) ?? cleanString(v) ?? "", z.string().min(1, "Date of birth is required")),
+    gender: z.preprocess((v) => cleanString(v) ?? "", z.string().min(1, "Gender is required")),
+    fatherName: z.preprocess(cleanString, z.string().optional().nullable()),
+    motherName: z.preprocess(cleanString, z.string().optional().nullable()),
+    spouseName: z.preprocess(cleanString, z.string().optional().nullable()),
+    contact1: z.preprocess((v) => cleanDigits(v) ?? "", z.string().min(10, "Contact number 1 must be at least 10 digits").max(15, "Contact number cannot exceed 15 digits")),
+    contact2: z.preprocess(cleanDigits, z.string().optional().nullable()),
+    nationality: z.preprocess((v) => cleanString(v) ?? "Indian", z.string().default("Indian")),
+    residentialStatus: z.preprocess(cleanString, z.string().optional().nullable()),
+    panNo: z.preprocess((v) => cleanUpper(v) ?? "", z.string().regex(/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/, "Invalid PAN format (e.g. ABCDE1234F)")),
+    aadharNo: z.preprocess((v) => cleanDigits(v) ?? "", z.string().regex(/^[0-9]{12}$/, "Aadhar number must be exactly 12 digits")),
+    email: z.preprocess(cleanEmail, z.string().email("Invalid email format").optional().nullable()),
+    occupation: z.preprocess(cleanString, z.string().optional().nullable()),
+    annualIncome: z.preprocess(cleanString, z.string().optional().nullable()),
+    education: z.preprocess(cleanString, z.string().optional().nullable()),
+    category: z.preprocess(cleanString, z.string().optional().nullable()),
+    religion: z.preprocess(cleanString, z.string().optional().nullable()),
+    signDate: z.preprocess((v) => normalizeDate(v) || new Date().toISOString().split("T")[0], z.string().optional().nullable()),
+    termsAccepted: z.preprocess(
+        (val) => val === "true" || val === true || val === "1" || val === 1 || val === "on",
+        z.boolean().refine((val) => val === true, "All terms must be accepted")
+    ),
     // Address Details
-    permAddress: z.string().optional().nullable(),
-    permCity: z.string().optional().nullable(),
-    permState: z.string().optional().nullable(),
-    permCountry: z.string().default("India"),
-    permPin: z.string().optional().nullable(),
-    localAddress: z.string().optional().nullable(),
-    localCity: z.string().optional().nullable(),
-    localState: z.string().optional().nullable(),
-    localCountry: z.string().default("India"),
-    localPin: z.string().optional().nullable(),
+    permAddress: z.preprocess(cleanString, z.string().optional().nullable()),
+    permCity: z.preprocess(cleanString, z.string().optional().nullable()),
+    permState: z.preprocess(cleanString, z.string().optional().nullable()),
+    permCountry: z.preprocess((v) => cleanString(v) ?? "India", z.string().default("India")),
+    permPin: z.preprocess(cleanString, z.string().optional().nullable()),
+    localAddress: z.preprocess(cleanString, z.string().optional().nullable()),
+    localCity: z.preprocess(cleanString, z.string().optional().nullable()),
+    localState: z.preprocess(cleanString, z.string().optional().nullable()),
+    localCountry: z.preprocess((v) => cleanString(v) ?? "India", z.string().default("India")),
+    localPin: z.preprocess(cleanString, z.string().optional().nullable()),
     // Bank Details
-    bankName: z.string().optional().nullable(),
-    accHolder: z.string().optional().nullable(),
-    accNo: z.string().optional().nullable(),
-    ifsc: z.string().optional().nullable(),
-    micr: z.string().optional().nullable(),
-    branchName: z.string().optional().nullable(),
-    branchCode: z.string().optional().nullable(),
-    swift: z.string().optional().nullable(),
-    branchCountry: z.string().default("India"),
+    bankName: z.preprocess(cleanString, z.string().optional().nullable()),
+    accHolder: z.preprocess(cleanString, z.string().optional().nullable()),
+    accNo: z.preprocess(cleanString, z.string().optional().nullable()),
+    ifsc: z.preprocess(cleanUpper, z.string().optional().nullable()),
+    micr: z.preprocess(cleanString, z.string().optional().nullable()),
+    branchName: z.preprocess(cleanString, z.string().optional().nullable()),
+    branchCode: z.preprocess(cleanString, z.string().optional().nullable()),
+    swift: z.preprocess(cleanUpper, z.string().optional().nullable()),
+    branchCountry: z.preprocess((v) => cleanString(v) ?? "India", z.string().default("India")),
     // Nominee Details
-    nomineeName: z.string().optional().nullable(),
-    nomineeDob: z.string().optional().nullable(),
-    nomineeGender: z.string().optional().nullable(),
-    nomineeNationality: z.string().default("Indian"),
-    nomineeResStatus: z.string().optional().nullable(),
-    nomineeRelationship: z.string().optional().nullable(),
-    nomineePanName: z.string().optional().nullable(),
-    nomineePanNo: z.string().optional().nullable(),
-    nomineeAadharName: z.string().optional().nullable(),
-    nomineeAadharNo: z.string().optional().nullable(),
-    nomineeAddress: z.string().optional().nullable(),
+    nomineeName: z.preprocess(cleanString, z.string().optional().nullable()),
+    nomineeDob: z.preprocess(normalizeDate, z.string().optional().nullable()),
+    nomineeGender: z.preprocess(cleanString, z.string().optional().nullable()),
+    nomineeNationality: z.preprocess((v) => cleanString(v) ?? "Indian", z.string().default("Indian")),
+    nomineeResStatus: z.preprocess(cleanString, z.string().optional().nullable()),
+    nomineeRelationship: z.preprocess(cleanString, z.string().optional().nullable()),
+    nomineePanName: z.preprocess(cleanString, z.string().optional().nullable()),
+    nomineePanNo: z.preprocess(cleanUpper, z.string().optional().nullable()),
+    nomineeAadharName: z.preprocess(cleanString, z.string().optional().nullable()),
+    nomineeAadharNo: z.preprocess(cleanDigits, z.string().optional().nullable()),
+    nomineeAddress: z.preprocess(cleanString, z.string().optional().nullable()),
     // Sponsor Details
-    sponsorName: z.string().optional().nullable(),
-    sponsorCode: z.string().optional().nullable(),
-    sponsorContact: z.string().optional().nullable()
+    sponsorName: z.preprocess(cleanString, z.string().optional().nullable()),
+    sponsorCode: z.preprocess(cleanString, z.string().optional().nullable()),
+    sponsorContact: z.preprocess(cleanDigits, z.string().optional().nullable())
 });
+
 /**
  * Register or update an associate enrollment and related details in a single database transaction.
  */
@@ -67,9 +118,13 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
     const year = new Date().getFullYear();
     let generatedId = "";
     const panStr = String(data.panNo || '').trim().toUpperCase();
-    const aadharStr = String(data.aadharNo || '').trim();
-    const contactStr = String(data.contact1 || '').trim();
+    const aadharStr = String(data.aadharNo || '').replace(/[\s-]/g, '').trim();
+    const contactStr = String(data.contact1 || '').replace(/[\s-]/g, '').trim();
     const emailStr = data.email ? String(data.email).trim().toLowerCase() : null;
+    const dobStr = normalizeDate(data.dob) || data.dob;
+    const signDateStr = normalizeDate(data.signDate) || new Date().toISOString().split('T')[0];
+    const nomineeDobStr = normalizeDate(data.nomineeDob);
+
     // Perform inside transaction so that failure in any step rolls back everything
     await sql.begin(async (tx) => {
         let userRow = null;
@@ -100,12 +155,12 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
             await tx `
         UPDATE associate_enrollment SET
           full_name = ${data.fullName},
-          dob = ${data.dob},
+          dob = ${dobStr},
           gender = ${data.gender},
           father_name = ${data.fatherName || null},
           mother_name = ${data.motherName || null},
           spouse_name = ${data.spouseName || null},
-          contact_no_1 = ${data.contact1},
+          contact_no_1 = ${contactStr},
           contact_no_2 = ${data.contact2 || null},
           nationality = ${data.nationality || 'Indian'},
           residential_status = ${data.residentialStatus || null},
@@ -118,7 +173,7 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
           category = ${data.category || null},
           religion = ${data.religion || null},
           applicant_photo_path = COALESCE(${finalApplicantPhoto}, applicant_photo_path),
-          sign_date = ${data.signDate || null},
+          sign_date = ${signDateStr || null},
           terms_accepted = ${Boolean(data.termsAccepted)},
           terms_accepted_at = NOW(),
           updated_at = NOW()
@@ -149,10 +204,10 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
           category, religion, applicant_photo_path, sign_date,
           terms_accepted, terms_accepted_at, status
         ) VALUES (
-          ${generatedId}, ${data.fullName}, ${data.dob}, ${data.gender}, ${data.fatherName || null}, ${data.motherName || null}, ${data.spouseName || null},
-          ${data.contact1}, ${data.contact2 || null}, ${data.nationality || 'Indian'}, ${data.residentialStatus || null},
+          ${generatedId}, ${data.fullName}, ${dobStr}, ${data.gender}, ${data.fatherName || null}, ${data.motherName || null}, ${data.spouseName || null},
+          ${contactStr}, ${data.contact2 || null}, ${data.nationality || 'Indian'}, ${data.residentialStatus || null},
           ${panStr}, ${aadharStr}, ${emailStr}, ${data.occupation || null}, ${data.annualIncome || null}, ${data.education || null},
-          ${data.category || null}, ${data.religion || null}, ${applicantPhotoPath || null}, ${data.signDate || null},
+          ${data.category || null}, ${data.religion || null}, ${applicantPhotoPath || null}, ${signDateStr || null},
           ${Boolean(data.termsAccepted)}, NOW(), 'pending'
         )
       `;
@@ -195,7 +250,7 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
           associate_id, nominee_name, dob, gender, nationality, residential_status,
           relationship, pan_name, pan_no, aadhar_name, aadhar_no, address, photo_path
         ) VALUES (
-          ${generatedId}, ${data.nomineeName}, ${data.nomineeDob || null}, ${data.nomineeGender || null},
+          ${generatedId}, ${data.nomineeName}, ${nomineeDobStr || null}, ${data.nomineeGender || null},
           ${data.nomineeNationality || 'Indian'}, ${data.nomineeResStatus || null}, ${data.nomineeRelationship || null},
           ${data.nomineePanName || null}, ${data.nomineePanNo || null}, ${data.nomineeAadharName || null},
           ${data.nomineeAadharNo || null}, ${data.nomineeAddress || null}, ${nomineePhotoPath || null}

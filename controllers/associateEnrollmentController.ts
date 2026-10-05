@@ -65,9 +65,10 @@ export async function createAssociateEnrollment(req: Request, res: Response): Pr
         field: err.path.join("."),
         message: err.message
       }));
+      const detailedMsg = formatErrors.map((e: any) => `${e.field ? e.field + ': ' : ''}${e.message}`).join(', ');
       return res.status(400).json({
         success: false,
-        message: "Validation failed.",
+        message: detailedMsg ? `Validation failed: ${detailedMsg}` : "Validation failed.",
         errors: formatErrors
       });
     }
