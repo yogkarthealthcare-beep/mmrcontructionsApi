@@ -10,4 +10,11 @@ yarn-error.log*
 *_dump.json
 *_report.txt
 database_tables_schema.txt
+check_db_plots.*
+inspect_sites.*
+sync_site4_plots.*
+scratch.*
+temp_*
+test_*
+
 

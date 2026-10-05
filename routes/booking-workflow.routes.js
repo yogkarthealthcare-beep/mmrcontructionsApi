@@ -4,6 +4,8 @@ import PDFDocument from "pdfkit";
 import sql from "../db.js";
 import GatewayFactory from "../payment/GatewayFactory.js";
 import { ensureEmiSchedulesForBooking } from "../services/emi.service.js";
+import { setPlotStatus } from "../services/plotStatus.service.js";
+import { dispatchBookingNotification } from "../services/bookingNotification.service.js";
 
 const router = express.Router();
 const ok = (res, data, message = "Success", status = 200) =>
@@ -310,10 +312,68 @@ async function completeBooking(bookingId, payment, adminId = null) {
         confirmed_at = NOW(),
         updated_at = NOW()
       WHERE booking_id = ${bookingId}`;
-    await db`UPDATE plots SET plot_status = 'Booked', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`;
+    
+    await setPlotStatus(booking.plot_id, 'Booked', {
+      adminId,
+      reason: 'Booking Confirmed via Workflow',
+      db
+    });
+
     await db`
       UPDATE plot_booking_locks SET status = 'Converted', updated_at = NOW()
       WHERE booking_id = ${bookingId} AND status = 'Active'`;
+    
+    // In same transaction: all OTHER active bookings on that plot become Waitlisted
+    const otherBookings = await db`
+      SELECT b.booking_id, b.user_id, u.full_name, u.email, p.plot_number, s.site_name
+      FROM bookings b
+      JOIN users u ON u.user_id = b.user_id
+      JOIN plots p ON p.plot_id = b.plot_id
+      JOIN sites s ON s.site_id = p.site_id
+      WHERE b.plot_id = ${booking.plot_id}
+        AND b.booking_id != ${bookingId}
+        AND b.booking_status IN ('Submitted', 'PaymentPending', 'Allocated')
+      ORDER BY b.created_at ASC`;
+
+    let pos = 1;
+    for (const other of otherBookings) {
+      await db`
+        UPDATE bookings
+        SET booking_status = 'Waitlisted',
+            queue_position = ${pos},
+            updated_at = NOW()
+        WHERE booking_id = ${other.booking_id}`;
+      
+      try {
+        await db`
+          INSERT INTO plot_booking_history (plot_id, booking_id, user_id, event_type, event_note, triggered_by_admin, plot_status_at_time, created_at)
+          VALUES (${booking.plot_id}, ${other.booking_id}, ${other.user_id}, 'BookingWaitlisted', 'Plot allotted to another booking. Placed on waitlist.', ${adminId}, 'Booked', NOW())`;
+      } catch (_) {}
+
+      dispatchBookingNotification('booking_waitlisted', {
+        userId: other.user_id,
+        userEmail: other.email,
+        userName: other.full_name,
+        plotNumber: other.plot_number,
+        siteName: other.site_name,
+        bookingId: other.booking_id,
+        queuePosition: pos,
+        adminId
+      });
+      pos++;
+    }
+
+    dispatchBookingNotification('booking_confirmed', {
+      userId: booking.user_id,
+      userEmail: booking.email,
+      userName: booking.full_name,
+      plotNumber: booking.plot_number,
+      siteName: booking.site_name,
+      bookingId: booking.booking_id,
+      bookingSerial: booking.booking_serial,
+      adminId
+    });
+
     const [paymentRow] = await db`
       UPDATE booking_payment_records SET
         status = 'Paid',
@@ -1243,10 +1303,652 @@ router.post("/admin/bookings/manual", adminAuth, async (req, res) => {
       await db`UPDATE plots SET plot_status = 'InProcess', updated_at = NOW() WHERE plot_id = ${plotId}`;
       return booking;
     });
-    return ok(res, result, "Plot assigned. Payment verification is pending.", 201);
+    return ok(res, result, "Booking manually assigned.");
   } catch (error) {
     return fail(res, error.message, error.status || 400);
   }
 });
 
-export default router;
+// ============================================================================
+// PHASE 2: MARK AS SOLD, WAITLIST, ADMIN SALES MAP, AND WORKFLOW ENHANCEMENTS
+// ============================================================================
+
+// 1. Mark as Sold (Registry Details & Final Price)
+router.post("/admin/bookings/:id/mark-sold", adminAuth, async (req, res) => {
+  try {
+    const bookingId = Number(req.params.id);
+    const {
+      final_sold_price,
+      sold_date = new Date().toISOString().slice(0, 10),
+      registry_no,
+      registry_date,
+      mutation_date,
+      possession_date,
+      document_path,
+      remarks
+    } = req.body || {};
+
+    const [booking] = await sql`
+      SELECT b.*, u.full_name, u.email, u.mobile_no, p.plot_number, p.base_price, p.plot_status, s.site_name
+      FROM bookings b
+      JOIN users u ON u.user_id = b.user_id
+      JOIN plots p ON p.plot_id = b.plot_id
+      JOIN sites s ON s.site_id = p.site_id
+      WHERE b.booking_id = ${bookingId}`;
+
+    if (!booking) return fail(res, "Booking not found.", 404);
+
+    // Validation rules
+    if (booking.booking_status !== "Confirmed" && booking.workflow_status !== "Fully Paid") {
+      return fail(res, "Only Confirmed bookings can be marked as Sold.", 400);
+    }
+    if (booking.plot_status !== "Booked" && booking.plot_status !== "Sold") {
+      return fail(res, "Plot must be in Booked state before marking as Sold.", 400);
+    }
+
+    const remainingBal = Number(booking.remaining_balance || 0);
+    if (remainingBal > 0) {
+      return fail(res, `Cannot mark as Sold. Outstanding balance of ₹${remainingBal.toLocaleString('en-IN')} remains.`, 400);
+    }
+
+    // Check for pending payments under verification
+    try {
+      const [pendingPay] = await sql`
+        SELECT COUNT(*)::int AS count
+        FROM payment_ledger
+        WHERE booking_id = ${bookingId}
+          AND payment_status IN ('Initiated', 'Submitted', 'UnderVerification')`;
+      if (Number(pendingPay?.count || 0) > 0) {
+        return fail(res, "Cannot mark as Sold while milestone payments are pending verification.", 400);
+      }
+    } catch (_) {}
+
+    const soldPriceValue = Number(final_sold_price || booking.base_price || 0);
+    if (soldPriceValue <= 0) {
+      return fail(res, "Final sold price must be greater than 0.", 400);
+    }
+
+    const result = await sql.begin(async (db) => {
+      // Idempotent upsert of registry record
+      const [existingReg] = await db`SELECT * FROM registry_records WHERE booking_id = ${bookingId} LIMIT 1`;
+      let registryRecord;
+
+      if (existingReg) {
+        [registryRecord] = await db`
+          UPDATE registry_records SET
+            registry_no = COALESCE(${registry_no || null}, registry_no),
+            registry_date = COALESCE(${registry_date || null}, registry_date),
+            mutation_date = COALESCE(${mutation_date || null}, mutation_date),
+            possession_date = COALESCE(${possession_date || null}, possession_date),
+            document_path = COALESCE(${document_path || null}, document_path),
+            final_sold_price = ${soldPriceValue},
+            remarks = COALESCE(${remarks || null}, remarks),
+            registry_status = 'Completed',
+            updated_at = NOW()
+          WHERE registry_id = ${existingReg.registry_id}
+          RETURNING *`;
+      } else {
+        [registryRecord] = await db`
+          INSERT INTO registry_records (
+            booking_id, user_id, plot_id, registry_status, registry_no,
+            registry_date, mutation_date, possession_date, document_path,
+            final_sold_price, remarks, created_by_admin_id, created_at, updated_at
+          ) VALUES (
+            ${bookingId}, ${booking.user_id}, ${booking.plot_id}, 'Completed', ${registry_no || null},
+            ${registry_date || null}, ${mutation_date || null}, ${possession_date || null}, ${document_path || null},
+            ${soldPriceValue}, ${remarks || null}, ${req.admin?.admin_id || null}, NOW(), NOW()
+          ) RETURNING *`;
+      }
+
+      // Update plot status to Sold with price and timestamp
+      await setPlotStatus(booking.plot_id, 'Sold', {
+        adminId: req.admin?.admin_id,
+        adminName: req.admin?.full_name,
+        reason: `Registry Completed (${registry_no || 'Standard'}) & Marked Sold`,
+        soldPrice: soldPriceValue,
+        soldAt: sold_date,
+        db
+      });
+
+      // Update booking workflow status
+      await db`
+        UPDATE bookings SET
+          workflow_status = 'Fully Paid',
+          updated_at = NOW()
+        WHERE booking_id = ${bookingId}`;
+
+      try {
+        await db`
+          INSERT INTO plot_booking_history (
+            plot_id, booking_id, user_id, event_type, event_note,
+            triggered_by_admin, plot_status_at_time, created_at
+          ) VALUES (
+            ${booking.plot_id}, ${bookingId}, ${booking.user_id}, 'PlotSold',
+            ${`Registry deed: ${registry_no || 'Recorded'}. Sold Price: ₹${soldPriceValue.toLocaleString('en-IN')}`},
+            ${req.admin?.admin_id || null}, 'Sold', NOW()
+          )`;
+      } catch (_) {}
+
+      return registryRecord;
+    });
+
+    // Send notifications to customer
+    dispatchBookingNotification('plot_sold', {
+      userId: booking.user_id,
+      userEmail: booking.email,
+      userName: booking.full_name,
+      plotNumber: booking.plot_number,
+      siteName: booking.site_name,
+      bookingId,
+      registryNo: registry_no,
+      soldPrice: soldPriceValue,
+      adminId: req.admin?.admin_id
+    });
+
+    return ok(res, result, "Plot registry recorded and status updated to Sold.");
+  } catch (error) {
+    return fail(res, error.message, 400);
+  }
+});
+
+// 2. Move Waitlisted/Active Booking to Another Vacant Plot
+router.post("/admin/bookings/:id/move-plot", adminAuth, async (req, res) => {
+  try {
+    const bookingId = Number(req.params.id);
+    const newPlotId = Number(req.body.new_plot_id);
+    const remarks = req.body.remarks || "Moved to alternative plot by Admin";
+
+    if (!newPlotId) return fail(res, "new_plot_id is required.", 400);
+
+    const result = await sql.begin(async (db) => {
+      const [booking] = await db`
+        SELECT b.*, u.full_name, u.email, s.site_name
+        FROM bookings b
+        JOIN users u ON u.user_id = b.user_id
+        LEFT JOIN sites s ON s.site_id = b.site_id
+        WHERE b.booking_id = ${bookingId}
+        FOR UPDATE`;
+      if (!booking) throw Object.assign(new Error("Booking not found."), { status: 404 });
+
+      const oldPlotId = booking.plot_id;
+
+      const [newPlot] = await db`
+        SELECT * FROM plots
+        WHERE plot_id = ${newPlotId}
+        FOR UPDATE`;
+      if (!newPlot) throw Object.assign(new Error("Target plot not found."), { status: 404 });
+      if (newPlot.plot_status !== "Vacant") {
+        throw Object.assign(new Error(`Target plot ${newPlot.plot_number} is ${newPlot.plot_status}. Only Vacant plots can be selected.`), { status: 409 });
+      }
+
+      const newBasePrice = Number(newPlot.base_price || 0);
+      const advanceAmount = Number(booking.advance_amount || 0);
+      const newBalance = Math.max(0, newBasePrice - advanceAmount);
+
+      // Update booking to point to new plot
+      const [updatedBooking] = await db`
+        UPDATE bookings SET
+          plot_id = ${newPlotId},
+          plot_number = ${newPlot.plot_number},
+          plot_area = ${newPlot.plot_area || null},
+          base_price = ${newBasePrice},
+          remaining_balance = ${newBalance},
+          booking_status = 'Submitted',
+          queue_position = 1,
+          workflow_status = 'Transferred to Plot ' || ${newPlot.plot_number},
+          notes = COALESCE(notes || ' | ', '') || ${remarks},
+          updated_at = NOW()
+        WHERE booking_id = ${bookingId}
+        RETURNING *`;
+
+      // Set new plot to InProcess
+      await setPlotStatus(newPlotId, 'InProcess', {
+        adminId: req.admin?.admin_id,
+        adminName: req.admin?.full_name,
+        reason: `Booking ${booking.booking_serial || bookingId} transferred from old plot`,
+        db
+      });
+
+      // Recalibrate old plot status: check if any active or waitlisted bookings remain on old plot
+      if (oldPlotId) {
+        const remainingOnOld = await db`
+          SELECT * FROM bookings
+          WHERE plot_id = ${oldPlotId}
+            AND booking_id != ${bookingId}
+            AND booking_status IN ('Confirmed', 'Submitted', 'PaymentPending', 'Allocated', 'Waitlisted')
+          ORDER BY queue_position ASC, created_at ASC`;
+
+        const hasConfirmed = remainingOnOld.some(b => b.booking_status === 'Confirmed');
+        const activeCount = remainingOnOld.filter(b => ['Submitted', 'PaymentPending', 'Allocated', 'Waitlisted'].includes(b.booking_status)).length;
+
+        if (!hasConfirmed && activeCount === 0) {
+          await setPlotStatus(oldPlotId, 'Vacant', {
+            adminId: req.admin?.admin_id,
+            adminName: req.admin?.full_name,
+            reason: 'Booking moved away and no other applicants remaining',
+            db
+          });
+        }
+      }
+
+      // History log
+      try {
+        await db`
+          INSERT INTO plot_booking_history (
+            plot_id, booking_id, user_id, event_type, event_note,
+            triggered_by_admin, plot_status_at_time, created_at
+          ) VALUES (
+            ${newPlotId}, ${bookingId}, ${booking.user_id}, 'PlotTransferred',
+            ${`Transferred to Plot ${newPlot.plot_number}. ${remarks}`},
+            ${req.admin?.admin_id || null}, 'InProcess', NOW()
+          )`;
+      } catch (_) {}
+
+      // Dispatch notification
+      dispatchBookingNotification('booking_submitted', {
+        userId: booking.user_id,
+        userEmail: booking.email,
+        userName: booking.full_name,
+        plotNumber: newPlot.plot_number,
+        siteName: booking.site_name,
+        bookingId,
+        bookingSerial: booking.booking_serial,
+        adminId: req.admin?.admin_id
+      });
+
+      return updatedBooking;
+    });
+
+    return ok(res, result, "Booking successfully moved to target plot.");
+  } catch (error) {
+    return fail(res, error.message, error.status || 400);
+  }
+});
+
+// 3. Cancel Booking with Refund Due Flag
+router.post("/admin/bookings/:id/cancel-refund-due", adminAuth, async (req, res) => {
+  try {
+    const bookingId = Number(req.params.id);
+    const reason = req.body.reason || req.body.cancellation_reason || "Cancelled by admin with refund due";
+
+    const result = await sql.begin(async (db) => {
+      const [booking] = await db`
+        SELECT b.*, u.full_name, u.email, p.plot_number, s.site_name
+        FROM bookings b
+        JOIN users u ON u.user_id = b.user_id
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        LEFT JOIN sites s ON s.site_id = p.site_id
+        WHERE b.booking_id = ${bookingId}
+        FOR UPDATE`;
+      if (!booking) throw Object.assign(new Error("Booking not found."), { status: 404 });
+
+      await db`
+        UPDATE bookings SET
+          booking_status = 'Cancelled',
+          refund_due = TRUE,
+          refund_reason = ${reason},
+          refund_marked_at = NOW(),
+          refund_marked_by_admin_id = ${req.admin?.admin_id || null},
+          cancellation_reason = ${reason},
+          cancelled_by_admin_id = ${req.admin?.admin_id || null},
+          cancelled_at = NOW(),
+          updated_at = NOW()
+        WHERE booking_id = ${bookingId}`;
+
+      // Recalibrate remaining waitlist queue positions on the plot
+      if (booking.plot_id) {
+        const remainingWaitlisted = await db`
+          SELECT booking_id FROM bookings
+          WHERE plot_id = ${booking.plot_id}
+            AND booking_status = 'Waitlisted'
+          ORDER BY queue_position ASC, created_at ASC`;
+
+        let pos = 1;
+        for (const w of remainingWaitlisted) {
+          await db`UPDATE bookings SET queue_position = ${pos} WHERE booking_id = ${w.booking_id}`;
+          pos++;
+        }
+      }
+
+      try {
+        await db`
+          INSERT INTO plot_booking_history (
+            plot_id, booking_id, user_id, event_type, event_note,
+            triggered_by_admin, plot_status_at_time, created_at
+          ) VALUES (
+            ${booking.plot_id || 0}, ${bookingId}, ${booking.user_id}, 'BookingCancelledRefundDue',
+            ${`Booking cancelled with Refund Due flag. Reason: ${reason}`},
+            ${req.admin?.admin_id || null}, 'Cancelled', NOW()
+          )`;
+      } catch (_) {}
+
+      dispatchBookingNotification('booking_cancelled', {
+        userId: booking.user_id,
+        userEmail: booking.email,
+        userName: booking.full_name,
+        plotNumber: booking.plot_number,
+        siteName: booking.site_name,
+        bookingId,
+        reason: `${reason} (Refund flagged for accounts processing)`,
+        adminId: req.admin?.admin_id
+      });
+
+      return { booking_id: bookingId, refund_due: true, reason };
+    });
+
+    return ok(res, result, "Booking cancelled and flagged as Refund Due.");
+  } catch (error) {
+    return fail(res, error.message, error.status || 400);
+  }
+});
+
+// 4. Promote Waitlisted Booking
+router.post("/admin/bookings/:id/promote", adminAuth, async (req, res) => {
+  try {
+    const bookingId = Number(req.params.id);
+
+    const result = await sql.begin(async (db) => {
+      const [booking] = await db`
+        SELECT b.*, u.full_name, u.email, p.plot_number, p.plot_status, s.site_name
+        FROM bookings b
+        JOIN users u ON u.user_id = b.user_id
+        JOIN plots p ON p.plot_id = b.plot_id
+        JOIN sites s ON s.site_id = p.site_id
+        WHERE b.booking_id = ${bookingId}
+        FOR UPDATE`;
+      if (!booking) throw Object.assign(new Error("Booking not found."), { status: 404 });
+
+      // Ensure no active confirmed booking exists on this plot
+      const [confirmedBooking] = await db`
+        SELECT booking_id FROM bookings
+        WHERE plot_id = ${booking.plot_id}
+          AND booking_status = 'Confirmed'
+        LIMIT 1`;
+      if (confirmedBooking) {
+        throw Object.assign(new Error("Cannot promote while a Confirmed booking exists on this plot."), { status: 409 });
+      }
+
+      await db`
+        UPDATE bookings SET
+          booking_status = 'Submitted',
+          queue_position = 1,
+          workflow_status = 'Promoted from Waitlist - Verification Pending',
+          updated_at = NOW()
+        WHERE booking_id = ${bookingId}`;
+
+      await setPlotStatus(booking.plot_id, 'InProcess', {
+        adminId: req.admin?.admin_id,
+        adminName: req.admin?.full_name,
+        reason: `Waitlisted booking ${booking.booking_serial || bookingId} promoted to Active`,
+        db
+      });
+
+      try {
+        await db`
+          INSERT INTO plot_booking_history (
+            plot_id, booking_id, user_id, event_type, event_note,
+            triggered_by_admin, plot_status_at_time, created_at
+          ) VALUES (
+            ${booking.plot_id}, ${bookingId}, ${booking.user_id}, 'BookingPromoted',
+            'Promoted from Waitlist to Active Booking by Admin',
+            ${req.admin?.admin_id || null}, 'InProcess', NOW()
+          )`;
+      } catch (_) {}
+
+      dispatchBookingNotification('booking_promoted', {
+        userId: booking.user_id,
+        userEmail: booking.email,
+        userName: booking.full_name,
+        plotNumber: booking.plot_number,
+        siteName: booking.site_name,
+        bookingId,
+        adminId: req.admin?.admin_id
+      });
+
+      return { booking_id: bookingId, booking_status: 'Submitted' };
+    });
+
+    return ok(res, result, "Booking promoted to Active status.");
+  } catch (error) {
+    return fail(res, error.message, error.status || 400);
+  }
+});
+
+// 5. Admin Sales Map Data Endpoint (Rich administrative overlay)
+router.get("/admin/sites/:id/sales-map", adminAuth, async (req, res) => {
+  try {
+    const siteId = Number(req.params.id);
+    if (!siteId) return fail(res, "Site ID is required.", 400);
+
+    const [site] = await sql`
+      SELECT site_id, site_name, location, city, map_image_url, is_active
+      FROM sites
+      WHERE site_id = ${siteId}`;
+    if (!site) return fail(res, "Site not found.", 404);
+
+    // Fetch all plots with active booking & customer overlays
+    const rawPlots = await sql`
+      SELECT
+        p.plot_id, p.site_id, p.plot_number, p.unit_type, p.plot_category,
+        p.plot_area AS area_gaj,
+        ROUND((COALESCE(p.plot_area, 0) * 9)::numeric, 2) AS area_sqft,
+        p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months,
+        p.plot_status,
+        p.sold_price, p.sold_at,
+        p.polygon_coordinates, p.x_coord, p.y_coord, p.width, p.height, p.label_x, p.label_y,
+        
+        -- Active or latest primary booking overlay
+        act.booking_id AS active_booking_id,
+        act.booking_serial,
+        act.booking_status,
+        act.workflow_status,
+        act.advance_amount,
+        act.remaining_balance,
+        act.booking_date,
+        act.user_id AS customer_id,
+        u.full_name AS customer_name,
+        u.mobile_no AS customer_mobile,
+        u.email AS customer_email,
+        
+        -- Associate / Sponsor Info
+        sp.full_name AS associate_name,
+        sp.member_id AS associate_code,
+        
+        -- Queue metrics
+        COALESCE(q.queue_count, 0)::int AS queue_count,
+        
+        -- Last status change history
+        hist.old_status AS last_old_status,
+        hist.new_status AS last_new_status,
+        hist.changed_at AS last_status_change_date,
+        hist.reason AS last_status_reason
+      FROM plots p
+      LEFT JOIN LATERAL (
+        SELECT b.booking_id, b.booking_serial, b.booking_status, b.workflow_status,
+               b.advance_amount, b.remaining_balance, b.user_id,
+               COALESCE(b.booking_date, b.created_at) AS booking_date
+        FROM bookings b
+        WHERE b.plot_id = p.plot_id
+          AND b.booking_status IN ('Confirmed', 'Submitted', 'PaymentPending', 'Allocated')
+        ORDER BY CASE WHEN b.booking_status = 'Confirmed' THEN 1 ELSE 2 END, b.created_at DESC
+        LIMIT 1
+      ) act ON TRUE
+      LEFT JOIN users u ON u.user_id = act.user_id
+      LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS queue_count
+        FROM bookings b
+        WHERE b.plot_id = p.plot_id AND b.booking_status = 'Waitlisted'
+      ) q ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT old_status, new_status, changed_at, reason
+        FROM plot_status_history h
+        WHERE h.plot_id = p.plot_id
+        ORDER BY h.changed_at DESC
+        LIMIT 1
+      ) hist ON TRUE
+      WHERE p.site_id = ${siteId}
+      ORDER BY p.plot_number ASC`;
+
+    // Process plots and compute summary counts
+    let totalCount = 0;
+    let vacantCount = 0;
+    let inProcessCount = 0;
+    let bookedCount = 0;
+    let soldCount = 0;
+    let totalSalesValue = 0;
+    let totalCollected = 0;
+    let totalPending = 0;
+
+    const plots = rawPlots.map((p) => {
+      totalCount++;
+      const status = p.plot_status || 'Vacant';
+      if (status === 'Vacant') vacantCount++;
+      else if (status === 'InProcess') inProcessCount++;
+      else if (status === 'Booked') bookedCount++;
+      else if (status === 'Sold') soldCount++;
+
+      const plotSoldPrice = Number(p.sold_price || (status === 'Sold' ? p.base_price : 0) || 0);
+      if (status === 'Sold') {
+        totalSalesValue += plotSoldPrice;
+        totalCollected += plotSoldPrice;
+      } else if (status === 'Booked') {
+        const adv = Number(p.advance_amount || 0);
+        const bal = Number(p.remaining_balance || Math.max(0, Number(p.base_price || 0) - adv));
+        totalCollected += adv;
+        totalPending += bal;
+      }
+
+      return {
+        plot_id: p.plot_id,
+        site_id: p.site_id,
+        plot_number: p.plot_number,
+        unit_type: p.unit_type || 'PLOT',
+        plot_category: p.plot_category,
+        plot_status: p.plot_status,
+        area_gaj: Number(p.area_gaj || 0),
+        area_sqft: Number(p.area_sqft || 0),
+        base_price: Number(p.base_price || 0),
+        sold_price: p.sold_price ? Number(p.sold_price) : null,
+        sold_at: p.sold_at || null,
+        polygon_coordinates: Array.isArray(p.polygon_coordinates) ? p.polygon_coordinates : [],
+        x_coord: p.x_coord,
+        y_coord: p.y_coord,
+        width: p.width,
+        height: p.height,
+        label_x: p.label_x,
+        label_y: p.label_y,
+        active_booking: p.active_booking_id ? {
+          booking_id: p.active_booking_id,
+          booking_serial: p.booking_serial,
+          booking_status: p.booking_status,
+          workflow_status: p.workflow_status,
+          advance_amount: Number(p.advance_amount || 0),
+          remaining_balance: Number(p.remaining_balance || 0),
+          booking_date: p.booking_date,
+          customer_id: p.customer_id,
+          customer_name: p.customer_name,
+          customer_mobile: p.customer_mobile,
+          customer_email: p.customer_email,
+          associate_name: p.associate_name,
+          associate_code: p.associate_code
+        } : null,
+        queue_count: p.queue_count || 0,
+        last_status_change: p.last_status_change_date ? {
+          old_status: p.last_old_status,
+          new_status: p.last_new_status,
+          changed_at: p.last_status_change_date,
+          reason: p.last_status_reason
+        } : null
+      };
+    });
+
+    const summary = {
+      total_units: totalCount,
+      vacant_units: vacantCount,
+      in_process_units: inProcessCount,
+      booked_units: bookedCount,
+      sold_units: soldCount,
+      total_sales_value: totalSalesValue,
+      total_collected: totalCollected,
+      total_pending: totalPending
+    };
+
+    return ok(res, { site, summary, plots });
+  } catch (error) {
+    return fail(res, error.message, 400);
+  }
+});
+
+// 6. Release Plot back to Vacant (if no Confirmed booking)
+router.post("/admin/plots/:id/release", adminAuth, async (req, res) => {
+  try {
+    const plotId = Number(req.params.id);
+    const reason = req.body.reason || "Plot released to Vacant by Admin";
+
+    const [confirmed] = await sql`
+      SELECT booking_id FROM bookings
+      WHERE plot_id = ${plotId} AND booking_status = 'Confirmed'
+      LIMIT 1`;
+    if (confirmed) {
+      return fail(res, "Cannot release plot while a Confirmed booking exists. Cancel the confirmed booking first.", 409);
+    }
+
+    await setPlotStatus(plotId, 'Vacant', {
+      adminId: req.admin?.admin_id,
+      adminName: req.admin?.full_name,
+      reason
+    });
+
+    return ok(res, { plot_id: plotId, plot_status: 'Vacant' }, "Plot successfully released to Vacant.");
+  } catch (error) {
+    return fail(res, error.message, 400);
+  }
+});
+
+// 7. Get Plot Status History Timeline
+router.get("/admin/plots/:id/status-history", adminAuth, async (req, res) => {
+  try {
+    const plotId = Number(req.params.id);
+    const history = await sql`
+      SELECT h.history_id, h.plot_id, h.old_status, h.new_status, h.reason, h.changed_at,
+             h.changed_by_admin_id, COALESCE(u.full_name, 'Admin') AS admin_name
+      FROM plot_status_history h
+      LEFT JOIN users u ON u.user_id = h.changed_by_admin_id
+      WHERE h.plot_id = ${plotId}
+      ORDER BY h.changed_at DESC`;
+
+    return ok(res, history);
+  } catch (error) {
+    return fail(res, error.message, 400);
+  }
+});
+
+// 8. Backward Compatibility Aliases for Legacy API Service Endpoints
+router.post("/admin/bookings/:id/approve-offline", adminAuth, (req, res, next) => {
+  req.url = `/admin/bookings/${req.params.id}/offline/approve`;
+  router.handle(req, res, next);
+});
+
+router.post("/admin/bookings/:id/reject-offline", adminAuth, (req, res, next) => {
+  req.url = `/admin/bookings/${req.params.id}/offline/reject`;
+  router.handle(req, res, next);
+});
+
+router.post("/admin/bookings/:id/reschedule", adminAuth, (req, res, next) => {
+  req.url = `/admin/bookings/${req.params.id}/appointment`;
+  router.handle(req, res, next);
+});
+
+router.get("/admin/booking/workflow-config", adminAuth, (req, res, next) => {
+  req.url = `/admin/booking-workflow/settings`;
+  router.handle(req, res, next);
+});
+
+router.get("/admin/booking/workflow-alerts", adminAuth, (req, res, next) => {
+  req.url = `/admin/booking-workflow/alerts`;
+  router.handle(req, res, next);
+});
+
+module.exports = router;
+

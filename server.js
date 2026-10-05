@@ -38,8 +38,9 @@ import fileStorageService, { saveFileToVPS, deleteFileFromStorage, getStorageRoo
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
 import { getVersionInfo } from "./services/version.service.js";
-import GatewayFactory from "./payment/GatewayFactory.js";
 import { ensureEmiSchedulesForBooking, ensureInvoiceForEmi, ensureReceiptForEmi } from "./services/emi.service.js";
+import { setPlotStatus } from "./services/plotStatus.service.js";
+import { dispatchBookingNotification } from "./services/bookingNotification.service.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -9861,7 +9862,15 @@ app.get("/api/admin/bookings",
       const searchFilter = search ? String(search) : null;
 
       const conds = [];
-      if (statusFilter) conds.push(sql`b.booking_status::text = ${statusFilter}`);
+      if (statusFilter === 'RefundDue') {
+        conds.push(sql`b.refund_due = TRUE`);
+      } else if (statusFilter === 'Waitlisted') {
+        conds.push(sql`b.booking_status::text = 'Waitlisted'`);
+      } else if (statusFilter === 'Sold') {
+        conds.push(sql`(b.booking_status::text = 'Sold' OR p.plot_status = 'Sold' OR b.workflow_status = 'Fully Paid')`);
+      } else if (statusFilter) {
+        conds.push(sql`b.booking_status::text = ${statusFilter}`);
+      }
       if (siteIdFilter) conds.push(sql`COALESCE(b.site_id, p.site_id, s.site_id) = ${siteIdFilter}`);
       if (fromDateFilter) conds.push(sql`COALESCE(b.booking_date, b.created_at)::date >= ${fromDateFilter}::date`);
       if (toDateFilter) conds.push(sql`COALESCE(b.booking_date, b.created_at)::date <= ${toDateFilter}::date`);
@@ -9901,6 +9910,9 @@ app.get("/api/admin/bookings",
                COALESCE(b.required_booking_amount, 0) AS required_booking_amount,
                COALESCE(b.remaining_balance, 0) AS remaining_balance,
                COALESCE(b.base_price, p.base_price, 0) AS base_price,
+               COALESCE(b.queue_position, 1) AS queue_position,
+               COALESCE(b.refund_due, FALSE) AS refund_due,
+               b.refund_reason,
                CASE
                  WHEN b.booking_status::text = 'Confirmed' THEN 'Paid'
                  WHEN COALESCE(b.advance_amount, 0) > 0 THEN 'Partial'
@@ -10017,19 +10029,28 @@ app.get("/api/admin/bookings/:id",
         appointment = ap || null;
       } catch (_) {}
 
-      let payments = [];
+      let registry = null;
       try {
-        payments = await sql`SELECT * FROM payment_ledger WHERE booking_id = ${req.params.id} ORDER BY created_at DESC`;
-        if (!payments || payments.length === 0) {
-          payments = await sql`SELECT * FROM booking_payment_records WHERE booking_id = ${req.params.id} ORDER BY created_at DESC`;
-        }
-      } catch (_) {
+        const [reg] = await sql`SELECT * FROM registry_records WHERE booking_id = ${req.params.id} LIMIT 1`;
+        registry = reg || null;
+      } catch (_) {}
+
+      let other_bookings_on_plot = [];
+      if (booking.plot_id) {
         try {
-          payments = await sql`SELECT * FROM booking_payment_records WHERE booking_id = ${req.params.id} ORDER BY created_at DESC`;
+          other_bookings_on_plot = await sql`
+            SELECT b.booking_id, b.booking_serial, b.booking_status, b.advance_amount, b.remaining_balance,
+                   COALESCE(b.queue_position, 1) AS queue_position, COALESCE(b.refund_due, FALSE) AS refund_due,
+                   b.refund_reason, COALESCE(b.booking_date, b.created_at) AS booking_date,
+                   u.user_id, u.full_name AS customer_name, u.mobile_no, u.email
+            FROM bookings b
+            LEFT JOIN users u ON u.user_id = b.user_id
+            WHERE b.plot_id = ${booking.plot_id} AND b.booking_id != ${booking.booking_id}
+            ORDER BY b.queue_position ASC, b.created_at ASC`;
         } catch (_) {}
       }
 
-      return ok(res, { ...booking, payment_proofs, emi_schedule, history, appointment, payments });
+      return ok(res, { ...booking, payment_proofs, emi_schedule, history, appointment, payments, registry, other_bookings_on_plot });
     } catch (e) {
       console.error("[Admin Booking Detail Error]:", e);
       return err(res, e.message);
@@ -10044,12 +10065,17 @@ app.post("/api/admin/bookings/:id/confirm",
     try {
       const bid = req.params.id;
       const { notes } = req.body || {};
-      const [booking] = await sql`SELECT * FROM bookings WHERE booking_id = ${bid}`;
+      const [booking] = await sql`
+        SELECT b.*, u.full_name, u.email, s.site_name
+        FROM bookings b
+        JOIN users u ON u.user_id = b.user_id
+        LEFT JOIN sites s ON s.site_id = b.site_id
+        WHERE b.booking_id = ${bid}`;
       if (!booking) return err(res, "Booking not found", 404);
       if (booking.booking_status === "Confirmed")
         return err(res, "Already confirmed", 400);
 
-      const [plot] = await sql`SELECT base_price, monthly_emi, emi_tenure_months FROM plots WHERE plot_id = ${booking.plot_id}`;
+      const [plot] = await sql`SELECT base_price, monthly_emi, emi_tenure_months, plot_number FROM plots WHERE plot_id = ${booking.plot_id}`;
       if (booking.payment_type === "EMI") {
         const start = new Date(); start.setMonth(start.getMonth() + 1);
         const tenure = Number(plot.emi_tenure_months || 60);
@@ -10072,15 +10098,52 @@ app.post("/api/admin/bookings/:id/confirm",
           confirmed_by_admin_id = ${req.admin.admin_id}, confirmed_at = NOW(), updated_at = NOW()
         WHERE booking_id = ${bid}`;
 
-      await sql`UPDATE plots SET plot_status = 'Booked', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`;
-
-      await safeInsertPlotStatusHistory({
-        plot_id: booking.plot_id,
-        old_status: 'InProcess',
-        new_status: 'Booked',
-        changed_by_admin_id: req.admin.admin_id,
+      // Update plot status via helper
+      await setPlotStatus(booking.plot_id, 'Booked', {
+        adminId: req.admin.admin_id,
+        adminName: req.admin.full_name,
         reason: 'Booking Confirmed'
       });
+
+      // Move all OTHER active bookings on this plot to Waitlisted
+      const otherBookings = await sql`
+        SELECT b.booking_id, b.user_id, u.full_name, u.email, p.plot_number, s.site_name
+        FROM bookings b
+        JOIN users u ON u.user_id = b.user_id
+        JOIN plots p ON p.plot_id = b.plot_id
+        JOIN sites s ON s.site_id = p.site_id
+        WHERE b.plot_id = ${booking.plot_id}
+          AND b.booking_id != ${bid}
+          AND b.booking_status IN ('Submitted', 'PaymentPending', 'Allocated')
+        ORDER BY b.created_at ASC`;
+
+      let pos = 1;
+      for (const other of otherBookings) {
+        await sql`
+          UPDATE bookings
+          SET booking_status = 'Waitlisted',
+              queue_position = ${pos},
+              updated_at = NOW()
+          WHERE booking_id = ${other.booking_id}`;
+
+        try {
+          await sql`
+            INSERT INTO plot_booking_history (plot_id, booking_id, user_id, event_type, event_note, triggered_by_admin, plot_status_at_time, created_at)
+            VALUES (${booking.plot_id}, ${other.booking_id}, ${other.user_id}, 'BookingWaitlisted', 'Plot allotted to another booking. Placed on waitlist.', ${req.admin.admin_id}, 'Booked', NOW())`;
+        } catch (_) {}
+
+        dispatchBookingNotification('booking_waitlisted', {
+          userId: other.user_id,
+          userEmail: other.email,
+          userName: other.full_name,
+          plotNumber: other.plot_number,
+          siteName: other.site_name,
+          bookingId: other.booking_id,
+          queuePosition: pos,
+          adminId: req.admin.admin_id
+        });
+        pos++;
+      }
 
       await sql`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
@@ -10095,12 +10158,18 @@ app.post("/api/admin/bookings/:id/confirm",
         triggeredByAdmin: req.admin.admin_id,
         plotStatusAtTime: "Booked",
       });
-      await addUserNotification({
+
+      dispatchBookingNotification('booking_confirmed', {
         userId: booking.user_id,
-        adminId: req.admin.admin_id,
-        title: "Booking confirmed",
-        message: "Badhaai! Aapki booking confirm ho gayi.",
+        userEmail: booking.email,
+        userName: booking.full_name,
+        plotNumber: plot?.plot_number || booking.plot_number,
+        siteName: booking.site_name,
+        bookingId: bid,
+        bookingSerial: booking.booking_serial,
+        adminId: req.admin.admin_id
       });
+
       const commissionResult = await generateCommissionForPayment(req, {
         bookingId: bid,
         sourceType: booking.payment_type === "FullPayment" ? "FullPayment" : "InitialPayment",
@@ -10127,7 +10196,13 @@ app.post("/api/admin/bookings/:id/cancel",
       const reason = req.body?.reason || req.body?.cancellation_reason;
       if (!reason) return err(res, "reason required", 400);
 
-      const [booking] = await sql`SELECT plot_id, user_id FROM bookings WHERE booking_id = ${req.params.id}`;
+      const [booking] = await sql`
+        SELECT b.*, u.full_name, u.email, p.plot_number, s.site_name
+        FROM bookings b
+        JOIN users u ON u.user_id = b.user_id
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        LEFT JOIN sites s ON s.site_id = p.site_id
+        WHERE b.booking_id = ${req.params.id}`;
       if (!booking) return err(res, "Booking not found", 404);
 
       await sql`
@@ -10136,7 +10211,39 @@ app.post("/api/admin/bookings/:id/cancel",
           cancelled_at = NOW(), updated_at = NOW()
         WHERE booking_id = ${req.params.id}`;
 
-      await sql`UPDATE plots SET plot_status = 'Vacant', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`;
+      // Set plot to Vacant via helper
+      if (booking.plot_id) {
+        await setPlotStatus(booking.plot_id, 'Vacant', {
+          adminId: req.admin.admin_id,
+          adminName: req.admin.full_name,
+          reason: `Booking Cancelled: ${reason}`
+        });
+
+        // Notify earliest waitlisted customer
+        const [earliestWaitlisted] = await sql`
+          SELECT b.booking_id, b.user_id, u.full_name, u.email, p.plot_number, s.site_name
+          FROM bookings b
+          JOIN users u ON u.user_id = b.user_id
+          JOIN plots p ON p.plot_id = b.plot_id
+          JOIN sites s ON s.site_id = p.site_id
+          WHERE b.plot_id = ${booking.plot_id}
+            AND b.booking_status = 'Waitlisted'
+          ORDER BY b.queue_position ASC, b.created_at ASC
+          LIMIT 1`;
+
+        if (earliestWaitlisted) {
+          dispatchBookingNotification('plot_available_again', {
+            userId: earliestWaitlisted.user_id,
+            userEmail: earliestWaitlisted.email,
+            userName: earliestWaitlisted.full_name,
+            plotNumber: earliestWaitlisted.plot_number,
+            siteName: earliestWaitlisted.site_name,
+            bookingId: earliestWaitlisted.booking_id,
+            adminId: req.admin.admin_id
+          });
+        }
+      }
+
       await addPlotBookingHistory({
         plotId: booking.plot_id,
         bookingId: req.params.id,
@@ -10147,11 +10254,16 @@ app.post("/api/admin/bookings/:id/cancel",
         plotStatusAtTime: "Vacant",
       });
       await logAdminAudit(req, "BookingManagement", "BookingCancelled", "bookings", req.params.id, sql.json({ reason }));
-      await addUserNotification({
+
+      dispatchBookingNotification('booking_cancelled', {
         userId: booking.user_id,
-        adminId: req.admin.admin_id,
-        title: "Booking cancelled",
-        message: `Aapki booking cancel ho gayi. Reason: ${reason}`,
+        userEmail: booking.email,
+        userName: booking.full_name,
+        plotNumber: booking.plot_number,
+        siteName: booking.site_name,
+        bookingId: req.params.id,
+        reason,
+        adminId: req.admin.admin_id
       });
 
       return ok(res, {}, "Booking cancelled. Plot set to Vacant.");
@@ -10164,108 +10276,18 @@ app.post("/api/admin/bookings/:id/cancel",
 app.patch("/api/admin/bookings/:id/confirm",
   verifyAdminToken,
   role("SuperAdmin", "SiteManager", "FinanceManager"),
-  async (req, res) => {
-    try {
-      const bid = req.params.id;
-      const { notes } = req.body || {};
-      const [booking] = await sql`SELECT * FROM bookings WHERE booking_id = ${bid}`;
-      if (!booking) return err(res, "Booking not found", 404);
-      if (booking.booking_status === "Confirmed") return err(res, "Already confirmed", 400);
-      const [plot] = await sql`SELECT base_price, monthly_emi, emi_tenure_months FROM plots WHERE plot_id = ${booking.plot_id}`;
-      if (booking.payment_type === "EMI") {
-        const start = new Date(); start.setMonth(start.getMonth() + 1);
-        const tenure = Number(plot.emi_tenure_months || 60);
-        for (let i = 1; i <= tenure; i++) {
-          const due = new Date(start); due.setMonth(due.getMonth() + (i - 1));
-          try {
-            await sql`
-              INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
-              VALUES (${bid}, ${booking.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi || 0})
-            `;
-          } catch (emiErr) {
-            console.warn(`[MMR API] Patch confirm EMI schedule notice (installment ${i}):`, emiErr?.message);
-          }
-        }
-      }
-      await sql`
-        UPDATE bookings SET booking_status = 'Confirmed',
-          confirmed_by_admin_id = ${req.admin.admin_id}, confirmed_at = NOW(), updated_at = NOW()
-        WHERE booking_id = ${bid}`;
-      await sql`UPDATE plots SET plot_status = 'Booked', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`;
-      await safeInsertPlotStatusHistory({
-        plot_id: booking.plot_id,
-        old_status: 'InProcess',
-        new_status: 'Booked',
-        changed_by_admin_id: req.admin.admin_id,
-        reason: 'Booking Confirmed'
-      });
-      await addPlotBookingHistory({
-        plotId: booking.plot_id,
-        bookingId: bid,
-        userId: booking.user_id,
-        eventType: "BookingConfirmed",
-        eventNote: notes || "Payment verified by admin",
-        triggeredByAdmin: req.admin.admin_id,
-        plotStatusAtTime: "Booked",
-      });
-      await logAdminAudit(req, "BookingManagement", "BookingConfirmed", "bookings", bid, sql.json({ notes: notes || null }));
-      await addUserNotification({
-        userId: booking.user_id,
-        adminId: req.admin.admin_id,
-        title: "Booking confirmed",
-        message: "Badhaai! Aapki booking confirm ho gayi.",
-      });
-      const [plotForCommission] = await sql`SELECT base_price FROM plots WHERE plot_id = ${booking.plot_id}`;
-      const commissionResult = await generateCommissionForPayment(req, {
-        bookingId: bid,
-        sourceType: booking.payment_type === "FullPayment" ? "FullPayment" : "InitialPayment",
-        sourceId: `booking-${bid}`,
-        receivedAmount: booking.payment_type === "FullPayment" ? plotForCommission?.base_price : booking.advance_amount,
-        paymentType: booking.payment_type,
-      });
-      await logAdminAudit(req, "MLM", "GenerateCommissionOnBookingConfirm", "bookings", bid, sql.json(commissionResult));
-      return ok(res, {}, "Booking confirmed.");
-    } catch (e) {
-      return err(res, e.message);
-    }
+  (req, res, next) => {
+    req.url = `/api/admin/bookings/${req.params.id}/confirm`;
+    app.handle(req, res, next);
   }
 );
 
 app.patch("/api/admin/bookings/:id/cancel",
   verifyAdminToken,
   role("SuperAdmin", "SiteManager", "FinanceManager"),
-  async (req, res) => {
-    try {
-      const reason = req.body?.reason || req.body?.cancellation_reason;
-      if (!reason) return err(res, "reason required", 400);
-      const [booking] = await sql`SELECT plot_id, user_id FROM bookings WHERE booking_id = ${req.params.id}`;
-      if (!booking) return err(res, "Booking not found", 404);
-      await sql`
-        UPDATE bookings SET booking_status = 'Cancelled',
-          cancellation_reason = ${reason}, cancelled_by_admin_id = ${req.admin.admin_id},
-          cancelled_at = NOW(), updated_at = NOW()
-        WHERE booking_id = ${req.params.id}`;
-      await sql`UPDATE plots SET plot_status = 'Vacant', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`;
-      await addPlotBookingHistory({
-        plotId: booking.plot_id,
-        bookingId: req.params.id,
-        userId: booking.user_id,
-        eventType: "BookingCancelled",
-        eventNote: reason,
-        triggeredByAdmin: req.admin.admin_id,
-        plotStatusAtTime: "Vacant",
-      });
-      await logAdminAudit(req, "BookingManagement", "BookingCancelled", "bookings", req.params.id, sql.json({ reason }));
-      await addUserNotification({
-        userId: booking.user_id,
-        adminId: req.admin.admin_id,
-        title: "Booking cancelled",
-        message: `Aapki booking cancel ho gayi. Reason: ${reason}`,
-      });
-      return ok(res, {}, "Booking cancelled. Plot set to Vacant.");
-    } catch (e) {
-      return err(res, e.message);
-    }
+  (req, res, next) => {
+    req.url = `/api/admin/bookings/${req.params.id}/cancel`;
+    app.handle(req, res, next);
   }
 );
 
@@ -11913,24 +11935,24 @@ app.delete("/api/admin/plots/:id",
 
 app.put("/api/admin/plots/:id/status",
   verifyAdminToken,
-  role("SuperAdmin", "SiteManager"),
+  role("SuperAdmin"),
   async (req, res) => {
     try {
-      const { new_status, reason } = req.body;
+      const { new_status, reason, sold_price, sold_at } = req.body;
       if (!new_status) return err(res, "new_status required", 400);
       if (!reason) return err(res, "reason required", 400);
+      if (new_status === 'Sold' && (sold_price === undefined || sold_price === null)) {
+        return err(res, "sold_price is required when overriding status to Sold", 400);
+      }
 
-      const [plot] = await sql`SELECT plot_status FROM plots WHERE plot_id = ${req.params.id}`;
-      if (!plot) return err(res, "Plot not found", 404);
-
-      await sql`UPDATE plots SET plot_status = ${new_status}::plot_status_enum, updated_at = NOW() WHERE plot_id = ${req.params.id}`;
-      await safeInsertPlotStatusHistory({
-        plot_id: req.params.id,
-        old_status: plot.plot_status,
-        new_status: new_status,
-        changed_by_admin_id: req.admin.admin_id,
-        reason: reason || null
+      const result = await setPlotStatus(req.params.id, new_status, {
+        adminId: req.admin.admin_id,
+        adminName: req.admin.full_name,
+        reason,
+        soldPrice: sold_price !== undefined ? Number(sold_price) : null,
+        soldAt: sold_at || (new_status === 'Sold' ? new Date().toISOString() : null)
       });
+
       await addPlotBookingHistory({
         plotId: req.params.id,
         eventType: "StatusChanged",
@@ -11938,9 +11960,8 @@ app.put("/api/admin/plots/:id/status",
         triggeredByAdmin: req.admin.admin_id,
         plotStatusAtTime: new_status,
       });
-      await logPlotAudit(req, "StatusChanged", req.params.id);
 
-      return ok(res, {}, "Plot status updated");
+      return ok(res, result, "Plot status updated successfully");
     } catch (e) {
       return err(res, e.message);
     }
