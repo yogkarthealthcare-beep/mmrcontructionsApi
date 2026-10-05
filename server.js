@@ -252,16 +252,25 @@ ensureUnifiedPaymentSchema().then(() => {
 
 export async function ensurePlotManagementSchema() {
   try {
-    await sql`
-      ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(30) NOT NULL DEFAULT 'PLOT';
-    `;
-    await sql`
-      ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(30);
-    `.catch(() => {});
-    await sql`
-      ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type;
-      ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check;
-    `.catch(() => {});
+    await sql`ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(50) NOT NULL DEFAULT 'PLOT'`.catch(() => {});
+    await sql`ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(50)`.catch(() => {});
+    await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type`.catch(() => {});
+    await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check`.catch(() => {});
+    await sql.unsafe(`
+      DO $$
+      DECLARE
+          r RECORD;
+      BEGIN
+          FOR r IN (
+              SELECT constraint_name
+              FROM information_schema.constraint_column_usage
+              WHERE table_name = 'plots' AND column_name = 'unit_type'
+          ) LOOP
+              EXECUTE 'ALTER TABLE plots DROP CONSTRAINT IF EXISTS ' || quote_ident(r.constraint_name) || ' CASCADE';
+          END LOOP;
+      END $$;
+    `).catch(() => {});
+    console.log("[PlotSchema] Ensured plots.unit_type VARCHAR(50) and dropped all restrictive unit_type check constraints.");
   } catch (err) {
     console.error("[PlotSchema] Schema migration error:", err.message || err);
   }
@@ -1263,10 +1272,22 @@ const requirePlotManagementSchema = (() => {
         `.catch(() => {});
         await sql`ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(50) NOT NULL DEFAULT 'PLOT'`.catch(() => {});
         await sql`ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(50)`.catch(() => {});
-        await sql`
-          ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type;
-          ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check;
-        `.catch(() => {});
+        await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type`.catch(() => {});
+        await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check`.catch(() => {});
+        await sql.unsafe(`
+          DO $$
+          DECLARE
+              r RECORD;
+          BEGIN
+              FOR r IN (
+                  SELECT constraint_name
+                  FROM information_schema.constraint_column_usage
+                  WHERE table_name = 'plots' AND column_name = 'unit_type'
+              ) LOOP
+                  EXECUTE 'ALTER TABLE plots DROP CONSTRAINT IF EXISTS ' || quote_ident(r.constraint_name) || ' CASCADE';
+              END LOOP;
+          END $$;
+        `).catch(() => {});
       })();
     }
     return ready;
@@ -10758,12 +10779,24 @@ app.post("/api/admin/sites/:siteId/detected-plots",
           false
         );
       `.catch(() => {});
-      await sql`
-        ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(50) NOT NULL DEFAULT 'PLOT';
-        ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(50);
-        ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type;
-        ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check;
-      `.catch(() => {});
+      await sql`ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(50) NOT NULL DEFAULT 'PLOT'`.catch(() => {});
+      await sql`ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(50)`.catch(() => {});
+      await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type`.catch(() => {});
+      await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check`.catch(() => {});
+      await sql.unsafe(`
+        DO $$
+        DECLARE
+            r RECORD;
+        BEGIN
+            FOR r IN (
+                SELECT constraint_name
+                FROM information_schema.constraint_column_usage
+                WHERE table_name = 'plots' AND column_name = 'unit_type'
+            ) LOOP
+                EXECUTE 'ALTER TABLE plots DROP CONSTRAINT IF EXISTS ' || quote_ident(r.constraint_name) || ' CASCADE';
+            END LOOP;
+        END $$;
+      `).catch(() => {});
 
       const prefix = String(site.site_prefix || sitePrefixFromName(site.site_name)).toUpperCase();
       let created = 0;
