@@ -741,7 +741,7 @@ const handleAdminCustomerUpdate = async (req, res) => {
           associate_id = ${b.associateId ?? b.associate_id ?? null},
           associate_mobile = ${b.associateMobile ?? b.associate_mobile ?? null},
           associate_signature_name = ${b.associateSignatureName ?? b.associate_signature_name ?? null},
-          application_status = COALESCE(${b.applicationStatus || b.application_status || null}, application_status),
+          application_status = COALESCE(${b.applicationStatus || b.application_status || (b.enrollment_status === 'Completed' ? 'Approved' : (b.enrollment_status === 'Pending' ? 'Pending' : null)) || null}, application_status),
           verified_by = ${b.verifiedBy ?? b.verified_by ?? null},
           payment_status = ${b.paymentStatus ?? b.payment_status ?? null},
           payment_status_date = ${parseDate(b.paymentStatusDate || b.payment_status_date)},
@@ -763,9 +763,10 @@ const handleAdminCustomerUpdate = async (req, res) => {
         }
       }
 
-      // Also ensure user's enrollment_status is Completed
+      // Also ensure user's enrollment_status in users table is synced
       if (existing.user_id) {
-        await sql`UPDATE users SET enrollment_status = 'Completed' WHERE user_id = ${existing.user_id}`;
+        const uStatus = (b.enrollment_status === 'Pending' || b.application_status === 'Pending' || b.applicationStatus === 'Pending') ? 'Pending' : 'Completed';
+        await sql`UPDATE users SET enrollment_status = ${uStatus} WHERE user_id = ${existing.user_id}`;
       }
 
       return ok(res, updated, "Customer enrollment updated successfully.");
