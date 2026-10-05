@@ -113,7 +113,6 @@ function drawSignatureBox(doc, label, x, y, sigPath, boxWidth = 160) {
     doc.text(label, x, y + boxHeight + 4, { align: "center", width: boxWidth });
 }
 import { resolveImageBuffer, drawPhotoBoxWithBuffer, drawSignatureBoxWithBuffer } from "./pdfImageHelper.js";
-
 export async function generateCustomerPdf(id) {
     const [submission] = await sql `SELECT * FROM customer_enrollment_submissions WHERE id = ${id}`;
     if (!submission) {
@@ -125,7 +124,6 @@ export async function generateCustomerPdf(id) {
     const dobStr = submission.date_of_birth ? new Date(submission.date_of_birth).toLocaleDateString("en-IN") : "";
     const coDobStr = submission.co_date_of_birth ? new Date(submission.co_date_of_birth).toLocaleDateString("en-IN") : "";
     const txnDateStr = submission.txn_date ? new Date(submission.txn_date).toLocaleDateString("en-IN") : "";
-
     // Pre-fetch applicant/co-applicant photos and specimen signatures asynchronously
     const [photoApplicantBuf, photoCoApplicantBuf, sigSoleBuf, sigCoBuf, sigAuthBuf] = await Promise.all([
         resolveImageBuffer(submission.photo_first_applicant_url),
@@ -134,7 +132,6 @@ export async function generateCustomerPdf(id) {
         resolveImageBuffer(submission.signature_co_applicant_url),
         resolveImageBuffer(submission.signature_authorized_signatory_url)
     ]);
-
     return new Promise((resolve, reject) => {
         const chunks = [];
         const doc = new PDFDocument({ margin: 40, size: "A4", bufferPages: true });

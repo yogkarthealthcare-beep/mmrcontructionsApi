@@ -114,7 +114,6 @@ function drawSignatureBox(doc, label, x, y, sigPath) {
     doc.text(label, x, y + boxHeight + 4, { align: "center", width: boxWidth });
 }
 import { resolveImageBuffer, drawPhotoBoxWithBuffer, drawSignatureBoxWithBuffer } from "./pdfImageHelper.js";
-
 export async function generateInvestorPdf(id) {
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id).trim());
     const [enrollment] = isUuid
@@ -127,14 +126,12 @@ export async function generateInvestorPdf(id) {
     const dobStr = enrollment.dob ? new Date(enrollment.dob).toLocaleDateString("en-IN") : "";
     const txnDateStr = enrollment.txn_date ? new Date(enrollment.txn_date).toLocaleDateString("en-IN") : "";
     const declDateStr = enrollment.decl_date ? new Date(enrollment.decl_date).toLocaleDateString("en-IN") : "";
-
     // Pre-fetch investor photo and signatures asynchronously
     const [photoInvestorBuf, sigFirstBuf, sigJointBuf] = await Promise.all([
         resolveImageBuffer(enrollment.photo_url),
         resolveImageBuffer(enrollment.signature_first_url),
         resolveImageBuffer(enrollment.signature_joint_url)
     ]);
-
     return new Promise((resolve, reject) => {
         const chunks = [];
         const doc = new PDFDocument({ margin: 40, size: "A4", bufferPages: true });

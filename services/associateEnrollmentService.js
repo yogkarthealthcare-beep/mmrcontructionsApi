@@ -1,35 +1,36 @@
 import { z } from "zod";
 import sql from "../db.js";
-
 // Helper functions for defense-in-depth sanitization
 function cleanString(val) {
-    if (val === null || val === undefined) return null;
+    if (val === null || val === undefined)
+        return null;
     const s = String(val).trim();
     return s === "" ? null : s;
 }
-
 function cleanUpper(val) {
-    if (val === null || val === undefined) return null;
+    if (val === null || val === undefined)
+        return null;
     const s = String(val).trim().toUpperCase();
     return s === "" ? null : s;
 }
-
 function cleanDigits(val) {
-    if (val === null || val === undefined) return null;
+    if (val === null || val === undefined)
+        return null;
     const s = String(val).replace(/[\s-]/g, "").trim();
     return s === "" ? null : s;
 }
-
 function cleanEmail(val) {
-    if (val === null || val === undefined) return null;
+    if (val === null || val === undefined)
+        return null;
     const s = String(val).trim().toLowerCase();
     return s === "" ? null : s;
 }
-
 function normalizeDate(val) {
-    if (val === null || val === undefined) return null;
+    if (val === null || val === undefined)
+        return null;
     const s = String(val).trim();
-    if (!s) return null;
+    if (!s)
+        return null;
     // Match DD-MM-YYYY or DD/MM/YYYY
     const ddmmyyyy = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
     if (ddmmyyyy) {
@@ -46,7 +47,6 @@ function normalizeDate(val) {
     }
     return s;
 }
-
 // Validation schema for defense in depth
 export const associateEnrollmentSchema = z.object({
     fullName: z.preprocess((v) => cleanString(v) ?? "", z.string().min(1, "Full name is required")),
@@ -68,10 +68,7 @@ export const associateEnrollmentSchema = z.object({
     category: z.preprocess(cleanString, z.string().optional().nullable()),
     religion: z.preprocess(cleanString, z.string().optional().nullable()),
     signDate: z.preprocess((v) => normalizeDate(v) || new Date().toISOString().split("T")[0], z.string().optional().nullable()),
-    termsAccepted: z.preprocess(
-        (val) => val === "true" || val === true || val === "1" || val === 1 || val === "on",
-        z.boolean().refine((val) => val === true, "All terms must be accepted")
-    ),
+    termsAccepted: z.preprocess((val) => val === "true" || val === true || val === "1" || val === 1 || val === "on", z.boolean().refine((val) => val === true, "All terms must be accepted")),
     // Address Details
     permAddress: z.preprocess(cleanString, z.string().optional().nullable()),
     permCity: z.preprocess(cleanString, z.string().optional().nullable()),
@@ -110,7 +107,6 @@ export const associateEnrollmentSchema = z.object({
     sponsorCode: z.preprocess(cleanString, z.string().optional().nullable()),
     sponsorContact: z.preprocess(cleanDigits, z.string().optional().nullable())
 });
-
 /**
  * Register or update an associate enrollment and related details in a single database transaction.
  */
@@ -124,7 +120,6 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
     const dobStr = normalizeDate(data.dob) || data.dob;
     const signDateStr = normalizeDate(data.signDate) || new Date().toISOString().split('T')[0];
     const nomineeDobStr = normalizeDate(data.nomineeDob);
-
     // Perform inside transaction so that failure in any step rolls back everything
     await sql.begin(async (tx) => {
         let userRow = null;

@@ -91,7 +91,6 @@ function drawPhotoBox(doc, label, x, y, photoPath) {
     }
 }
 import { resolveImageBuffer, drawPhotoBoxWithBuffer } from "./pdfImageHelper.js";
-
 export async function generateAssociatePdf(associateId) {
     // 1. Fetch data from DB
     const [associate] = await sql `SELECT * FROM associate_enrollment WHERE id = ${associateId}`;
@@ -107,13 +106,11 @@ export async function generateAssociatePdf(associateId) {
     const signDateStr = associate.sign_date ? new Date(associate.sign_date).toLocaleDateString("en-IN") : "";
     const dobStr = associate.dob ? new Date(associate.dob).toLocaleDateString("en-IN") : "";
     const nomineeDobStr = nominee?.dob ? new Date(nominee.dob).toLocaleDateString("en-IN") : "";
-
-    // Pre-fetch applicant and nominee photo buffers asynchronously
+    // Pre-fetch applicant and nominee photo buffers asynchronously (local disk, VPS storage, remote HTTP URL fallback)
     const [applicantPhotoBuf, nomineePhotoBuf] = await Promise.all([
         resolveImageBuffer(associate.applicant_photo_path),
         resolveImageBuffer(nominee?.photo_path)
     ]);
-
     return new Promise((resolve, reject) => {
         const chunks = [];
         const doc = new PDFDocument({ margin: 40, size: "A4", bufferPages: true });

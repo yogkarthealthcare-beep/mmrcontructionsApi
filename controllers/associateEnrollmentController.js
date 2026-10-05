@@ -51,7 +51,7 @@ export async function createAssociateEnrollment(req, res) {
                 field: err.path.join("."),
                 message: err.message
             }));
-            const detailedMsg = formatErrors.map(e => `${e.field ? e.field + ': ' : ''}${e.message}`).join(', ');
+            const detailedMsg = formatErrors.map((e) => `${e.field ? e.field + ': ' : ''}${e.message}`).join(', ');
             return res.status(400).json({
                 success: false,
                 message: detailedMsg ? `Validation failed: ${detailedMsg}` : "Validation failed.",
@@ -504,119 +504,136 @@ export async function updateAdminAssociateEnrollment(req, res) {
     try {
         const rawId = String(req.params.id || "").trim();
         const b = req.body || {};
-        let targetId = rawId;
-        const [existing] = await sql `SELECT * FROM associate_enrollment WHERE id = ${rawId}`;
+        // Find user if matching
+        const [matchedUser] = await sql `
+      SELECT * FROM users 
+      WHERE user_id = ${Number(rawId) || 0}
+         OR member_id = ${rawId}
+         OR (pan_number IS NOT NULL AND UPPER(pan_number) = UPPER(${b.pan_no || b.pan_number || ''}))
+         OR (mobile_no IS NOT NULL AND mobile_no = ${b.contact_1 || b.mobile_no || b.contact_primary || ''})
+      LIMIT 1
+    `;
+        // Find existing associate_enrollment row
+        const [existing] = await sql `
+      SELECT * FROM associate_enrollment 
+      WHERE id = ${rawId}
+         OR (${Boolean(matchedUser)} AND (
+             id = ${matchedUser?.member_id || ''}
+             OR (pan_no IS NOT NULL AND UPPER(pan_no) = UPPER(${matchedUser?.pan_number || ''}))
+             OR (contact_no_1 IS NOT NULL AND contact_no_1 = ${matchedUser?.mobile_no || ''})
+         ))
+      LIMIT 1
+    `;
+        const newStatus = b.status || b.app_status || (b.enrollment_status === 'Completed' ? 'approved' : (b.enrollment_status === 'Rejected' ? 'rejected' : 'pending'));
+        const enrollStatus = (b.enrollment_status === 'Completed' || b.status === 'approved' || b.status === 'Completed') ? 'Completed' : (b.enrollment_status === 'Rejected' || b.status === 'rejected' ? 'Rejected' : 'Pending');
+        let targetId = existing ? existing.id : (rawId.startsWith('MMR-ASC-') ? rawId : (matchedUser?.member_id || rawId));
         if (existing) {
             await sql.begin(async (tx) => {
                 await tx `
           UPDATE associate_enrollment SET
-            full_name = COALESCE(${b.full_name || b.fullName}, full_name),
-            dob = COALESCE(${b.dob}, dob),
-            gender = COALESCE(${b.gender}, gender),
-            father_name = ${b.father_name || b.fatherName || existing.father_name},
-            mother_name = ${b.mother_name || b.motherName || existing.mother_name},
-            spouse_name = ${b.spouse_name || b.spouseName || existing.spouse_name},
-            contact_no_1 = COALESCE(${b.contact_primary || b.contact_1 || b.contact1 || b.contact_no_1}, contact_no_1),
-            contact_no_2 = ${b.contact_secondary || b.contact_2 || b.contact2 || b.contact_no_2 || existing.contact_no_2},
-            nationality = COALESCE(${b.nationality}, nationality),
-            residential_status = ${b.residential_status || b.residentialStatus || existing.residential_status},
-            pan_no = COALESCE(${b.pan_number || b.pan_no || b.panNo}, pan_no),
-            aadhar_no = COALESCE(${b.aadhar_number || b.aadhar_no || b.aadharNo}, aadhar_no),
-            email = ${b.email || existing.email},
-            occupation = ${b.occupation || existing.occupation},
-            annual_income = ${b.annual_income || b.annualIncome || existing.annual_income},
-            education = ${b.education || existing.education},
-            category = ${b.category || existing.category},
-            religion = ${b.religion || existing.religion},
-            sign_date = COALESCE(${b.sign_date || b.signDate}, sign_date),
-            status = COALESCE(${b.status || b.app_status}, status)
-          WHERE id = ${rawId}
+            full_name = COALESCE(${b.full_name || b.fullName || null}, full_name),
+            dob = COALESCE(${b.dob || null}, dob),
+            gender = COALESCE(${b.gender || null}, gender),
+            father_name = ${b.father_name || b.fatherName || existing.father_name || null},
+            mother_name = ${b.mother_name || b.motherName || existing.mother_name || null},
+            spouse_name = ${b.spouse_name || b.spouseName || existing.spouse_name || null},
+            contact_no_1 = COALESCE(${b.contact_primary || b.contact_1 || b.contact1 || b.contact_no_1 || null}, contact_no_1),
+            contact_no_2 = ${b.contact_secondary || b.contact_2 || b.contact2 || b.contact_no_2 || existing.contact_no_2 || null},
+            nationality = COALESCE(${b.nationality || null}, nationality),
+            residential_status = ${b.residential_status || b.residentialStatus || existing.residential_status || null},
+            pan_no = COALESCE(${b.pan_number || b.pan_no || b.panNo || null}, pan_no),
+            aadhar_no = COALESCE(${b.aadhar_number || b.aadhar_no || b.aadharNo || null}, aadhar_no),
+            email = ${b.email || existing.email || null},
+            occupation = ${b.occupation || existing.occupation || null},
+            annual_income = ${b.annual_income || b.annualIncome || existing.annual_income || null},
+            education = ${b.education || existing.education || null},
+            category = ${b.category || existing.category || null},
+            religion = ${b.religion || existing.religion || null},
+            sign_date = COALESCE(${b.sign_date || b.signDate || null}, sign_date),
+            status = COALESCE(${newStatus || null}, status)
+          WHERE id = ${existing.id}
         `;
-                const [permAddr] = await tx `SELECT id FROM associate_address WHERE associate_id = ${rawId} AND address_type = 'permanent'`;
+                const [permAddr] = await tx `SELECT id FROM associate_address WHERE associate_id = ${existing.id} AND address_type = 'permanent'`;
                 if (permAddr) {
                     await tx `
             UPDATE associate_address SET
-              local_address = COALESCE(${b.perm_address_line1 || b.permAddress}, local_address),
-              city = COALESCE(${b.perm_city || b.permCity}, city),
-              state = COALESCE(${b.perm_state || b.permState}, state),
-              country = COALESCE(${b.perm_country || b.permCountry}, country),
-              pin_code = COALESCE(${b.perm_pincode || b.permPin}, pin_code)
+              local_address = COALESCE(${b.perm_address_line1 || b.permAddress || null}, local_address),
+              city = COALESCE(${b.perm_city || b.permCity || null}, city),
+              state = COALESCE(${b.perm_state || b.permState || null}, state),
+              country = COALESCE(${b.perm_country || b.permCountry || null}, country),
+              pin_code = COALESCE(${b.perm_pincode || b.permPin || null}, pin_code)
             WHERE id = ${permAddr.id}
           `;
                 }
                 else if (b.perm_address_line1 || b.permAddress || b.perm_city || b.perm_state) {
                     await tx `
             INSERT INTO associate_address (associate_id, address_type, local_address, city, state, country, pin_code)
-            VALUES (${rawId}, 'permanent', ${b.perm_address_line1 || b.permAddress || ''}, ${b.perm_city || b.permCity || ''}, ${b.perm_state || b.permState || ''}, ${b.perm_country || b.permCountry || 'India'}, ${b.perm_pincode || b.permPin || ''})
+            VALUES (${existing.id}, 'permanent', ${b.perm_address_line1 || b.permAddress || ''}, ${b.perm_city || b.permCity || ''}, ${b.perm_state || b.permState || ''}, ${b.perm_country || b.permCountry || 'India'}, ${b.perm_pincode || b.permPin || ''})
           `;
                 }
-                const [bank] = await tx `SELECT id FROM associate_bank_details WHERE associate_id = ${rawId}`;
+                const [bank] = await tx `SELECT id FROM associate_bank_details WHERE associate_id = ${existing.id}`;
                 if (bank) {
                     await tx `
             UPDATE associate_bank_details SET
-              bank_name = COALESCE(${b.bank_name || b.bankName}, bank_name),
-              account_holder_name = COALESCE(${b.account_holder_name || b.accHolder}, account_holder_name),
-              account_no = COALESCE(${b.account_number || b.accNo}, account_no),
-              ifsc_code = COALESCE(${b.ifsc_code || b.ifsc}, ifsc_code),
-              micr_code = ${b.micr_code || b.micr || bank.micr_code},
-              branch_name = COALESCE(${b.branch_name || b.branchName}, branch_name),
-              branch_code = COALESCE(${b.branch_code || b.branchCode}, branch_code),
-              swift_code = ${b.swift_code || b.swift || bank.swift_code},
-              branch_country = COALESCE(${b.branch_country || b.branchCountry}, branch_country)
+              bank_name = COALESCE(${b.bank_name || b.bankName || null}, bank_name),
+              account_holder_name = COALESCE(${b.account_holder_name || b.accHolder || null}, account_holder_name),
+              account_no = COALESCE(${b.account_number || b.accNo || null}, account_no),
+              ifsc_code = COALESCE(${b.ifsc_code || b.ifsc || null}, ifsc_code),
+              micr_code = ${b.micr_code || b.micr || bank.micr_code || null},
+              branch_name = COALESCE(${b.branch_name || b.branchName || null}, branch_name),
+              branch_code = COALESCE(${b.branch_code || b.branchCode || null}, branch_code),
+              swift_code = ${b.swift_code || b.swift || bank.swift_code || null},
+              branch_country = COALESCE(${b.branch_country || b.branchCountry || null}, branch_country)
             WHERE id = ${bank.id}
           `;
                 }
                 else if (b.bank_name || b.bankName || b.account_number || b.accNo || b.ifsc_code || b.ifsc) {
                     await tx `
             INSERT INTO associate_bank_details (associate_id, bank_name, account_holder_name, account_no, ifsc_code, micr_code, branch_name, branch_code, swift_code, branch_country)
-            VALUES (${rawId}, ${b.bank_name || b.bankName || ''}, ${b.account_holder_name || b.accHolder || ''}, ${b.account_number || b.accNo || ''}, ${b.ifsc_code || b.ifsc || ''}, ${b.micr_code || b.micr || null}, ${b.branch_name || b.branchName || null}, ${b.branch_code || b.branchCode || null}, ${b.swift_code || b.swift || null}, ${b.branch_country || b.branchCountry || 'India'})
+            VALUES (${existing.id}, ${b.bank_name || b.bankName || ''}, ${b.account_holder_name || b.accHolder || ''}, ${b.account_number || b.accNo || ''}, ${b.ifsc_code || b.ifsc || ''}, ${b.micr_code || b.micr || null}, ${b.branch_name || b.branchName || null}, ${b.branch_code || b.branchCode || null}, ${b.swift_code || b.swift || null}, ${b.branch_country || b.branchCountry || 'India'})
           `;
                 }
-                const [nominee] = await tx `SELECT id FROM associate_nominee WHERE associate_id = ${rawId}`;
+                const [nominee] = await tx `SELECT id FROM associate_nominee WHERE associate_id = ${existing.id}`;
                 if (nominee) {
                     await tx `
             UPDATE associate_nominee SET
-              nominee_name = COALESCE(${b.nominee_name || b.nomineeName}, nominee_name),
-              dob = ${b.nominee_dob || b.nomineeDob || nominee.dob},
-              gender = COALESCE(${b.nominee_gender || b.nomineeGender}, gender),
-              relationship = COALESCE(${b.nominee_relationship || b.nomineeRelationship}, relationship),
-              pan_no = ${b.nominee_pan_no || b.nomineePanNo || nominee.pan_no},
-              aadhar_no = ${b.nominee_aadhar_no || b.nomineeAadharNo || nominee.aadhar_no},
-              address = ${b.nominee_address || b.nomineeAddress || nominee.address}
+              nominee_name = COALESCE(${b.nominee_name || b.nomineeName || null}, nominee_name),
+              dob = ${b.nominee_dob || b.nomineeDob || nominee.dob || null},
+              gender = COALESCE(${b.nominee_gender || b.nomineeGender || null}, gender),
+              relationship = COALESCE(${b.nominee_relationship || b.nomineeRelationship || null}, relationship),
+              pan_no = ${b.nominee_pan_no || b.nomineePanNo || nominee.pan_no || null},
+              aadhar_no = ${b.nominee_aadhar_no || b.nomineeAadharNo || nominee.aadhar_no || null},
+              address = ${b.nominee_address || b.nomineeAddress || nominee.address || null}
             WHERE id = ${nominee.id}
           `;
                 }
                 else if (b.nominee_name || b.nomineeName) {
                     await tx `
             INSERT INTO associate_nominee (associate_id, nominee_name, dob, gender, nationality, residential_status, relationship, pan_name, pan_no, aadhar_name, aadhar_no, address)
-            VALUES (${rawId}, ${b.nominee_name || b.nomineeName}, ${b.nominee_dob || b.nomineeDob || null}, ${b.nominee_gender || b.nomineeGender || 'Male'}, ${b.nominee_nationality || 'Indian'}, ${b.nominee_res_status || 'Resident'}, ${b.nominee_relationship || 'Nominee'}, ${b.nominee_pan_name || null}, ${b.nominee_pan_no || null}, ${b.nominee_aadhar_name || null}, ${b.nominee_aadhar_no || null}, ${b.nominee_address || null})
+            VALUES (${existing.id}, ${b.nominee_name || b.nomineeName}, ${b.nominee_dob || b.nomineeDob || null}, ${b.nominee_gender || b.nomineeGender || 'Male'}, ${b.nominee_nationality || 'Indian'}, ${b.nominee_res_status || 'Resident'}, ${b.nominee_relationship || 'Nominee'}, ${b.nominee_pan_name || null}, ${b.nominee_pan_no || null}, ${b.nominee_aadhar_name || null}, ${b.nominee_aadhar_no || null}, ${b.nominee_address || null})
           `;
                 }
-                const [sponsor] = await tx `SELECT id FROM associate_sponsor WHERE associate_id = ${rawId}`;
+                const [sponsor] = await tx `SELECT id FROM associate_sponsor WHERE associate_id = ${existing.id}`;
                 if (sponsor) {
                     await tx `
             UPDATE associate_sponsor SET
-              sponsor_name = COALESCE(${b.sponsor_name || b.sponsorName}, sponsor_name),
-              sponsor_code = COALESCE(${b.sponsor_code || b.sponsorCode}, sponsor_code),
-              sponsor_contact = ${b.sponsor_contact || b.sponsorContact || sponsor.sponsor_contact}
+              sponsor_name = COALESCE(${b.sponsor_name || b.sponsorName || null}, sponsor_name),
+              sponsor_code = COALESCE(${b.sponsor_code || b.sponsorCode || null}, sponsor_code),
+              sponsor_contact = ${b.sponsor_contact || b.sponsorContact || sponsor.sponsor_contact || null}
             WHERE id = ${sponsor.id}
           `;
                 }
                 else if (b.sponsor_name || b.sponsor_code) {
                     await tx `
             INSERT INTO associate_sponsor (associate_id, sponsor_name, sponsor_code, sponsor_contact)
-            VALUES (${rawId}, ${b.sponsor_name || b.sponsorName || ''}, ${b.sponsor_code || b.sponsorCode || ''}, ${b.sponsor_contact || b.sponsorContact || null})
+            VALUES (${existing.id}, ${b.sponsor_name || b.sponsorName || ''}, ${b.sponsor_code || b.sponsorCode || ''}, ${b.sponsor_contact || b.sponsorContact || null})
           `;
                 }
             });
         }
         else {
-            const year = new Date().getFullYear();
-            let generatedId = "";
+            let generatedId = rawId.startsWith('MMR-ASC-') ? rawId : (matchedUser?.member_id || rawId);
             await sql.begin(async (tx) => {
-                const [countResult] = await tx `SELECT COUNT(*)::integer as cnt FROM associate_enrollment WHERE id LIKE ${`MMR-ASC-${year}-%`}`;
-                const count = (countResult?.cnt || 0) + 1;
-                generatedId = `MMR-ASC-${year}-${String(count).padStart(4, "0")}`;
                 await tx `
           INSERT INTO associate_enrollment (
             id, full_name, dob, gender, father_name, mother_name, spouse_name,
@@ -625,12 +642,32 @@ export async function updateAdminAssociateEnrollment(req, res) {
             category, religion, applicant_photo_path, sign_date,
             terms_accepted, terms_accepted_at, status
           ) VALUES (
-            ${generatedId}, ${b.full_name || b.fullName || 'Associate'}, ${b.dob || '1990-01-01'}, ${b.gender || 'Male'}, ${b.father_name || b.fatherName || null}, ${b.mother_name || b.motherName || null}, ${b.spouse_name || b.spouseName || null},
-            ${b.contact_primary || b.contact_1 || b.contact1 || b.contact_no_1 || '0000000000'}, ${b.contact_secondary || b.contact_2 || b.contact2 || b.contact_no_2 || null}, ${b.nationality || 'Indian'}, ${b.residential_status || b.residentialStatus || null},
-            ${(b.pan_number || b.pan_no || b.panNo || 'PAN0000000').toUpperCase()}, ${b.aadhar_number || b.aadhar_no || b.aadharNo || '000000000000'}, ${b.email || null}, ${b.occupation || null}, ${b.annual_income || b.annualIncome || null}, ${b.education || null},
-            ${b.category || null}, ${b.religion || null}, ${b.applicant_photo_url || null}, ${b.sign_date || b.signDate || null},
-            true, NOW(), 'Completed'
+            ${generatedId},
+            ${b.full_name || b.fullName || matchedUser?.full_name || 'Associate'},
+            ${b.dob || matchedUser?.date_of_birth || '1990-01-01'},
+            ${b.gender || matchedUser?.gender || 'Male'},
+            ${b.father_name || b.fatherName || matchedUser?.father_name || null},
+            ${b.mother_name || b.motherName || matchedUser?.mother_name || null},
+            ${b.spouse_name || b.spouseName || null},
+            ${b.contact_primary || b.contact_1 || b.contact1 || b.contact_no_1 || matchedUser?.mobile_no || '0000000000'},
+            ${b.contact_secondary || b.contact_2 || b.contact2 || b.contact_no_2 || null},
+            ${b.nationality || 'Indian'},
+            ${b.residential_status || b.residentialStatus || null},
+            ${(b.pan_number || b.pan_no || b.panNo || matchedUser?.pan_number || 'PAN0000000').toUpperCase()},
+            ${b.aadhar_number || b.aadhar_no || b.aadharNo || matchedUser?.aadhar_number || '000000000000'},
+            ${b.email || matchedUser?.email || null},
+            ${b.occupation || null},
+            ${b.annual_income || b.annualIncome || null},
+            ${b.education || null},
+            ${b.category || null},
+            ${b.religion || null},
+            ${b.applicant_photo_url || null},
+            ${b.sign_date || b.signDate || null},
+            true, NOW(), ${newStatus}
           )
+          ON CONFLICT (id) DO UPDATE SET
+            status = EXCLUDED.status,
+            full_name = EXCLUDED.full_name
         `;
                 if (b.perm_address_line1 || b.permAddress) {
                     await tx `
@@ -659,17 +696,13 @@ export async function updateAdminAssociateEnrollment(req, res) {
                 targetId = generatedId;
             });
         }
-        const pan = b.pan_number || b.pan_no || b.panNo;
-        const aadhar = b.aadhar_number || b.aadhar_no || b.aadharNo;
-        const phone = b.contact_primary || b.contact_1 || b.contact_no_1;
-        if (pan || aadhar || phone) {
-            await sql `
-        UPDATE users SET enrollment_status = 'Completed'
-        WHERE (pan_number IS NOT NULL AND UPPER(pan_number) = UPPER(${pan || ''}))
-           OR (aadhar_number IS NOT NULL AND aadhar_number = ${aadhar || ''})
-           OR (mobile_no IS NOT NULL AND mobile_no = ${phone || ''})
-      `;
-        }
+        await sql `
+      UPDATE users SET enrollment_status = ${enrollStatus}
+      WHERE user_id = ${Number(rawId) || (matchedUser ? matchedUser.user_id : 0)}
+         OR member_id = ${rawId}
+         OR (pan_number IS NOT NULL AND UPPER(pan_number) = UPPER(${b.pan_no || b.pan_number || matchedUser?.pan_number || ''}))
+         OR (mobile_no IS NOT NULL AND mobile_no = ${b.contact_1 || b.mobile_no || matchedUser?.mobile_no || ''})
+    `;
         return res.status(200).json({
             success: true,
             message: "Associate enrollment updated successfully.",
