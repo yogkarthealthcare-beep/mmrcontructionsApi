@@ -518,20 +518,39 @@ router.get("/admin/customer-enrollments", authAdmin, async (req, res) => {
       const s = `%${search}%`;
       rows = await sql`
         SELECT 
+          COALESCE(ces.id::text, u.user_id::text) as id,
+          ces.id as submission_id,
           u.user_id,
+          COALESCE(ces.applicant_name, u.full_name, 'N/A') as applicant_name,
+          COALESCE(ces.mobile_1, u.mobile_no, 'N/A') as mobile_1,
+          COALESCE(ces.email_1, u.email, 'N/A') as email_1,
           u.full_name,
           u.email,
           u.mobile_no,
+          COALESCE(ces.application_no, u.member_id, 'Pending') as application_no,
           u.member_id,
           u.user_type,
+          COALESCE(ces.form_date, ces.submitted_at, u.registered_at) as form_date,
+          ces.submitted_at,
           u.registered_at,
           sp.member_id as sponsor_id,
           sp.full_name as sponsor_name,
-          ces.id as submission_id,
-          ces.application_no,
-          ces.application_status,
           ces.project_name,
-          ces.submitted_at,
+          ces.property_type,
+          ces.plot_flat_no,
+          ces.block_tower,
+          ces.size_area,
+          ces.rate_per_unit,
+          ces.basic_sale_price,
+          ces.plc_dev_charges,
+          ces.total_property_value,
+          ces.booking_amount,
+          ces.payment_mode,
+          ces.txn_cheque_no,
+          ces.photo_first_applicant_url,
+          COALESCE(ces.application_status, 'Pending') as application_status,
+          COALESCE(ces.payment_status, 'Pending') as payment_status,
+          ces.verified_by,
           CASE WHEN ces.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END as enrollment_status
         FROM users u
         LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
@@ -544,38 +563,106 @@ router.get("/admin/customer-enrollments", authAdmin, async (req, res) => {
             OR u.member_id ILIKE ${s}
             OR sp.member_id ILIKE ${s}
             OR ces.application_no ILIKE ${s}
+            OR ces.applicant_name ILIKE ${s}
           )
-        ORDER BY u.registered_at DESC
+        ORDER BY COALESCE(ces.submitted_at, u.registered_at) DESC
       `;
     } else {
       rows = await sql`
         SELECT 
+          COALESCE(ces.id::text, u.user_id::text) as id,
+          ces.id as submission_id,
           u.user_id,
+          COALESCE(ces.applicant_name, u.full_name, 'N/A') as applicant_name,
+          COALESCE(ces.mobile_1, u.mobile_no, 'N/A') as mobile_1,
+          COALESCE(ces.email_1, u.email, 'N/A') as email_1,
           u.full_name,
           u.email,
           u.mobile_no,
+          COALESCE(ces.application_no, u.member_id, 'Pending') as application_no,
           u.member_id,
           u.user_type,
+          COALESCE(ces.form_date, ces.submitted_at, u.registered_at) as form_date,
+          ces.submitted_at,
           u.registered_at,
           sp.member_id as sponsor_id,
           sp.full_name as sponsor_name,
-          ces.id as submission_id,
-          ces.application_no,
-          ces.application_status,
           ces.project_name,
-          ces.submitted_at,
+          ces.property_type,
+          ces.plot_flat_no,
+          ces.block_tower,
+          ces.size_area,
+          ces.rate_per_unit,
+          ces.basic_sale_price,
+          ces.plc_dev_charges,
+          ces.total_property_value,
+          ces.booking_amount,
+          ces.payment_mode,
+          ces.txn_cheque_no,
+          ces.photo_first_applicant_url,
+          COALESCE(ces.application_status, 'Pending') as application_status,
+          COALESCE(ces.payment_status, 'Pending') as payment_status,
+          ces.verified_by,
           CASE WHEN ces.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END as enrollment_status
         FROM users u
         LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
         LEFT JOIN customer_enrollment_submissions ces ON u.user_id = ces.user_id
         WHERE u.user_type = 'Customer'
-        ORDER BY u.registered_at DESC
+        ORDER BY COALESCE(ces.submitted_at, u.registered_at) DESC
       `;
     }
     return ok(res, rows);
   } catch (e) {
     console.error("GET /api/admin/customer-enrollments error:", e);
     return err(res, "Failed to fetch customer enrollments: " + e.message);
+  }
+});
+
+// PATCH /api/admin/customer-enrollments/:id/status (Admin - Quick status update)
+router.patch("/admin/customer-enrollments/:id/status", authAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { applicationStatus, application_status, paymentStatus, payment_status, verifiedBy } = req.body;
+    const appStatus = applicationStatus || application_status || null;
+    const payStatus = paymentStatus || payment_status || null;
+
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+    let existing;
+    if (isUuid) {
+      const [resRow] = await sql`SELECT * FROM customer_enrollment_submissions WHERE id = ${id}`;
+      existing = resRow;
+    } else {
+      const [resRow] = await sql`SELECT * FROM customer_enrollment_submissions WHERE user_id = ${Number(id)} ORDER BY created_at DESC LIMIT 1`;
+      existing = resRow;
+    }
+
+    if (existing) {
+      const [updated] = await sql`
+        UPDATE customer_enrollment_submissions
+        SET application_status = COALESCE(${appStatus}, application_status),
+            payment_status = COALESCE(${payStatus}, payment_status),
+            verified_by = COALESCE(${verifiedBy || null}, verified_by),
+            updated_at = NOW()
+        WHERE id = ${existing.id}
+        RETURNING *
+      `;
+      if (existing.user_id) {
+        const uStatus = (appStatus === 'Pending' || appStatus === 'Hold/Pending KYC' || appStatus === 'Rejected') ? 'Pending' : 'Completed';
+        await sql`UPDATE users SET enrollment_status = ${uStatus} WHERE user_id = ${existing.user_id}`;
+      }
+      return ok(res, updated, "Status updated successfully.");
+    } else {
+      const userId = Number(id);
+      if (userId) {
+        const uStatus = (appStatus === 'Pending' || appStatus === 'Hold/Pending KYC' || appStatus === 'Rejected') ? 'Pending' : 'Completed';
+        await sql`UPDATE users SET enrollment_status = ${uStatus} WHERE user_id = ${userId}`;
+        return ok(res, { user_id: userId, enrollment_status: uStatus, application_status: appStatus }, "Status updated.");
+      }
+      return err(res, "Enrollment not found.", 404);
+    }
+  } catch (e) {
+    console.error("PATCH /api/admin/customer-enrollments/:id/status error:", e);
+    return err(res, "Failed to update status: " + e.message);
   }
 });
 
