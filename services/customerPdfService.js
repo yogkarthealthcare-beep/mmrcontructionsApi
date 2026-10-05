@@ -112,6 +112,8 @@ function drawSignatureBox(doc, label, x, y, sigPath, boxWidth = 160) {
     doc.fillColor("#64748b").fontSize(7).font("Helvetica-Bold");
     doc.text(label, x, y + boxHeight + 4, { align: "center", width: boxWidth });
 }
+import { resolveImageBuffer, drawPhotoBoxWithBuffer, drawSignatureBoxWithBuffer } from "./pdfImageHelper.js";
+
 export async function generateCustomerPdf(id) {
     const [submission] = await sql `SELECT * FROM customer_enrollment_submissions WHERE id = ${id}`;
     if (!submission) {
@@ -123,6 +125,16 @@ export async function generateCustomerPdf(id) {
     const dobStr = submission.date_of_birth ? new Date(submission.date_of_birth).toLocaleDateString("en-IN") : "";
     const coDobStr = submission.co_date_of_birth ? new Date(submission.co_date_of_birth).toLocaleDateString("en-IN") : "";
     const txnDateStr = submission.txn_date ? new Date(submission.txn_date).toLocaleDateString("en-IN") : "";
+
+    // Pre-fetch applicant/co-applicant photos and specimen signatures asynchronously
+    const [photoApplicantBuf, photoCoApplicantBuf, sigSoleBuf, sigCoBuf, sigAuthBuf] = await Promise.all([
+        resolveImageBuffer(submission.photo_first_applicant_url),
+        resolveImageBuffer(submission.photo_co_applicant_url),
+        resolveImageBuffer(submission.signature_sole_first_applicant_url),
+        resolveImageBuffer(submission.signature_co_applicant_url),
+        resolveImageBuffer(submission.signature_authorized_signatory_url)
+    ]);
+
     return new Promise((resolve, reject) => {
         const chunks = [];
         const doc = new PDFDocument({ margin: 40, size: "A4", bufferPages: true });
@@ -136,7 +148,7 @@ export async function generateCustomerPdf(id) {
         drawHeader(doc, submission.application_no, formDateStr);
         doc.fillColor("#14532d").fontSize(14).font("Helvetica-Bold").text("CUSTOMER ENROLLMENT FORM", 40, 110, { align: "center", width: 515 });
         // Photo box top-right
-        drawPhotoBox(doc, "applicant", 475, 135, submission.photo_first_applicant_url);
+        drawPhotoBoxWithBuffer(doc, "applicant", 475, 135, photoApplicantBuf);
         drawSectionTitle(doc, "Property Booking Specifications", 135);
         let y = 165;
         drawField(doc, "Project Name:", submission.project_name, 40, y, 200, 80);
@@ -177,7 +189,7 @@ export async function generateCustomerPdf(id) {
         doc.addPage();
         drawHeader(doc, submission.application_no, formDateStr);
         // Co-applicant photo box
-        drawPhotoBox(doc, "co-applicant", 475, 115, submission.photo_co_applicant_url);
+        drawPhotoBoxWithBuffer(doc, "co-applicant", 475, 115, photoCoApplicantBuf);
         drawSectionTitle(doc, "2. Co-Applicant Details (If Any)", 115);
         y = 145;
         drawField(doc, "Co-Applicant Name:", submission.co_applicant_name, 40, y, 420, 110);
@@ -273,9 +285,9 @@ export async function generateCustomerPdf(id) {
         drawHeader(doc, submission.application_no, formDateStr);
         drawSectionTitle(doc, "Specimen Signature Panel", 115);
         // Embed specimen signatures side-by-side
-        drawSignatureBox(doc, "Signature of Sole / First Applicant", 40, 145, submission.signature_sole_first_applicant_url, 160);
-        drawSignatureBox(doc, "Signature of Co-Applicant", 215, 145, submission.signature_co_applicant_url, 160);
-        drawSignatureBox(doc, "Authorized Signatory (MMR)", 395, 145, submission.signature_authorized_signatory_url, 160);
+        drawSignatureBoxWithBuffer(doc, "Signature of Sole / First Applicant", 40, 145, sigSoleBuf, 160);
+        drawSignatureBoxWithBuffer(doc, "Signature of Co-Applicant", 215, 145, sigCoBuf, 160);
+        drawSignatureBoxWithBuffer(doc, "Authorized Signatory (MMR)", 395, 145, sigAuthBuf, 160);
         drawSectionTitle(doc, "7. Declaration & Consent", 240);
         y = 270;
         drawCheckbox(doc, "I confirm the Declaration — all info provided is true and correct, and I agree to the terms and conditions of M.M.R. Construction & Developers Pvt. Ltd.", 40, y, true);

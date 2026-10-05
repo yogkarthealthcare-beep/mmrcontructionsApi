@@ -113,6 +113,8 @@ function drawSignatureBox(doc, label, x, y, sigPath) {
     doc.fillColor("#64748b").fontSize(7).font("Helvetica-Bold");
     doc.text(label, x, y + boxHeight + 4, { align: "center", width: boxWidth });
 }
+import { resolveImageBuffer, drawPhotoBoxWithBuffer, drawSignatureBoxWithBuffer } from "./pdfImageHelper.js";
+
 export async function generateInvestorPdf(id) {
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id).trim());
     const [enrollment] = isUuid
@@ -125,6 +127,14 @@ export async function generateInvestorPdf(id) {
     const dobStr = enrollment.dob ? new Date(enrollment.dob).toLocaleDateString("en-IN") : "";
     const txnDateStr = enrollment.txn_date ? new Date(enrollment.txn_date).toLocaleDateString("en-IN") : "";
     const declDateStr = enrollment.decl_date ? new Date(enrollment.decl_date).toLocaleDateString("en-IN") : "";
+
+    // Pre-fetch investor photo and signatures asynchronously
+    const [photoInvestorBuf, sigFirstBuf, sigJointBuf] = await Promise.all([
+        resolveImageBuffer(enrollment.photo_url),
+        resolveImageBuffer(enrollment.signature_first_url),
+        resolveImageBuffer(enrollment.signature_joint_url)
+    ]);
+
     return new Promise((resolve, reject) => {
         const chunks = [];
         const doc = new PDFDocument({ margin: 40, size: "A4", bufferPages: true });
@@ -138,7 +148,7 @@ export async function generateInvestorPdf(id) {
         drawHeader(doc, enrollment.investor_enrollment_id, formDateStr);
         doc.fillColor("#14532d").fontSize(14).font("Helvetica-Bold").text("INVESTOR ENROLLMENT FORM", 40, 110, { align: "center", width: 515 });
         // Photo box top-right
-        drawPhotoBox(doc, "investor", 475, 135, enrollment.photo_url);
+        drawPhotoBoxWithBuffer(doc, "investor", 475, 135, photoInvestorBuf);
         drawSectionTitle(doc, "Office metadata", 135);
         let y = 165;
         drawField(doc, "Form No.:", enrollment.form_no, 40, y, 200, 70);
@@ -237,8 +247,8 @@ export async function generateInvestorPdf(id) {
         drawHeader(doc, enrollment.investor_enrollment_id, formDateStr);
         drawSectionTitle(doc, "4. Specimen Signature Form", 115);
         // Embed specimen signatures side-by-side
-        drawSignatureBox(doc, "Specimen Signature (First / Sole Applicant)", 40, 145, enrollment.signature_first_url);
-        drawSignatureBox(doc, "Specimen Signature (Joint Applicant)", 315, 145, enrollment.signature_joint_url);
+        drawSignatureBoxWithBuffer(doc, "Specimen Signature (First / Sole Applicant)", 40, 145, sigFirstBuf, 240);
+        drawSignatureBoxWithBuffer(doc, "Specimen Signature (Joint Applicant)", 315, 145, sigJointBuf, 240);
         drawSectionTitle(doc, "5. Declaration & Consent", 240);
         y = 270;
         // Checked checkbox

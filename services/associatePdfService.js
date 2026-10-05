@@ -90,6 +90,8 @@ function drawPhotoBox(doc, label, x, y, photoPath) {
         doc.text(`PHOTO\n(${label})`, x, y + 42, { align: "center", width: boxWidth });
     }
 }
+import { resolveImageBuffer, drawPhotoBoxWithBuffer } from "./pdfImageHelper.js";
+
 export async function generateAssociatePdf(associateId) {
     // 1. Fetch data from DB
     const [associate] = await sql `SELECT * FROM associate_enrollment WHERE id = ${associateId}`;
@@ -105,6 +107,13 @@ export async function generateAssociatePdf(associateId) {
     const signDateStr = associate.sign_date ? new Date(associate.sign_date).toLocaleDateString("en-IN") : "";
     const dobStr = associate.dob ? new Date(associate.dob).toLocaleDateString("en-IN") : "";
     const nomineeDobStr = nominee?.dob ? new Date(nominee.dob).toLocaleDateString("en-IN") : "";
+
+    // Pre-fetch applicant and nominee photo buffers asynchronously
+    const [applicantPhotoBuf, nomineePhotoBuf] = await Promise.all([
+        resolveImageBuffer(associate.applicant_photo_path),
+        resolveImageBuffer(nominee?.photo_path)
+    ]);
+
     return new Promise((resolve, reject) => {
         const chunks = [];
         const doc = new PDFDocument({ margin: 40, size: "A4", bufferPages: true });
@@ -118,7 +127,7 @@ export async function generateAssociatePdf(associateId) {
         drawHeader(doc, associateId, signDateStr);
         doc.fillColor("#14532d").fontSize(14).font("Helvetica-Bold").text("ASSOCIATE ENROLLMENT FORM", 40, 110, { align: "center", width: 515 });
         // Photo box top-right
-        drawPhotoBox(doc, "applicant", 475, 135, associate.applicant_photo_path);
+        drawPhotoBoxWithBuffer(doc, "applicant", 475, 135, applicantPhotoBuf);
         drawSectionTitle(doc, "Personal Details", 135);
         let y = 165;
         drawField(doc, "Full Name (only Adult):", associate.full_name, 40, y, 420, 110);
@@ -202,7 +211,7 @@ export async function generateAssociatePdf(associateId) {
         drawHeader(doc, associateId, signDateStr);
         drawSectionTitle(doc, "Nominee Details", 115);
         // Nominee photo box
-        drawPhotoBox(doc, "nominee", 475, 135, nominee?.photo_path);
+        drawPhotoBoxWithBuffer(doc, "nominee", 475, 135, nomineePhotoBuf);
         y = 145;
         drawField(doc, "Nominee Name:", nominee?.nominee_name, 40, y, 420, 110);
         y += 24;
