@@ -1816,9 +1816,7 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
     }
 
     // Mark enrollment_status as Completed in investor_users
-    try {
-      await sql`UPDATE investor_users SET enrollment_status = 'Completed' WHERE id = ${investor_id}`;
-    } catch (e) {}
+      await sql`UPDATE investor_users SET enrollment_status = COALESCE(enrollment_status, 'Pending') WHERE id = ${investor_id}`;
 
     return ok(res, { id: resultId }, "Investor enrollment submitted successfully.");
   } catch (e) {
@@ -1900,7 +1898,19 @@ router.get(["/admin/investor-enrollment", "/admin/investor-enrollments"], authAd
           e.project_name,
           e.app_status,
           e.created_at as submitted_at,
-          CASE WHEN e.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END as enrollment_status
+          COALESCE(
+            CASE 
+              WHEN LOWER(COALESCE(e.app_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(e.app_status, '')) IN ('rejected') THEN 'Rejected'
+              WHEN LOWER(COALESCE(e.app_status, '')) IN ('pending', 'under_review', 'submitted') THEN 'Pending'
+              ELSE NULL
+            END,
+            CASE 
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
+              ELSE 'Pending'
+            END
+          ) as enrollment_status
         FROM investor_users u
         LEFT JOIN investor_enrollments e ON u.id = e.investor_id
         WHERE u.deleted_at IS NULL
@@ -1930,7 +1940,19 @@ router.get(["/admin/investor-enrollment", "/admin/investor-enrollments"], authAd
           e.project_name,
           e.app_status,
           e.created_at as submitted_at,
-          CASE WHEN e.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END as enrollment_status
+          COALESCE(
+            CASE 
+              WHEN LOWER(COALESCE(e.app_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(e.app_status, '')) IN ('rejected') THEN 'Rejected'
+              WHEN LOWER(COALESCE(e.app_status, '')) IN ('pending', 'under_review', 'submitted') THEN 'Pending'
+              ELSE NULL
+            END,
+            CASE 
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
+              ELSE 'Pending'
+            END
+          ) as enrollment_status
         FROM investor_users u
         LEFT JOIN investor_enrollments e ON u.id = e.investor_id
         WHERE u.deleted_at IS NULL

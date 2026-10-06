@@ -446,8 +446,8 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
       // Update user's enrollment_status and sync profile info
       if (user_id) {
         await tx`
-          UPDATE users SET 
-            enrollment_status = 'Completed',
+          UPDATE users SET
+            enrollment_status = COALESCE(enrollment_status, 'Pending'),
             gender = COALESCE(${b.gender || null}, gender),
             date_of_birth = COALESCE(${dobVal || null}, date_of_birth),
             pan_number = COALESCE(${b.pan || null}, pan_number),
@@ -597,7 +597,19 @@ router.get("/admin/customer-enrollments", authAdmin, async (req, res) => {
           COALESCE(ces.application_status, 'Pending') as application_status,
           COALESCE(ces.payment_status, 'Pending') as payment_status,
           ces.verified_by,
-          CASE WHEN ces.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END as enrollment_status
+          COALESCE(
+            CASE 
+              WHEN LOWER(COALESCE(ces.application_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(ces.application_status, '')) IN ('rejected') THEN 'Rejected'
+              WHEN LOWER(COALESCE(ces.application_status, '')) IN ('pending', 'under_review', 'submitted') THEN 'Pending'
+              ELSE NULL
+            END,
+            CASE 
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
+              ELSE 'Pending'
+            END
+          ) as enrollment_status
         FROM users u
         LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
         LEFT JOIN customer_enrollment_submissions ces ON u.user_id = ces.user_id
@@ -649,7 +661,19 @@ router.get("/admin/customer-enrollments", authAdmin, async (req, res) => {
           COALESCE(ces.application_status, 'Pending') as application_status,
           COALESCE(ces.payment_status, 'Pending') as payment_status,
           ces.verified_by,
-          CASE WHEN ces.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END as enrollment_status
+          COALESCE(
+            CASE 
+              WHEN LOWER(COALESCE(ces.application_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(ces.application_status, '')) IN ('rejected') THEN 'Rejected'
+              WHEN LOWER(COALESCE(ces.application_status, '')) IN ('pending', 'under_review', 'submitted') THEN 'Pending'
+              ELSE NULL
+            END,
+            CASE 
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
+              ELSE 'Pending'
+            END
+          ) as enrollment_status
         FROM users u
         LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
         LEFT JOIN customer_enrollment_submissions ces ON u.user_id = ces.user_id
