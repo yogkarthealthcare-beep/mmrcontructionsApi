@@ -193,6 +193,6 @@ export async function dispatchBookingNotification(eventType, data = {}) {
   return { success: true };
 }
 
-module.exports = {
+export default {
   dispatchBookingNotification
 };

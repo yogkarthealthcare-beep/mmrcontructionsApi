@@ -3,6 +3,8 @@ import sql from "../db.js";
 import fs from "fs/promises";
 import path from "path";
 import { getStorageRoot, ensureDirExists } from "./fileStorage.service.js";
+import { normalizeHumanName, isValidHumanName, calculateAge } from "../utils/validationHelper.js";
+
 // Ensure table exists on first invocation
 let tableInitialized = false;
 export async function ensureTeamMembersTable() {
@@ -15,6 +17,8 @@ export async function ensureTeamMembersTable() {
         team_member_uid VARCHAR(30) UNIQUE NOT NULL,
         associate_id BIGINT NOT NULL,
         associate_name VARCHAR(150) NOT NULL,
+        user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+        slot_number SMALLINT CHECK (slot_number BETWEEN 1 AND 10),
         full_name VARCHAR(150) NOT NULL,
         father_husband_name VARCHAR(150) NOT NULL,
         date_of_birth DATE NOT NULL,
@@ -42,10 +46,13 @@ export async function ensureTeamMembersTable() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )
     `;
+        await sql `ALTER TABLE team_members ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL`;
+        await sql `ALTER TABLE team_members ADD COLUMN IF NOT EXISTS slot_number SMALLINT CHECK (slot_number BETWEEN 1 AND 10)`;
         await sql `CREATE INDEX IF NOT EXISTS idx_team_members_associate_id ON team_members (associate_id)`;
         await sql `CREATE INDEX IF NOT EXISTS idx_team_members_uid ON team_members (team_member_uid)`;
         await sql `CREATE INDEX IF NOT EXISTS idx_team_members_status ON team_members (status)`;
         await sql `CREATE INDEX IF NOT EXISTS idx_team_members_associate_created ON team_members (associate_id, created_at DESC)`;
+        await sql `CREATE UNIQUE INDEX IF NOT EXISTS uq_team_members_assoc_slot ON team_members (associate_id, slot_number)`;
         tableInitialized = true;
     }
     catch (err) {
@@ -56,9 +63,14 @@ export async function ensureTeamMembersTable() {
 export const teamMemberSchema = z.object({
     associateId: z.coerce.number().positive("Associate ID is required"),
     associateName: z.string().min(1, "Associate Name is required"),
-    fullName: z.string().min(2, "Full Name is required").max(150),
-    fatherHusbandName: z.string().min(2, "Father/Husband Name is required").max(150),
-    dateOfBirth: z.string().min(1, "Date of birth is required"),
+    fullName: z.string().min(2, "Full Name is required").max(150)
+        .refine(v => isValidHumanName(v), { message: "Full Name must contain only alphabets and spaces" })
+        .transform(v => normalizeHumanName(v)),
+    fatherHusbandName: z.string().min(2, "Father/Husband Name is required").max(150)
+        .refine(v => isValidHumanName(v), { message: "Father/Husband Name must contain only alphabets and spaces" })
+        .transform(v => normalizeHumanName(v)),
+    dateOfBirth: z.string().min(1, "Date of birth is required")
+        .refine(v => calculateAge(v) >= 18, { message: "Team Member must be at least 18 years old" }),
     gender: z.string().refine(v => ["Male", "Female", "Other"].includes(v), { message: "Gender must be Male, Female, or Other" }),
     aadharNo: z.string().regex(/^[0-9]{12}$/, "Aadhar Number must be exactly 12 digits"),
     panNo: z.string().transform(v => (v ? v.trim().toUpperCase() : "")).optional().nullable()
@@ -66,7 +78,9 @@ export const teamMemberSchema = z.object({
     mobileNo: z.string().regex(/^[0-9]{10,15}$/, "Mobile Number must be 10-15 digits"),
     emailId: z.string().email("Invalid email address").optional().nullable().or(z.literal("")),
     fullAddress: z.string().min(5, "Full Address must be at least 5 characters"),
-    nomineeName: z.string().optional().nullable(),
+    nomineeName: z.string().optional().nullable()
+        .refine(v => !v || isValidHumanName(v), { message: "Nominee Name must contain only alphabets and spaces" })
+        .transform(v => (v ? normalizeHumanName(v) : v)),
     nomineeRelation: z.string().optional().nullable(),
     nomineeAgeDob: z.string().optional().nullable(),
     nomineeContactNo: z.string().optional().nullable(),
@@ -222,12 +236,87 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
     }
     let createdRecord = null;
     await sql.begin(async (tx) => {
+        // Concurrency lock for slot assignment on this associate
+        await tx `SELECT pg_advisory_xact_lock(hashtext('associate-team-slot-' || ${data.associateId}))`;
+        // 1. Verify associate exists in users table
+        const [assocUser] = await tx `
+      SELECT user_id, full_name, user_type, account_status
+      FROM users
+      WHERE user_id = ${data.associateId}
+      LIMIT 1
+    `;
+        if (!assocUser) {
+            throw new Error(`Associate with ID ${data.associateId} not found`);
+        }
+        // 2. Check occupied slots for this associate (ignore rejected)
+        const existingMembers = await tx `
+      SELECT id, slot_number, status
+      FROM team_members
+      WHERE associate_id = ${data.associateId}
+        AND status <> 'rejected'
+      ORDER BY slot_number ASC
+    `;
+        const occupiedSlots = new Set(existingMembers.map((m) => Number(m.slot_number)).filter(Boolean));
+        // Find lowest available slot between 1 and 10
+        let assignedSlot = null;
+        for (let s = 1; s <= 10; s++) {
+            if (!occupiedSlots.has(s)) {
+                assignedSlot = s;
+                break;
+            }
+        }
+        if (!assignedSlot || occupiedSlots.size >= 10) {
+            throw new Error("This Associate has reached the maximum limit of 10 direct Team Members. No available slots.");
+        }
+        // 3. Generate unique Team Member ID
         const uid = await generateTeamMemberUid(tx);
+        // 4. Sync / link user master record in users table
+        const cleanMobile = String(data.mobileNo || "").replace(/[^0-9]/g, "");
+        const cleanAadhar = String(data.aadharNo || "").replace(/[^0-9]/g, "");
+        const cleanEmail = data.emailId ? String(data.emailId).trim().toLowerCase() : null;
+        let userId = null;
+        const [existingUser] = await tx `
+      SELECT user_id, user_type, member_id, sponsor_user_id
+      FROM users
+      WHERE mobile_no = ${cleanMobile}
+         OR (aadhar_number = ${cleanAadhar} AND ${Boolean(cleanAadhar)})
+         OR (email = ${cleanEmail} AND ${Boolean(cleanEmail)})
+      LIMIT 1
+    `;
+        if (existingUser) {
+            userId = existingUser.user_id;
+            if (!existingUser.sponsor_user_id) {
+                await tx `
+          UPDATE users
+          SET sponsor_user_id = ${data.associateId}, updated_at = NOW()
+          WHERE user_id = ${userId}
+        `;
+            }
+        }
+        else {
+            const [newUser] = await tx `
+        INSERT INTO users (
+          member_id, user_type, full_name, mobile_no, email,
+          pan_number, aadhar_number, sponsor_user_id, account_status, is_active, registered_at
+        ) VALUES (
+          ${uid}, 'Team Member', ${data.fullName.trim()}, ${cleanMobile}, ${cleanEmail},
+          ${data.panNo || null}, ${cleanAadhar}, ${data.associateId}, 'Pending', true, NOW()
+        )
+        ON CONFLICT DO NOTHING
+        RETURNING user_id
+      `;
+            if (newUser) {
+                userId = newUser.user_id;
+            }
+        }
+        // 5. Insert into team_members with slot_number and user_id
         const [inserted] = await tx `
       INSERT INTO team_members (
         team_member_uid,
         associate_id,
         associate_name,
+        user_id,
+        slot_number,
         full_name,
         father_husband_name,
         date_of_birth,
@@ -255,25 +344,27 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
       ) VALUES (
         ${uid},
         ${data.associateId},
-        ${data.associateName},
-        ${data.fullName},
-        ${data.fatherHusbandName},
+        ${data.associateName || assocUser.full_name},
+        ${userId},
+        ${assignedSlot},
+        ${data.fullName.trim()},
+        ${data.fatherHusbandName.trim()},
         ${data.dateOfBirth},
         ${data.gender},
-        ${data.aadharNo},
+        ${cleanAadhar},
         ${data.panNo || null},
-        ${data.mobileNo},
-        ${data.emailId || null},
-        ${data.fullAddress},
+        ${cleanMobile},
+        ${cleanEmail},
+        ${data.fullAddress.trim()},
         ${photoUrl},
         ${data.nomineeName || null},
         ${data.nomineeRelation || null},
         ${data.nomineeAgeDob || null},
         ${data.nomineeContactNo || null},
-        ${data.bankName},
-        ${data.branchName},
-        ${data.accountNo},
-        ${data.ifscCode},
+        ${data.bankName.trim()},
+        ${data.branchName.trim()},
+        ${data.accountNo.trim()},
+        ${data.ifscCode.trim().toUpperCase()},
         ${data.declarationAccepted},
         ${applicantSigUrl},
         ${associateSigUrl},
@@ -406,23 +497,35 @@ export async function getTeamMembersByAssociate(associateId, options = {}) {
 /**
  * 4. Get Single Team Member Record
  */
-export async function getTeamMemberById(id, associateId, isAdmin = false) {
+export async function getTeamMemberById(id, authUserId, isAdmin = false) {
     await ensureTeamMembersTable();
-    const numId = Number(id);
     let rows;
-    if (isNaN(numId)) {
-        // Match by team_member_uid
-        rows = await sql `SELECT * FROM team_members WHERE team_member_uid = ${String(id)} LIMIT 1`;
+    if (String(id).toLowerCase() === "me") {
+        if (!authUserId)
+            return null;
+        rows = await sql `SELECT * FROM team_members WHERE user_id = ${Number(authUserId)} LIMIT 1`;
     }
     else {
-        rows = await sql `SELECT * FROM team_members WHERE id = ${numId} OR team_member_uid = ${String(id)} LIMIT 1`;
+        const numId = Number(id);
+        if (isNaN(numId)) {
+            // Match by team_member_uid
+            rows = await sql `SELECT * FROM team_members WHERE team_member_uid = ${String(id)} LIMIT 1`;
+        }
+        else {
+            rows = await sql `SELECT * FROM team_members WHERE id = ${numId} OR team_member_uid = ${String(id)} LIMIT 1`;
+        }
     }
     if (!rows || rows.length === 0)
         return null;
     const record = rows[0];
-    // Enforce associate scoping if not admin
-    if (!isAdmin && associateId && Number(record.associate_id) !== Number(associateId)) {
-        throw new Error("Unauthorized access to this team member record");
+    // Enforce scoping: accessible by admin, the owner associate, or the team member themselves
+    if (!isAdmin && authUserId) {
+        const uid = Number(authUserId);
+        const isOwnerAssociate = Number(record.associate_id) === uid;
+        const isSelfMember = Number(record.user_id) === uid;
+        if (!isOwnerAssociate && !isSelfMember) {
+            throw new Error("Unauthorized access to this team member record");
+        }
     }
     return {
         ...record,
@@ -483,26 +586,110 @@ export async function updateTeamMemberRecord(id, data, photoUrl, applicantSigUrl
     };
 }
 /**
- * 6. Admin Status Update (Approve / Reject)
+ * 6. Status Update & Users Account Sync (Approve / Reject / Inactivate)
  */
 export async function updateTeamMemberStatus(id, status, authorizedSignatoryName) {
     await ensureTeamMembersTable();
     const numId = Number(id);
-    const [updated] = await sql `
-    UPDATE team_members
-    SET
-      status = ${status},
-      authorized_signatory_name = COALESCE(${authorizedSignatoryName || null}, authorized_signatory_name),
-      updated_at = NOW()
-    WHERE id = ${numId} OR team_member_uid = ${String(id)}
-    RETURNING *
-  `;
-    if (!updated) {
-        throw new Error("Team member not found");
-    }
+    const normalizedStatus = String(status || "").toLowerCase().trim();
+    let result = null;
+    await sql.begin(async (tx) => {
+        // 1. Fetch current team_members record
+        let rows = isNaN(numId)
+            ? await tx `SELECT * FROM team_members WHERE team_member_uid = ${String(id)} LIMIT 1 FOR UPDATE`
+            : await tx `SELECT * FROM team_members WHERE id = ${numId} OR team_member_uid = ${String(id)} LIMIT 1 FOR UPDATE`;
+        if (!rows || rows.length === 0) {
+            throw new Error("Team member not found");
+        }
+        const current = rows[0];
+        // 2. Update team_members status
+        const [updated] = await tx `
+      UPDATE team_members
+      SET
+        status = ${normalizedStatus},
+        authorized_signatory_name = COALESCE(${authorizedSignatoryName || null}, authorized_signatory_name),
+        updated_at = NOW()
+      WHERE id = ${current.id}
+      RETURNING *
+    `;
+        // 3. Map team member status to users.account_status
+        let targetAccountStatus = "Pending";
+        let targetIsActive = true;
+        if (["approved", "active"].includes(normalizedStatus)) {
+            targetAccountStatus = "Approved";
+            targetIsActive = true;
+        }
+        else if (normalizedStatus === "rejected") {
+            targetAccountStatus = "Rejected";
+            targetIsActive = false;
+        }
+        else if (normalizedStatus === "inactive" || normalizedStatus === "blocked") {
+            targetAccountStatus = "Inactive";
+            targetIsActive = false;
+        }
+        else {
+            targetAccountStatus = "Pending";
+            targetIsActive = true;
+        }
+        // 4. Sync linked users master account
+        let userId = current.user_id;
+        const cleanMobile = String(current.mobile_no || "").replace(/[^0-9]/g, "");
+        const cleanAadhar = String(current.aadhar_no || "").replace(/[^0-9]/g, "");
+        const cleanEmail = current.email_id ? String(current.email_id).trim().toLowerCase() : null;
+        if (!userId) {
+            const [existingUser] = await tx `
+        SELECT user_id, user_type, account_status, sponsor_user_id
+        FROM users
+        WHERE mobile_no = ${cleanMobile}
+           OR (aadhar_number = ${cleanAadhar} AND ${Boolean(cleanAadhar)})
+           OR (email = ${cleanEmail} AND ${Boolean(cleanEmail)})
+        LIMIT 1
+      `;
+            if (existingUser) {
+                userId = existingUser.user_id;
+            }
+        }
+        if (userId) {
+            await tx `
+        UPDATE users
+        SET
+          user_type = COALESCE(user_type, 'Team Member'),
+          sponsor_user_id = COALESCE(sponsor_user_id, ${current.associate_id}),
+          account_status = ${targetAccountStatus},
+          is_active = ${targetIsActive},
+          member_id = COALESCE(member_id, ${current.team_member_uid}),
+          updated_at = NOW()
+        WHERE user_id = ${userId}
+      `;
+            if (current.user_id !== userId) {
+                await tx `UPDATE team_members SET user_id = ${userId} WHERE id = ${current.id}`;
+                updated.user_id = userId;
+            }
+        }
+        else if (["approved", "active"].includes(normalizedStatus)) {
+            const [newUser] = await tx `
+        INSERT INTO users (
+          member_id, user_type, full_name, mobile_no, email,
+          pan_number, aadhar_number, sponsor_user_id, account_status, is_active, registered_at
+        ) VALUES (
+          ${current.team_member_uid}, 'Team Member', ${current.full_name}, ${cleanMobile}, ${cleanEmail},
+          ${current.pan_no || null}, ${cleanAadhar}, ${current.associate_id}, ${targetAccountStatus}, ${targetIsActive}, NOW()
+        )
+        ON CONFLICT (mobile_no) DO UPDATE
+        SET account_status = ${targetAccountStatus}, is_active = ${targetIsActive}, user_type = 'Team Member', sponsor_user_id = ${current.associate_id}
+        RETURNING user_id
+      `;
+            if (newUser) {
+                userId = newUser.user_id;
+                await tx `UPDATE team_members SET user_id = ${userId} WHERE id = ${current.id}`;
+                updated.user_id = userId;
+            }
+        }
+        result = updated;
+    });
     return {
-        ...updated,
-        aadhar_no_masked: maskAadhar(updated.aadhar_no),
-        account_no_masked: maskAccountNo(updated.account_no)
+        ...result,
+        aadhar_no_masked: maskAadhar(result.aadhar_no),
+        account_no_masked: maskAccountNo(result.account_no)
     };
 }

@@ -90,11 +90,11 @@ async function triggerMlmCommission(req, bookingId, sourceType, sourceId, amount
 
       if (!booking?.sponsor_user_id) return { generated: 0, reason: "No sponsor" };
 
-      // Check if commission engine is configured
       const [engine] = await db`
         SELECT * FROM commission_engine_settings WHERE id = 1 AND is_active = TRUE LIMIT 1
       `;
       if (!engine) return { generated: 0, reason: "Commission engine inactive" };
+      const eligibility = engine.eligibility_rules || {};
 
       const [event] = await db`
         INSERT INTO commission_source_events (
@@ -111,8 +111,305 @@ async function triggerMlmCommission(req, bookingId, sourceType, sourceId, amount
 
       if (!event) return { generated: 0, reason: "Event already processed" };
 
-      console.log(`[MLM Commission] Triggered for booking ${bookingId}, source ${sourceType}-${sourceId}, event ${event.event_id}`);
-      return { generated: 1, event_id: event.event_id };
+      const sellerUserId = Number(booking.sponsor_user_id);
+      const [seller] = await db`
+        SELECT user_id, account_status, user_type, sponsor_user_id
+        FROM users
+        WHERE user_id = ${sellerUserId} AND user_type IN ('Associate', 'Team Member')`;
+      if (!seller) return { generated: 0, reason: "Seller not found", event_id: event.event_id };
+      if (eligibility.require_active_associate !== false && seller.account_status !== "Active") {
+        return { generated: 0, reason: "Seller inactive", event_id: event.event_id };
+      }
+
+      const isTeamMemberSeller = seller.user_type === 'Team Member';
+      let leaderUserId = isTeamMemberSeller
+        ? Number(seller.sponsor_user_id || 0)
+        : sellerUserId;
+
+      if (isTeamMemberSeller && !leaderUserId) {
+        const [tmRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} LIMIT 1`;
+        if (tmRow?.associate_id) {
+          leaderUserId = Number(tmRow.associate_id);
+        }
+      }
+
+      if (engine.commission_model === "FlatTeam" || engine.commission_model === "TeamMemberModel") {
+        const teamDirectPercentage = Number(engine.team_direct_percentage ?? 5);
+        const teamPassivePercentage = Number(engine.team_passive_percentage ?? 0.5);
+        const associateLeaderPercentage = Number(engine.associate_leader_percentage ?? 0.5);
+
+        if ([teamDirectPercentage, teamPassivePercentage, associateLeaderPercentage].some(v => !Number.isFinite(v) || v < 0 || v > 100)) {
+          return { generated: 0, reason: "Invalid FlatTeam commission percentages" };
+        }
+
+        const actualLeaderId = isTeamMemberSeller ? leaderUserId : sellerUserId;
+
+        // Find all eligible team members under actualLeaderId
+        const teamRows = actualLeaderId ? await db`
+          SELECT DISTINCT u.user_id, u.account_status, u.user_type
+          FROM users u
+          WHERE u.user_type = 'Team Member'
+            AND (
+              u.sponsor_user_id = ${actualLeaderId}
+              OR EXISTS (
+                SELECT 1 FROM team_members tm
+                WHERE tm.associate_id = ${actualLeaderId}
+                  AND tm.user_id = u.user_id
+                  AND tm.status IN ('approved', 'active')
+              )
+            )` : [];
+
+        const eligibleTeamMembers = teamRows.filter(m => {
+          if (Number(m.user_id) === sellerUserId) return false;
+          const isMemberActive = ['Active', 'Approved'].includes(m.account_status);
+          if (eligibility.require_active_associate !== false && !isMemberActive) return false;
+          if (eligibility.exclude_blacklisted !== false && m.account_status === "Blacklisted") return false;
+          return true;
+        });
+
+        const participantCount = eligibleTeamMembers.length;
+        let genCount = 0;
+
+        // 1. Direct Seller Commission (5%)
+        const sellerAmount = Math.round((receivedAmount * teamDirectPercentage / 100) * 100) / 100;
+        if (sellerAmount > 0) {
+          const [comm] = await db`
+            INSERT INTO commission_transactions (
+              associate_user_id, related_booking_id, commission_type, gaj_sold,
+              gross_amount, deduction_amount, net_amount, commission_month, commission_status,
+              commission_event_id, commission_model, commission_level, commission_percentage,
+              calculation_base, source_type, source_reference, engine_version,
+              distribution_role, distribution_participants, seller_user_id
+            ) VALUES (
+              ${sellerUserId}, ${booking.booking_id}, 'Direct', ${Number(booking.plot_area || 0)},
+              ${sellerAmount}, 0, ${sellerAmount}, ${new Date().toISOString().slice(0, 7)}, 'Pending',
+              ${event.event_id}, ${engine.commission_model}, 1, ${teamDirectPercentage},
+              ${receivedAmount}, ${sourceType}, ${String(sourceId)}, ${engine.version},
+              'Seller', ${participantCount}, ${sellerUserId}
+            )
+            ON CONFLICT DO NOTHING
+            RETURNING commission_id`;
+          if (comm) {
+            await db`
+              INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
+              VALUES (${sellerUserId}, ${Number(booking.plot_area || 0)}, ${sellerAmount})
+              ON CONFLICT (associate_user_id) DO UPDATE SET
+                total_gaj_sold = associate_sales_tracker.total_gaj_sold + ${Number(booking.plot_area || 0)},
+                total_commission_earned = associate_sales_tracker.total_commission_earned + ${sellerAmount},
+                updated_at = NOW()`;
+            genCount++;
+          }
+        }
+
+        // 2. If Seller is Team Member: Associate Leader receives 0.5%
+        if (isTeamMemberSeller && actualLeaderId && actualLeaderId !== sellerUserId) {
+          const [leaderUser] = await db`
+            SELECT user_id, account_status, user_type
+            FROM users
+            WHERE user_id = ${actualLeaderId} AND user_type = 'Associate'`;
+
+          const isLeaderActive = leaderUser && ['Active', 'Approved'].includes(leaderUser.account_status);
+          const leaderEligible = leaderUser &&
+            (eligibility.require_active_associate === false || isLeaderActive) &&
+            (eligibility.exclude_blacklisted === false || leaderUser.account_status !== "Blacklisted");
+
+          if (leaderEligible && associateLeaderPercentage > 0) {
+            const leaderAmount = Math.round((receivedAmount * associateLeaderPercentage / 100) * 100) / 100;
+            if (leaderAmount > 0) {
+              const [comm] = await db`
+                INSERT INTO commission_transactions (
+                  associate_user_id, related_booking_id, commission_type, gaj_sold,
+                  gross_amount, deduction_amount, net_amount, commission_month, commission_status,
+                  commission_event_id, commission_model, commission_level, commission_percentage,
+                  calculation_base, source_type, source_reference, engine_version,
+                  distribution_role, distribution_participants, seller_user_id
+                ) VALUES (
+                  ${actualLeaderId}, ${booking.booking_id}, 'Upline', ${Number(booking.plot_area || 0)},
+                  ${leaderAmount}, 0, ${leaderAmount}, ${new Date().toISOString().slice(0, 7)}, 'Pending',
+                  ${event.event_id}, ${engine.commission_model}, 2, ${associateLeaderPercentage},
+                  ${receivedAmount}, ${sourceType}, ${String(sourceId)}, ${engine.version},
+                  'AssociateLeader', ${participantCount}, ${sellerUserId}
+                )
+                ON CONFLICT DO NOTHING
+                RETURNING commission_id`;
+              if (comm) {
+                await db`
+                  INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
+                  VALUES (${actualLeaderId}, 0, ${leaderAmount})
+                  ON CONFLICT (associate_user_id) DO UPDATE SET
+                    total_commission_earned = associate_sales_tracker.total_commission_earned + ${leaderAmount},
+                    updated_at = NOW()`;
+                genCount++;
+              }
+            }
+          }
+        }
+
+        // 3. Each other eligible Team Member receives 0.5%
+        if (teamPassivePercentage > 0) {
+          const passiveAmount = Math.round((receivedAmount * teamPassivePercentage / 100) * 100) / 100;
+          if (passiveAmount > 0) {
+            for (const member of eligibleTeamMembers) {
+              const [comm] = await db`
+                INSERT INTO commission_transactions (
+                  associate_user_id, related_booking_id, commission_type, gaj_sold,
+                  gross_amount, deduction_amount, net_amount, commission_month, commission_status,
+                  commission_event_id, commission_model, commission_level, commission_percentage,
+                  calculation_base, source_type, source_reference, engine_version,
+                  distribution_role, distribution_participants, seller_user_id
+                ) VALUES (
+                  ${member.user_id}, ${booking.booking_id}, 'Upline', ${Number(booking.plot_area || 0)},
+                  ${passiveAmount}, 0, ${passiveAmount}, ${new Date().toISOString().slice(0, 7)}, 'Pending',
+                  ${event.event_id}, ${engine.commission_model}, ${isTeamMemberSeller ? 3 : 2}, ${teamPassivePercentage},
+                  ${receivedAmount}, ${sourceType}, ${String(sourceId)}, ${engine.version},
+                  'TeamMember', ${participantCount}, ${sellerUserId}
+                )
+                ON CONFLICT DO NOTHING
+                RETURNING commission_id`;
+              if (comm) {
+                await db`
+                  INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
+                  VALUES (${member.user_id}, 0, ${passiveAmount})
+                  ON CONFLICT (associate_user_id) DO UPDATE SET
+                    total_commission_earned = associate_sales_tracker.total_commission_earned + ${passiveAmount},
+                    updated_at = NOW()`;
+                genCount++;
+              }
+            }
+          }
+        }
+
+        return { generated: genCount, event_id: event.event_id };
+      }
+
+      if (engine.commission_model === "EqualDistribution") {
+        const sellerPercentage = Number(engine.seller_percentage ?? 50);
+        const equalPercentage = Number(engine.equal_distribution_percentage ?? (100 - sellerPercentage));
+        const [rootRow] = leaderUserId ? await db`
+          SELECT ancestor_user_id FROM mlm_tree_closure WHERE descendant_user_id = ${leaderUserId} ORDER BY depth DESC LIMIT 1` : [null];
+        const networkRootId = Number(rootRow?.ancestor_user_id || leaderUserId || sellerUserId);
+        const networkRows = await db`
+          SELECT u.user_id, u.account_status FROM users u
+          WHERE u.user_type = 'Associate' AND (u.user_id = ${networkRootId} OR EXISTS (SELECT 1 FROM mlm_tree_closure c WHERE c.ancestor_user_id = ${networkRootId} AND c.descendant_user_id = u.user_id))`;
+        const eligibleNetwork = networkRows.filter(m => Number(m.user_id) !== sellerUserId && (eligibility.require_active_associate === false || m.account_status === "Active"));
+
+        const sellerAmount = Math.round((receivedAmount * sellerPercentage / 100) * 100) / 100;
+        const distributionPool = engine.equal_distribution_enabled === false ? 0 : Math.round((receivedAmount * equalPercentage / 100) * 100) / 100;
+        const participantCount = eligibleNetwork.length;
+        const shareAmount = participantCount > 0 ? Math.floor((distributionPool / participantCount) * 100) / 100 : 0;
+
+        let genCount = 0;
+        if (sellerAmount > 0) {
+          const [comm] = await db`
+            INSERT INTO commission_transactions (
+              associate_user_id, related_booking_id, commission_type, gaj_sold,
+              gross_amount, deduction_amount, net_amount, commission_month, commission_status,
+              commission_event_id, commission_model, commission_level, commission_percentage,
+              calculation_base, source_type, source_reference, engine_version,
+              distribution_role, distribution_participants, seller_user_id
+            ) VALUES (
+              ${sellerUserId}, ${booking.booking_id}, 'Direct', ${Number(booking.plot_area || 0)},
+              ${sellerAmount}, 0, ${sellerAmount}, ${new Date().toISOString().slice(0, 7)}, 'Pending',
+              ${event.event_id}, ${engine.commission_model}, 0, ${sellerPercentage},
+              ${receivedAmount}, ${sourceType}, ${String(sourceId)}, ${engine.version},
+              'Seller', ${participantCount}, ${sellerUserId}
+            ) ON CONFLICT DO NOTHING RETURNING commission_id`;
+          if (comm) {
+            await db`
+              INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
+              VALUES (${sellerUserId}, ${Number(booking.plot_area || 0)}, ${sellerAmount})
+              ON CONFLICT (associate_user_id) DO UPDATE SET
+                total_gaj_sold = associate_sales_tracker.total_gaj_sold + ${Number(booking.plot_area || 0)},
+                total_commission_earned = associate_sales_tracker.total_commission_earned + ${sellerAmount},
+                updated_at = NOW()`;
+            genCount++;
+          }
+        }
+        for (const member of eligibleNetwork) {
+          if (!(shareAmount > 0)) continue;
+          const [comm] = await db`
+            INSERT INTO commission_transactions (
+              associate_user_id, related_booking_id, commission_type, gaj_sold,
+              gross_amount, deduction_amount, net_amount, commission_month, commission_status,
+              commission_event_id, commission_model, commission_level, commission_percentage,
+              calculation_base, source_type, source_reference, engine_version,
+              distribution_role, distribution_participants, seller_user_id
+            ) VALUES (
+              ${member.user_id}, ${booking.booking_id}, 'Upline', ${Number(booking.plot_area || 0)},
+              ${shareAmount}, 0, ${shareAmount}, ${new Date().toISOString().slice(0, 7)}, 'Pending',
+              ${event.event_id}, ${engine.commission_model}, 1, ${equalPercentage},
+              ${receivedAmount}, ${sourceType}, ${String(sourceId)}, ${engine.version},
+              'EqualDistribution', ${participantCount}, ${sellerUserId}
+            ) ON CONFLICT DO NOTHING RETURNING commission_id`;
+          if (comm) {
+            await db`
+              INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
+              VALUES (${member.user_id}, 0, ${shareAmount})
+              ON CONFLICT (associate_user_id) DO UPDATE SET
+                total_commission_earned = associate_sales_tracker.total_commission_earned + ${shareAmount},
+                updated_at = NOW()`;
+            genCount++;
+          }
+        }
+        return { generated: genCount, event_id: event.event_id };
+      }
+
+      // LevelWise / Upline
+      const levels = engine.commission_model === "LevelWise"
+        ? await db`SELECT level_no, percentage, is_active FROM commission_engine_levels WHERE settings_id = 1 AND commission_model = 'LevelWise' ORDER BY level_no`
+        : [];
+      const candidates = new Map();
+      candidates.set(sellerUserId, 1);
+      if (seller.user_type === 'Team Member' && leaderUserId) {
+        if (2 <= Number(engine.maximum_levels || 10)) candidates.set(leaderUserId, 2);
+        const uplines = await db`SELECT ancestor_user_id, depth FROM mlm_tree_closure WHERE descendant_user_id = ${leaderUserId} ORDER BY depth ASC`;
+        for (const row of uplines) {
+          const lvl = Number(row.depth) + 2;
+          if (lvl <= Number(engine.maximum_levels || 10) && !candidates.has(Number(row.ancestor_user_id))) candidates.set(Number(row.ancestor_user_id), lvl);
+        }
+      } else {
+        const uplines = await db`SELECT ancestor_user_id, depth FROM mlm_tree_closure WHERE descendant_user_id = ${sellerUserId} ORDER BY depth ASC`;
+        for (const row of uplines) {
+          const lvl = Number(row.depth) + 1;
+          if (lvl <= Number(engine.maximum_levels || 10) && !candidates.has(Number(row.ancestor_user_id))) candidates.set(Number(row.ancestor_user_id), lvl);
+        }
+      }
+
+      let genCount = 0;
+      for (const [candidateUserId, level] of candidates.entries()) {
+        const [candidateUser] = await db`SELECT account_status, user_type FROM users WHERE user_id = ${candidateUserId} AND user_type IN ('Associate', 'Team Member')`;
+        if (!candidateUser || (eligibility.require_active_associate !== false && candidateUser.account_status !== "Active")) continue;
+        const percentage = engine.commission_model === "Upline"
+          ? (level === 1 ? money(engine.direct_percentage) : money(engine.upline_percentage))
+          : money(levels.find(item => Number(item.level_no) === level && item.is_active)?.percentage);
+        const commissionAmount = Math.round(receivedAmount * percentage) / 100;
+        if (!(commissionAmount > 0)) continue;
+        const [created] = await db`
+          INSERT INTO commission_transactions (
+            associate_user_id, related_booking_id, commission_type, gaj_sold,
+            gross_amount, deduction_amount, net_amount, commission_month, commission_status,
+            commission_event_id, commission_model, commission_level, commission_percentage,
+            calculation_base, source_type, source_reference, engine_version, seller_user_id
+          ) VALUES (
+            ${candidateUserId}, ${booking.booking_id}, ${level === 1 ? "Direct" : "Upline"}, ${money(booking.plot_area)},
+            ${commissionAmount}, 0, ${commissionAmount}, ${new Date().toISOString().slice(0, 7)}, 'Pending',
+            ${event.event_id}, ${engine.commission_model}, ${level}, ${percentage},
+            ${receivedAmount}, ${sourceType}, ${String(sourceId)}, ${engine.version}, ${sellerUserId}
+          ) ON CONFLICT DO NOTHING RETURNING commission_id`;
+        if (created) {
+          await db`
+            INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
+            VALUES (${candidateUserId}, ${level === 1 ? money(booking.plot_area) : 0}, ${commissionAmount})
+            ON CONFLICT (associate_user_id) DO UPDATE SET
+              total_gaj_sold = associate_sales_tracker.total_gaj_sold + ${level === 1 ? money(booking.plot_area) : 0},
+              total_commission_earned = associate_sales_tracker.total_commission_earned + ${commissionAmount},
+              updated_at = NOW()`;
+          genCount++;
+        }
+      }
+
+      console.log(`[MLM Commission] Triggered for booking ${bookingId}, source ${sourceType}-${sourceId}, event ${event.event_id}, generated ${genCount} items`);
+      return { generated: genCount, event_id: event.event_id };
     });
   } catch (err) {
     console.error("[MLM Commission Error]", err.message);

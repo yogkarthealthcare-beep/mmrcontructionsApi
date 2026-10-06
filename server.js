@@ -41,6 +41,7 @@ import { getVersionInfo } from "./services/version.service.js";
 import { ensureEmiSchedulesForBooking, ensureInvoiceForEmi, ensureReceiptForEmi } from "./services/emi.service.js";
 import { setPlotStatus } from "./services/plotStatus.service.js";
 import { dispatchBookingNotification } from "./services/bookingNotification.service.js";
+import { normalizeHumanName, isValidHumanName, calculateAge, isValidState } from "./utils/validationHelper.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -1844,8 +1845,8 @@ const requireCommissionEngineSchema = (() => {
         await sql`
           CREATE TABLE IF NOT EXISTS commission_engine_settings (
             id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-            commission_model TEXT NOT NULL DEFAULT 'Upline'
-              CHECK (commission_model IN ('Upline', 'LevelWise', 'EqualDistribution')),
+            commission_model TEXT NOT NULL DEFAULT 'FlatTeam'
+              CHECK (commission_model IN ('Upline', 'LevelWise', 'EqualDistribution', 'FlatTeam', 'TeamMemberModel')),
             maximum_levels INTEGER NOT NULL DEFAULT 3 CHECK (maximum_levels BETWEEN 1 AND 50),
             direct_percentage NUMERIC(8,4) NOT NULL DEFAULT 10 CHECK (direct_percentage BETWEEN 0 AND 100),
             upline_percentage NUMERIC(8,4) NOT NULL DEFAULT 2 CHECK (upline_percentage BETWEEN 0 AND 100),
@@ -1856,6 +1857,9 @@ const requireCommissionEngineSchema = (() => {
             payment_mode_rules JSONB NOT NULL DEFAULT '{"full_payment":"instant","emi":"installment_wise"}'::jsonb,
             eligibility_rules JSONB NOT NULL DEFAULT '{"require_active_associate":true,"exclude_blacklisted":true,"minimum_plot_amount":0,"minimum_payment_amount":0}'::jsonb,
             bonus_rules JSONB NOT NULL DEFAULT '{}'::jsonb,
+            team_direct_percentage NUMERIC(8,4) NOT NULL DEFAULT 5 CHECK (team_direct_percentage BETWEEN 0 AND 100),
+            team_passive_percentage NUMERIC(8,4) NOT NULL DEFAULT 0.5 CHECK (team_passive_percentage BETWEEN 0 AND 100),
+            associate_leader_percentage NUMERIC(8,4) NOT NULL DEFAULT 0.5 CHECK (associate_leader_percentage BETWEEN 0 AND 100),
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             version INTEGER NOT NULL DEFAULT 1,
             created_by_admin_id INTEGER,
@@ -1867,7 +1871,7 @@ const requireCommissionEngineSchema = (() => {
           CREATE TABLE IF NOT EXISTS commission_engine_levels (
             id BIGSERIAL PRIMARY KEY,
             settings_id SMALLINT NOT NULL DEFAULT 1 REFERENCES commission_engine_settings(id) ON DELETE CASCADE,
-            commission_model TEXT NOT NULL CHECK (commission_model IN ('Upline', 'LevelWise', 'EqualDistribution')),
+            commission_model TEXT NOT NULL CHECK (commission_model IN ('Upline', 'LevelWise', 'EqualDistribution', 'FlatTeam', 'TeamMemberModel')),
             level_no INTEGER NOT NULL CHECK (level_no BETWEEN 1 AND 50),
             percentage NUMERIC(8,4) NOT NULL CHECK (percentage BETWEEN 0 AND 100),
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -1931,6 +1935,9 @@ const requireCommissionEngineSchema = (() => {
         await sql`ALTER TABLE commission_engine_settings ADD COLUMN IF NOT EXISTS equal_distribution_enabled BOOLEAN NOT NULL DEFAULT TRUE`;
         await sql`ALTER TABLE commission_engine_settings ADD COLUMN IF NOT EXISTS distribution_scope TEXT NOT NULL DEFAULT 'TopAssociateNetwork'`;
         await sql`ALTER TABLE commission_engine_settings ADD COLUMN IF NOT EXISTS payment_mode_rules JSONB NOT NULL DEFAULT '{"full_payment":"instant","emi":"installment_wise"}'::jsonb`;
+        await sql`ALTER TABLE commission_engine_settings ADD COLUMN IF NOT EXISTS team_direct_percentage NUMERIC(8,4) NOT NULL DEFAULT 5`;
+        await sql`ALTER TABLE commission_engine_settings ADD COLUMN IF NOT EXISTS team_passive_percentage NUMERIC(8,4) NOT NULL DEFAULT 0.5`;
+        await sql`ALTER TABLE commission_engine_settings ADD COLUMN IF NOT EXISTS associate_leader_percentage NUMERIC(8,4) NOT NULL DEFAULT 0.5`;
         await sql.unsafe(`
           DO $$
           BEGIN
@@ -1943,7 +1950,7 @@ const requireCommissionEngineSchema = (() => {
             END IF;
             ALTER TABLE commission_engine_settings
               ADD CONSTRAINT commission_engine_settings_commission_model_check
-              CHECK (commission_model IN ('Upline', 'LevelWise', 'EqualDistribution'));
+              CHECK (commission_model IN ('Upline', 'LevelWise', 'EqualDistribution', 'FlatTeam', 'TeamMemberModel'));
 
             IF EXISTS (
               SELECT 1 FROM pg_constraint
@@ -1954,7 +1961,18 @@ const requireCommissionEngineSchema = (() => {
             END IF;
             ALTER TABLE commission_engine_levels
               ADD CONSTRAINT commission_engine_levels_commission_model_check
-              CHECK (commission_model IN ('Upline', 'LevelWise', 'EqualDistribution'));
+              CHECK (commission_model IN ('Upline', 'LevelWise', 'EqualDistribution', 'FlatTeam', 'TeamMemberModel'));
+
+            IF EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conname = 'commission_source_events_source_type_check'
+                AND conrelid = 'commission_source_events'::regclass
+            ) THEN
+              ALTER TABLE commission_source_events DROP CONSTRAINT commission_source_events_source_type_check;
+            END IF;
+            ALTER TABLE commission_source_events
+              ADD CONSTRAINT commission_source_events_source_type_check
+              CHECK (source_type IN ('FullPayment','InitialPayment','EmiPayment','PartialPayment','Manual','BookingAdvance','MilestonePayment','OnlinePayment','OfflinePayment'));
           END $$;
         `);
         // Remove duplicates if any before adding constraint (keep highest ID)
@@ -2058,8 +2076,196 @@ const generateCommissionForPayment = async (req, {
       RETURNING event_id`;
     if (!event) return { generated: 0, reason: "Payment event already processed" };
 
+    const sellerUserId = Number(booking.sponsor_user_id);
+    const [seller] = await db`
+      SELECT user_id, account_status, user_type, sponsor_user_id
+      FROM users
+      WHERE user_id = ${sellerUserId} AND user_type IN ('Associate', 'Team Member')`;
+    if (!seller) return { generated: 0, reason: "Seller associate/team member not found" };
+    if (eligibility.require_active_associate !== false && seller.account_status !== "Active") {
+      return { generated: 0, reason: "Seller inactive" };
+    }
+    if (eligibility.exclude_blacklisted !== false && seller.account_status === "Blacklisted") {
+      return { generated: 0, reason: "Seller blacklisted" };
+    }
+
+    const isTeamMemberSeller = seller.user_type === 'Team Member';
+    let leaderUserId = isTeamMemberSeller
+      ? Number(seller.sponsor_user_id || 0)
+      : sellerUserId;
+
+    if (isTeamMemberSeller && !leaderUserId) {
+      const [tmRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} LIMIT 1`;
+      if (tmRow?.associate_id) {
+        leaderUserId = Number(tmRow.associate_id);
+      }
+    }
+
+    if (engine.commission_model === "FlatTeam" || engine.commission_model === "TeamMemberModel") {
+      const teamDirectPercentage = Number(engine.team_direct_percentage ?? 5);
+      const teamPassivePercentage = Number(engine.team_passive_percentage ?? 0.5);
+      const associateLeaderPercentage = Number(engine.associate_leader_percentage ?? 0.5);
+
+      if ([teamDirectPercentage, teamPassivePercentage, associateLeaderPercentage].some(v => !Number.isFinite(v) || v < 0 || v > 100)) {
+        return { generated: 0, reason: "Invalid FlatTeam commission percentages" };
+      }
+
+      const actualLeaderId = isTeamMemberSeller ? leaderUserId : sellerUserId;
+
+      // Find all eligible team members under actualLeaderId
+      const teamRows = actualLeaderId ? await db`
+        SELECT DISTINCT u.user_id, u.account_status, u.user_type
+        FROM users u
+        WHERE u.user_type = 'Team Member'
+          AND (
+            u.sponsor_user_id = ${actualLeaderId}
+            OR EXISTS (
+              SELECT 1 FROM team_members tm
+              WHERE tm.associate_id = ${actualLeaderId}
+                AND tm.user_id = u.user_id
+                AND tm.status IN ('approved', 'active')
+            )
+          )` : [];
+
+      const eligibleTeamMembers = teamRows.filter(m => {
+        if (Number(m.user_id) === sellerUserId) return false;
+        const isMemberActive = ['Active', 'Approved'].includes(m.account_status);
+        if (eligibility.require_active_associate !== false && !isMemberActive) return false;
+        if (eligibility.exclude_blacklisted !== false && m.account_status === "Blacklisted") return false;
+        return true;
+      });
+
+      const participantCount = eligibleTeamMembers.length;
+      let generated = 0;
+      let totalCommission = 0;
+
+      // 1. Direct Seller Commission (5%)
+      const sellerAmount = Math.round((amountReceived * teamDirectPercentage / 100) * 100) / 100;
+      if (sellerAmount > 0) {
+        const [comm] = await db`
+          INSERT INTO commission_transactions (
+            associate_user_id, related_booking_id, commission_type, gaj_sold,
+            gross_amount, deduction_amount, net_amount, commission_month, commission_status,
+            commission_event_id, commission_model, commission_level, commission_percentage,
+            calculation_base, source_type, source_reference, engine_version,
+            distribution_role, distribution_participants, seller_user_id
+          ) VALUES (
+            ${sellerUserId}, ${booking.booking_id}, 'Direct', ${Number(booking.plot_area || 0)},
+            ${sellerAmount}, 0, ${sellerAmount}, ${new Date().toISOString().slice(0, 7)}, 'Pending',
+            ${event.event_id}, ${engine.commission_model}, 1, ${teamDirectPercentage},
+            ${amountReceived}, ${sourceType}, ${String(sourceId)}, ${engine.version},
+            'Seller', ${participantCount}, ${sellerUserId}
+          )
+          ON CONFLICT DO NOTHING
+          RETURNING commission_id`;
+        if (comm) {
+          await db`
+            INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
+            VALUES (${sellerUserId}, ${Number(booking.plot_area || 0)}, ${sellerAmount})
+            ON CONFLICT (associate_user_id) DO UPDATE SET
+              total_gaj_sold = associate_sales_tracker.total_gaj_sold + ${Number(booking.plot_area || 0)},
+              total_commission_earned = associate_sales_tracker.total_commission_earned + ${sellerAmount},
+              updated_at = NOW()`;
+          generated++;
+          totalCommission += sellerAmount;
+        }
+      }
+
+      // 2. If Seller is Team Member: Associate Leader receives 0.5%
+      if (isTeamMemberSeller && actualLeaderId && actualLeaderId !== sellerUserId) {
+        const [leaderUser] = await db`
+          SELECT user_id, account_status, user_type
+          FROM users
+          WHERE user_id = ${actualLeaderId} AND user_type = 'Associate'`;
+
+        const isLeaderActive = leaderUser && ['Active', 'Approved'].includes(leaderUser.account_status);
+        const leaderEligible = leaderUser &&
+          (eligibility.require_active_associate === false || isLeaderActive) &&
+          (eligibility.exclude_blacklisted === false || leaderUser.account_status !== "Blacklisted");
+
+        if (leaderEligible && associateLeaderPercentage > 0) {
+          const leaderAmount = Math.round((amountReceived * associateLeaderPercentage / 100) * 100) / 100;
+          if (leaderAmount > 0) {
+            const [comm] = await db`
+              INSERT INTO commission_transactions (
+                associate_user_id, related_booking_id, commission_type, gaj_sold,
+                gross_amount, deduction_amount, net_amount, commission_month, commission_status,
+                commission_event_id, commission_model, commission_level, commission_percentage,
+                calculation_base, source_type, source_reference, engine_version,
+                distribution_role, distribution_participants, seller_user_id
+              ) VALUES (
+                ${actualLeaderId}, ${booking.booking_id}, 'Upline', ${Number(booking.plot_area || 0)},
+                ${leaderAmount}, 0, ${leaderAmount}, ${new Date().toISOString().slice(0, 7)}, 'Pending',
+                ${event.event_id}, ${engine.commission_model}, 2, ${associateLeaderPercentage},
+                ${amountReceived}, ${sourceType}, ${String(sourceId)}, ${engine.version},
+                'AssociateLeader', ${participantCount}, ${sellerUserId}
+              )
+              ON CONFLICT DO NOTHING
+              RETURNING commission_id`;
+            if (comm) {
+              await db`
+                INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
+                VALUES (${actualLeaderId}, 0, ${leaderAmount})
+                ON CONFLICT (associate_user_id) DO UPDATE SET
+                  total_commission_earned = associate_sales_tracker.total_commission_earned + ${leaderAmount},
+                  updated_at = NOW()`;
+              generated++;
+              totalCommission += leaderAmount;
+            }
+          }
+        }
+      }
+
+      // 3. Each other eligible Team Member receives 0.5%
+      if (teamPassivePercentage > 0) {
+        const passiveAmount = Math.round((amountReceived * teamPassivePercentage / 100) * 100) / 100;
+        if (passiveAmount > 0) {
+          for (const member of eligibleTeamMembers) {
+            const [comm] = await db`
+              INSERT INTO commission_transactions (
+                associate_user_id, related_booking_id, commission_type, gaj_sold,
+                gross_amount, deduction_amount, net_amount, commission_month, commission_status,
+                commission_event_id, commission_model, commission_level, commission_percentage,
+                calculation_base, source_type, source_reference, engine_version,
+                distribution_role, distribution_participants, seller_user_id
+              ) VALUES (
+                ${member.user_id}, ${booking.booking_id}, 'Upline', ${Number(booking.plot_area || 0)},
+                ${passiveAmount}, 0, ${passiveAmount}, ${new Date().toISOString().slice(0, 7)}, 'Pending',
+                ${event.event_id}, ${engine.commission_model}, ${isTeamMemberSeller ? 3 : 2}, ${teamPassivePercentage},
+                ${amountReceived}, ${sourceType}, ${String(sourceId)}, ${engine.version},
+                'TeamMember', ${participantCount}, ${sellerUserId}
+              )
+              ON CONFLICT DO NOTHING
+              RETURNING commission_id`;
+            if (comm) {
+              await db`
+                INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
+                VALUES (${member.user_id}, 0, ${passiveAmount})
+                ON CONFLICT (associate_user_id) DO UPDATE SET
+                  total_commission_earned = associate_sales_tracker.total_commission_earned + ${passiveAmount},
+                  updated_at = NOW()`;
+              generated++;
+              totalCommission += passiveAmount;
+            }
+          }
+        }
+      }
+
+      return {
+        generated,
+        total_commission: Math.round(totalCommission * 100) / 100,
+        model: engine.commission_model,
+        version: engine.version,
+        event_id: event.event_id,
+        seller_user_id: sellerUserId,
+        seller_commission: sellerAmount,
+        team_members_count: participantCount,
+        is_team_member_seller: isTeamMemberSeller,
+        leader_user_id: actualLeaderId
+      };
+    }
+
     if (engine.commission_model === "EqualDistribution") {
-      const sellerUserId = Number(booking.sponsor_user_id);
       const sellerPercentage = Number(engine.seller_percentage ?? 50);
       const equalPercentage = Number(engine.equal_distribution_percentage ?? (100 - sellerPercentage));
       if ([sellerPercentage, equalPercentage].some(value => !Number.isFinite(value) || value < 0 || value > 100)) {
@@ -2069,25 +2275,13 @@ const generateCommissionForPayment = async (req, {
         return { generated: 0, reason: "Equal distribution percentages exceed 100%" };
       }
 
-      const [seller] = await db`
-        SELECT user_id, account_status
-        FROM users
-        WHERE user_id = ${sellerUserId} AND user_type = 'Associate'`;
-      if (!seller) return { generated: 0, reason: "Seller associate not found" };
-      if (eligibility.require_active_associate !== false && seller.account_status !== "Active") {
-        return { generated: 0, reason: "Seller associate inactive" };
-      }
-      if (eligibility.exclude_blacklisted !== false && seller.account_status === "Blacklisted") {
-        return { generated: 0, reason: "Seller associate blacklisted" };
-      }
-
-      const [rootRow] = await db`
+      const [rootRow] = leaderUserId ? await db`
         SELECT ancestor_user_id
         FROM mlm_tree_closure
-        WHERE descendant_user_id = ${sellerUserId}
+        WHERE descendant_user_id = ${leaderUserId}
         ORDER BY depth DESC
-        LIMIT 1`;
-      const networkRootId = Number(rootRow?.ancestor_user_id || sellerUserId);
+        LIMIT 1` : [null];
+      const networkRootId = Number(rootRow?.ancestor_user_id || leaderUserId || sellerUserId);
       const networkRows = await db`
         SELECT u.user_id, u.account_status
         FROM users u
@@ -2138,8 +2332,9 @@ const generateCommissionForPayment = async (req, {
         if (commission) {
           await db`
             INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
-            VALUES (${sellerUserId}, 0, ${sellerAmount})
+            VALUES (${sellerUserId}, ${Number(booking.plot_area || 0)}, ${sellerAmount})
             ON CONFLICT (associate_user_id) DO UPDATE SET
+              total_gaj_sold = associate_sales_tracker.total_gaj_sold + ${Number(booking.plot_area || 0)},
               total_commission_earned = associate_sales_tracker.total_commission_earned + ${sellerAmount},
               updated_at = NOW()`;
           generated++;
@@ -2190,32 +2385,48 @@ const generateCommissionForPayment = async (req, {
       };
     }
 
-    const ancestors = await db`
-      SELECT ancestor_user_id, depth
-      FROM mlm_tree_closure
-      WHERE descendant_user_id = ${booking.sponsor_user_id}
-      UNION ALL
-      SELECT ${booking.sponsor_user_id}::int AS ancestor_user_id, 0 AS depth`;
     const candidates = new Map();
-    for (const row of ancestors) {
-      const level = Number(row.ancestor_user_id) === Number(booking.sponsor_user_id)
-        ? 1
-        : Number(row.depth) + 1;
-      if (level <= Number(engine.maximum_levels) && !candidates.has(row.ancestor_user_id)) {
-        candidates.set(row.ancestor_user_id, level);
+    candidates.set(sellerUserId, 1);
+
+    if (seller.user_type === 'Team Member' && leaderUserId) {
+      if (2 <= Number(engine.maximum_levels)) {
+        candidates.set(leaderUserId, 2);
+      }
+      const uplines = await db`
+        SELECT ancestor_user_id, depth
+        FROM mlm_tree_closure
+        WHERE descendant_user_id = ${leaderUserId}
+        ORDER BY depth ASC`;
+      for (const row of uplines) {
+        const lvl = Number(row.depth) + 2;
+        if (lvl <= Number(engine.maximum_levels) && !candidates.has(Number(row.ancestor_user_id))) {
+          candidates.set(Number(row.ancestor_user_id), lvl);
+        }
+      }
+    } else {
+      const uplines = await db`
+        SELECT ancestor_user_id, depth
+        FROM mlm_tree_closure
+        WHERE descendant_user_id = ${sellerUserId}
+        ORDER BY depth ASC`;
+      for (const row of uplines) {
+        const lvl = Number(row.depth) + 1;
+        if (lvl <= Number(engine.maximum_levels) && !candidates.has(Number(row.ancestor_user_id))) {
+          candidates.set(Number(row.ancestor_user_id), lvl);
+        }
       }
     }
 
     let generated = 0;
     let totalCommission = 0;
-    for (const [associateUserId, level] of candidates.entries()) {
-      const [associate] = await db`
-        SELECT account_status
+    for (const [candidateUserId, level] of candidates.entries()) {
+      const [candidateUser] = await db`
+        SELECT account_status, user_type
         FROM users
-        WHERE user_id = ${associateUserId} AND user_type = 'Associate'`;
-      if (!associate) continue;
-      if (eligibility.require_active_associate !== false && associate.account_status !== "Active") continue;
-      if (eligibility.exclude_blacklisted !== false && associate.account_status === "Blacklisted") continue;
+        WHERE user_id = ${candidateUserId} AND user_type IN ('Associate', 'Team Member')`;
+      if (!candidateUser) continue;
+      if (eligibility.require_active_associate !== false && candidateUser.account_status !== "Active") continue;
+      if (eligibility.exclude_blacklisted !== false && candidateUser.account_status === "Blacklisted") continue;
 
       let percentage = 0;
       if (engine.commission_model === "Upline") {
@@ -2233,20 +2444,21 @@ const generateCommissionForPayment = async (req, {
           associate_user_id, related_booking_id, commission_type, gaj_sold,
           gross_amount, deduction_amount, net_amount, commission_month, commission_status,
           commission_event_id, commission_model, commission_level, commission_percentage,
-          calculation_base, source_type, source_reference, engine_version
+          calculation_base, source_type, source_reference, engine_version, seller_user_id
         ) VALUES (
-          ${associateUserId}, ${booking.booking_id}, ${commissionType}, ${Number(booking.plot_area || 0)},
+          ${candidateUserId}, ${booking.booking_id}, ${commissionType}, ${Number(booking.plot_area || 0)},
           ${commissionAmount}, 0, ${commissionAmount}, ${new Date().toISOString().slice(0, 7)}, 'Pending',
           ${event.event_id}, ${engine.commission_model}, ${level}, ${percentage},
-          ${amountReceived}, ${sourceType}, ${String(sourceId)}, ${engine.version}
+          ${amountReceived}, ${sourceType}, ${String(sourceId)}, ${engine.version}, ${sellerUserId}
         )
         ON CONFLICT DO NOTHING
         RETURNING commission_id`;
       if (!commission) continue;
       await db`
         INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
-        VALUES (${associateUserId}, 0, ${commissionAmount})
+        VALUES (${candidateUserId}, ${level === 1 ? Number(booking.plot_area || 0) : 0}, ${commissionAmount})
         ON CONFLICT (associate_user_id) DO UPDATE SET
+          total_gaj_sold = associate_sales_tracker.total_gaj_sold + ${level === 1 ? Number(booking.plot_area || 0) : 0},
           total_commission_earned = associate_sales_tracker.total_commission_earned + ${commissionAmount},
           updated_at = NOW()`;
       generated++;
@@ -2258,6 +2470,7 @@ const generateCommissionForPayment = async (req, {
       model: engine.commission_model,
       version: engine.version,
       event_id: event.event_id,
+      seller_user_id: sellerUserId
     };
   });
 };
@@ -2274,23 +2487,48 @@ const generateMlmCommissionForBooking = async (req, bookingId) => {
     WHERE b.booking_id = ${bookingId}`;
   if (!booking?.sponsor_user_id) return { generated: 0, reason: "No sponsor" };
 
-  const rules = await sql`SELECT * FROM commission_rules WHERE is_active = TRUE ORDER BY level_depth`;
-  const ancestors = await sql`
-    SELECT ancestor_user_id, depth
-    FROM mlm_tree_closure
-    WHERE descendant_user_id = ${booking.sponsor_user_id}
-    UNION ALL SELECT ${booking.sponsor_user_id}::int AS ancestor_user_id, 1 AS depth`;
+  const [seller] = await sql`
+    SELECT user_id, account_status, user_type, sponsor_user_id
+    FROM users
+    WHERE user_id = ${Number(booking.sponsor_user_id)} AND user_type IN ('Associate', 'Team Member')`;
+  if (!seller) return { generated: 0, reason: "Seller not found" };
 
-  const uniqueAncestors = new Map();
-  for (const row of ancestors) {
-    const depth = Number(row.ancestor_user_id) === Number(booking.sponsor_user_id) ? 1 : Number(row.depth) + 1;
-    if (!uniqueAncestors.has(row.ancestor_user_id)) uniqueAncestors.set(row.ancestor_user_id, depth);
+  const leaderUserId = seller.user_type === 'Team Member'
+    ? Number(seller.sponsor_user_id)
+    : Number(seller.user_id);
+
+  const rules = await sql`SELECT * FROM commission_rules WHERE is_active = TRUE ORDER BY level_depth`;
+  const candidates = new Map();
+  candidates.set(Number(seller.user_id), 1);
+
+  if (seller.user_type === 'Team Member' && leaderUserId) {
+    candidates.set(leaderUserId, 2);
+    const uplines = await sql`
+      SELECT ancestor_user_id, depth
+      FROM mlm_tree_closure
+      WHERE descendant_user_id = ${leaderUserId}
+      ORDER BY depth ASC`;
+    for (const row of uplines) {
+      const depth = Number(row.depth) + 2;
+      if (!candidates.has(Number(row.ancestor_user_id))) candidates.set(Number(row.ancestor_user_id), depth);
+    }
+  } else {
+    const uplines = await sql`
+      SELECT ancestor_user_id, depth
+      FROM mlm_tree_closure
+      WHERE descendant_user_id = ${seller.user_id}
+      ORDER BY depth ASC`;
+    for (const row of uplines) {
+      const depth = Number(row.depth) + 1;
+      if (!candidates.has(Number(row.ancestor_user_id))) candidates.set(Number(row.ancestor_user_id), depth);
+    }
   }
 
   let generated = 0;
-  for (const [associateUserId, depth] of uniqueAncestors.entries()) {
-    const [associate] = await sql`SELECT account_status FROM users WHERE user_id = ${associateUserId} AND user_type = 'Associate'`;
-    if (!associate || associate.account_status === "Blacklisted") continue;
+  for (const [candidateUserId, depth] of candidates.entries()) {
+    const [candidateUser] = await sql`
+      SELECT account_status FROM users WHERE user_id = ${candidateUserId} AND user_type IN ('Associate', 'Team Member')`;
+    if (!candidateUser || candidateUser.account_status === "Blacklisted") continue;
     const expectedType = depth === 1 ? "Direct" : "Upline";
     const rule = rules.find(r =>
       r.commission_type === expectedType
@@ -2303,7 +2541,7 @@ const generateMlmCommissionForBooking = async (req, bookingId) => {
     if (!monthlyAmount) continue;
     const [existing] = await sql`
       SELECT commission_id FROM commission_transactions
-      WHERE associate_user_id = ${associateUserId}
+      WHERE associate_user_id = ${candidateUserId}
         AND related_booking_id = ${booking.booking_id}
         AND commission_type = ${rule.commission_type}
       LIMIT 1`;
@@ -2311,11 +2549,11 @@ const generateMlmCommissionForBooking = async (req, bookingId) => {
     const [commission] = await sql`
       INSERT INTO commission_transactions (
         associate_user_id, related_booking_id, commission_type, gaj_sold,
-        gross_amount, deduction_amount, net_amount, commission_month, commission_status
+        gross_amount, deduction_amount, net_amount, commission_month, commission_status, seller_user_id
       ) VALUES (
-        ${associateUserId}, ${booking.booking_id}, ${rule.commission_type},
+        ${candidateUserId}, ${booking.booking_id}, ${rule.commission_type},
         ${gajSold}, ${monthlyAmount}, 0, ${monthlyAmount},
-        ${new Date().toISOString().slice(0, 7)}, 'Pending'
+        ${new Date().toISOString().slice(0, 7)}, 'Pending', ${seller.user_id}
       )
       RETURNING commission_id`;
     for (let month = 1; month <= Number(rule.duration_months || 144); month++) {
@@ -2323,7 +2561,7 @@ const generateMlmCommissionForBooking = async (req, bookingId) => {
         INSERT INTO commission_monthly_schedule (
           commission_id, associate_user_id, booking_id, month_no, due_month, amount
         ) VALUES (
-          ${commission.commission_id}, ${associateUserId}, ${booking.booking_id}, ${month},
+          ${commission.commission_id}, ${candidateUserId}, ${booking.booking_id}, ${month},
           (date_trunc('month', NOW()) + (${month - 1} || ' months')::interval)::date,
           ${monthlyAmount}
         )
@@ -2331,12 +2569,12 @@ const generateMlmCommissionForBooking = async (req, bookingId) => {
     }
     await sql`
       INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
-      VALUES (${associateUserId}, ${depth === 1 ? gajSold : 0}, ${monthlyAmount})
+      VALUES (${candidateUserId}, ${depth === 1 ? gajSold : 0}, ${monthlyAmount})
       ON CONFLICT (associate_user_id) DO UPDATE SET
         total_gaj_sold = associate_sales_tracker.total_gaj_sold + ${depth === 1 ? gajSold : 0},
         total_commission_earned = associate_sales_tracker.total_commission_earned + ${monthlyAmount}`;
     await addUserNotification({
-      userId: associateUserId,
+      userId: candidateUserId,
       adminId: req?.admin?.admin_id || null,
       title: "Commission generated",
       message: `Commission generated for Plot ${booking.plot_number} at ${booking.site_name}.`,
@@ -2706,6 +2944,17 @@ const requireAssociate = (req, res, next) => {
                   Boolean(req.user?.is_admin || req.user?.admin_id);
   if (!isAssoc)
     return err(res, "Associate access required", 403);
+  return next();
+};
+
+const requireSalesEntity = (req, res, next) => {
+  const isSales = ["Associate", "Team Member"].includes(req.user?.user_type) ||
+                  req.user?.role === "Associate" ||
+                  req.user?.role === "Team Member" ||
+                  Boolean(req.user?.is_associate) ||
+                  Boolean(req.user?.is_admin || req.user?.admin_id);
+  if (!isSales)
+    return err(res, "Sales entity access required", 403);
   return next();
 };
 
@@ -4310,6 +4559,60 @@ app.post("/api/auth/register", upload.fields([
     if (!terms_accepted || terms_accepted !== "true")
       return err(res, "Terms & Conditions must be accepted", 400);
 
+    // Human-name validation & normalization
+    let cleanFullName = full_name;
+    if (full_name && full_name !== mobile_no) {
+      if (!isValidHumanName(full_name)) {
+        return err(res, "Full Name must contain only alphabets and spaces (no numbers or special characters).", 400);
+      }
+      cleanFullName = normalizeHumanName(full_name);
+    }
+
+    let cleanFatherName = father_name ? String(father_name).trim() : null;
+    if (cleanFatherName) {
+      if (!isValidHumanName(cleanFatherName)) {
+        return err(res, "Father's Name must contain only alphabets and spaces (no numbers or special characters).", 400);
+      }
+      cleanFatherName = normalizeHumanName(cleanFatherName);
+    }
+
+    let cleanMotherName = mother_name ? String(mother_name).trim() : null;
+    if (cleanMotherName) {
+      if (!isValidHumanName(cleanMotherName)) {
+        return err(res, "Mother's Name must contain only alphabets and spaces (no numbers or special characters).", 400);
+      }
+      cleanMotherName = normalizeHumanName(cleanMotherName);
+    }
+
+    let cleanSpouseName = spouse_name ? String(spouse_name).trim() : null;
+    if (cleanSpouseName) {
+      if (!isValidHumanName(cleanSpouseName)) {
+        return err(res, "Spouse's Name must contain only alphabets and spaces (no numbers or special characters).", 400);
+      }
+      cleanSpouseName = normalizeHumanName(cleanSpouseName);
+    }
+
+    let cleanNomineeName = nominee_name ? String(nominee_name).trim() : null;
+    if (cleanNomineeName) {
+      if (!isValidHumanName(cleanNomineeName)) {
+        return err(res, "Nominee Name must contain only alphabets and spaces (no numbers or special characters).", 400);
+      }
+      cleanNomineeName = normalizeHumanName(cleanNomineeName);
+    }
+
+    // Minimum Age 18 validation
+    if (date_of_birth) {
+      const age = calculateAge(date_of_birth);
+      if (age < 18) {
+        return err(res, `Applicant must be at least 18 years old (current calculated age: ${age}).`, 400);
+      }
+    }
+
+    // State validation
+    if (perm_state && !isValidState(perm_state)) {
+      return err(res, "Selected permanent state is not valid. Please select from approved Indian states.", 400);
+    }
+
     // ── Verify OTP ──
     const authSettings = await getAppAuthSettingsRow();
     if (authSettings.email_otp_enabled !== false) {
@@ -4360,8 +4663,8 @@ app.post("/api/auth/register", upload.fields([
         password_hash,
         sponsor_user_id, account_status
       ) VALUES (
-        ${user_type}, ${full_name}, ${date_of_birth || null}, ${gender || null},
-        ${father_name || null}, ${mother_name || null}, ${spouse_name || null},
+        ${user_type}, ${cleanFullName}, ${date_of_birth || null}, ${gender || null},
+        ${cleanFatherName}, ${cleanMotherName}, ${cleanSpouseName},
         ${mobile_no}, ${alternate_mobile || null}, ${email || null},
         ${pan_number.toUpperCase()}, ${aadhar_number}, TRUE,
         ${passwordHash},
@@ -4766,8 +5069,8 @@ app.post("/api/auth/login", async (req, res) => {
     const loginMobile = loginId.replace(/\D/g, "");
     const cleanMobile = loginMobile.length >= 10 ? loginMobile.slice(-10) : (loginMobile || null);
 
-    if (!loginEmail && !cleanMobile) {
-      return err(res, "Email or phone number required", 400);
+    if (!loginEmail && !cleanMobile && !loginId) {
+      return err(res, "Email, phone number, or Member ID required", 400);
     }
 
     let [user] = loginEmail
@@ -4776,11 +5079,18 @@ app.post("/api/auth/login", async (req, res) => {
                  member_id, invitation_code, password_hash, email_verified, is_otp_verified
           FROM users
           WHERE LOWER(email) = ${loginEmail}`
-      : await sql`
-          SELECT user_id, full_name, email, mobile_no, user_type, account_status,
-                 member_id, invitation_code, password_hash, email_verified, is_otp_verified
-          FROM users
-          WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}`;
+      : (cleanMobile && cleanMobile.length === 10
+        ? await sql`
+            SELECT user_id, full_name, email, mobile_no, user_type, account_status,
+                   member_id, invitation_code, password_hash, email_verified, is_otp_verified
+            FROM users
+            WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}
+               OR LOWER(member_id) = ${loginId}`
+        : await sql`
+            SELECT user_id, full_name, email, mobile_no, user_type, account_status,
+                   member_id, invitation_code, password_hash, email_verified, is_otp_verified
+            FROM users
+            WHERE LOWER(member_id) = ${loginId}`);
 
     if (!user) {
       const [investor] = loginEmail
@@ -5447,32 +5757,32 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
   try {
     const [user] = await sql`
       SELECT u.user_id,
-             COALESCE(NULLIF(TRIM(u.member_id), ''), NULLIF(TRIM(u.invitation_code), ''), NULLIF(TRIM(ces.application_no), ''), ('MMR' || LPAD(u.user_id::text, 5, '0'))) AS member_id,
+             COALESCE(NULLIF(TRIM(u.member_id), ''), NULLIF(TRIM(u.invitation_code), ''), NULLIF(TRIM(tm.team_member_uid), ''), NULLIF(TRIM(ces.application_no), ''), ('MMR' || LPAD(u.user_id::text, 5, '0'))) AS member_id,
              COALESCE(NULLIF(TRIM(u.user_type::text), ''), 'Customer') AS user_type,
-             COALESCE(NULLIF(TRIM(u.full_name), ''), NULLIF(TRIM(ces.applicant_name), '')) AS full_name,
-             COALESCE(u.date_of_birth, ces.date_of_birth) AS date_of_birth,
-             COALESCE(NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(ces.gender), '')) AS gender,
-             COALESCE(NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(ces.fh_name), '')) AS father_name,
+             COALESCE(NULLIF(TRIM(u.full_name), ''), NULLIF(TRIM(tm.full_name), ''), NULLIF(TRIM(ces.applicant_name), '')) AS full_name,
+             COALESCE(u.date_of_birth, tm.date_of_birth, ces.date_of_birth) AS date_of_birth,
+             COALESCE(NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(ces.gender), '')) AS gender,
+             COALESCE(NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(ces.fh_name), '')) AS father_name,
              u.mother_name,
              COALESCE(NULLIF(TRIM(u.spouse_name), ''), NULLIF(TRIM(ces.co_applicant_name), '')) AS spouse_name,
-             COALESCE(NULLIF(TRIM(u.mobile_no), ''), NULLIF(TRIM(ces.mobile_1), '')) AS mobile_no,
+             COALESCE(NULLIF(TRIM(u.mobile_no), ''), NULLIF(TRIM(tm.mobile_no), ''), NULLIF(TRIM(ces.mobile_1), '')) AS mobile_no,
              COALESCE(NULLIF(TRIM(u.alternate_mobile), ''), NULLIF(TRIM(ces.mobile_2), ''), NULLIF(TRIM(ces.co_mobile), '')) AS alternate_mobile,
-             COALESCE(NULLIF(TRIM(u.email), ''), NULLIF(TRIM(ces.email_1), ''), NULLIF(TRIM(ces.co_email), '')) AS email,
-             COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(ces.pan_no), '')) AS pan_number,
-             COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(ces.aadhar_no), '')) AS aadhar_number,
+             COALESCE(NULLIF(TRIM(u.email), ''), NULLIF(TRIM(tm.email_id), ''), NULLIF(TRIM(ces.email_1), ''), NULLIF(TRIM(ces.co_email), '')) AS email,
+             COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(tm.pan_no), ''), NULLIF(TRIM(ces.pan_no), '')) AS pan_number,
+             COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(ces.aadhar_no), '')) AS aadhar_number,
              COALESCE(u.account_status, 'Active') AS account_status,
              u.email_verified, u.is_otp_verified,
-             COALESCE(u.enrollment_status, CASE WHEN ces.application_status = 'Approved' THEN 'Completed' WHEN ces.id IS NOT NULL THEN 'Submitted' ELSE 'Pending' END) AS enrollment_status,
-             CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'verified', 'approved') OR ces.application_status = 'Approved' THEN TRUE ELSE FALSE END AS is_verified,
-             COALESCE(k.status, CASE WHEN ces.application_status = 'Approved' THEN 'Approved' WHEN ces.id IS NOT NULL THEN 'Submitted' ELSE 'Not Submitted' END) AS kyc_status,
+             COALESCE(u.enrollment_status, CASE WHEN tm.id IS NOT NULL THEN 'Completed' WHEN ces.application_status = 'Approved' THEN 'Completed' WHEN ces.id IS NOT NULL THEN 'Submitted' ELSE 'Pending' END) AS enrollment_status,
+             CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'verified', 'approved') OR tm.id IS NOT NULL OR ces.application_status = 'Approved' THEN TRUE ELSE FALSE END AS is_verified,
+             COALESCE(k.status, CASE WHEN tm.id IS NOT NULL THEN 'Approved' WHEN ces.application_status = 'Approved' THEN 'Approved' WHEN ces.id IS NOT NULL THEN 'Submitted' ELSE 'Not Submitted' END) AS kyc_status,
              k.admin_remarks AS kyc_remarks,
              u.invitation_code, u.registered_at,
-             u.sponsor_user_id,
-             COALESCE(sp.full_name, 'Suraj Kumar Verma') AS sponsor_name,
-             COALESCE(sp.invitation_code, sp.member_id, 'MMR0001') AS sponsor_id,
+             COALESCE(u.sponsor_user_id, tm.associate_id) AS sponsor_user_id,
+             COALESCE(NULLIF(TRIM(tm.associate_name), ''), sp.full_name, 'Suraj Kumar Verma') AS sponsor_name,
+             COALESCE(sp.invitation_code, sp.member_id, ('MMR' || LPAD(COALESCE(tm.associate_id, 1)::text, 4, '0')), 'MMR0001') AS sponsor_id,
              COALESCE(sp.mobile_no, '7071951011') AS sponsor_contact,
-             COALESCE(pa.address_line1, ces.permanent_address, ces.present_address) AS address,
-             COALESCE(pa.address_line1, ces.permanent_address, ces.present_address) AS address_line1,
+             COALESCE(pa.address_line1, tm.full_address, ces.permanent_address, ces.present_address) AS address,
+             COALESCE(pa.address_line1, tm.full_address, ces.permanent_address, ces.present_address) AS address_line1,
              COALESCE(pa.city, ces.permanent_city, ces.present_city) AS city,
              COALESCE(pa.state, ces.permanent_state_pin, ces.present_state_pin) AS state,
              COALESCE(pa.pin_code, ces.permanent_state_pin, ces.present_state_pin) AS pin_code,
@@ -5480,15 +5790,30 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
              ces.present_address,
              ces.application_status,
              ces.application_no,
-             COALESCE(b.bank_name, ces.acc_bank_branch, ces.drawn_bank_branch) AS bank_name,
-             COALESCE(b.branch_name, ces.drawn_bank_branch, ces.acc_bank_branch) AS branch_name,
-             COALESCE(b.account_holder_name, ces.acc_holder_name, u.full_name, ces.applicant_name) AS account_holder_name,
-             COALESCE(b.account_number, ces.acc_number) AS account_number,
-             COALESCE(b.ifsc_code, ces.ifsc_code) AS ifsc_code,
-             COALESCE(n.nominee_name, cnom.nominee_name, ces.co_applicant_name) AS nominee_name,
-             COALESCE(n.relationship, cnom.relation, ces.co_relation) AS nominee_relationship
+             COALESCE(b.bank_name, tm.bank_name, ces.acc_bank_branch, ces.drawn_bank_branch) AS bank_name,
+             COALESCE(b.branch_name, tm.branch_name, ces.drawn_bank_branch, ces.acc_bank_branch) AS branch_name,
+             COALESCE(b.account_holder_name, tm.full_name, ces.acc_holder_name, u.full_name, ces.applicant_name) AS account_holder_name,
+             COALESCE(b.account_number, tm.account_no, ces.acc_number) AS account_number,
+             COALESCE(b.ifsc_code, tm.ifsc_code, ces.ifsc_code) AS ifsc_code,
+             COALESCE(n.nominee_name, tm.nominee_name, cnom.nominee_name, ces.co_applicant_name) AS nominee_name,
+             COALESCE(n.relationship, tm.nominee_relation, cnom.relation, ces.co_relation) AS nominee_relationship,
+             tm.slot_number,
+             tm.photo_url,
+             tm.applicant_signature_url,
+             tm.associate_signature_url
       FROM users u
-      LEFT JOIN users sp               ON u.sponsor_user_id = sp.user_id
+      LEFT JOIN LATERAL (
+        SELECT id, team_member_uid, associate_id, associate_name, slot_number, full_name, father_husband_name,
+               date_of_birth, gender, aadhar_no, pan_no, mobile_no, email_id, full_address, photo_url,
+               nominee_name, nominee_relation, nominee_age_dob, nominee_contact_no, bank_name, branch_name,
+               account_no, ifsc_code, applicant_signature_url, associate_signature_url, status
+        FROM team_members
+        WHERE user_id = u.user_id 
+           OR (u.user_type = 'Team Member' AND mobile_no IS NOT NULL AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(u.mobile_no, '\\D', '', 'g'), 10))
+        ORDER BY (user_id = u.user_id) DESC, created_at DESC
+        LIMIT 1
+      ) tm ON TRUE
+      LEFT JOIN users sp               ON (u.sponsor_user_id = sp.user_id OR tm.associate_id = sp.user_id)
       LEFT JOIN user_addresses pa      ON u.user_id = pa.user_id AND pa.address_type = 'Permanent'
       LEFT JOIN user_bank_details b    ON u.user_id = b.user_id
       LEFT JOIN user_nominees n        ON u.user_id = n.user_id
@@ -5536,9 +5861,9 @@ app.put("/api/profile", verifyUserToken, async (req, res) => {
 
     const cleanEmail = email && String(email).trim() ? String(email).trim().toLowerCase() : null;
     const cleanAltMobile = alternate_mobile && String(alternate_mobile).trim() ? String(alternate_mobile).replace(/\D/g, "") : null;
-    const cleanSpouse = spouse_name && String(spouse_name).trim() ? String(spouse_name).trim() : null;
-    const cleanFather = father_name && String(father_name).trim() ? String(father_name).trim() : null;
-    const cleanFullName = full_name && String(full_name).trim() ? String(full_name).trim() : null;
+    let cleanSpouse = spouse_name && String(spouse_name).trim() ? String(spouse_name).trim() : null;
+    let cleanFather = father_name && String(father_name).trim() ? String(father_name).trim() : null;
+    let cleanFullName = full_name && String(full_name).trim() ? String(full_name).trim() : null;
     const cleanPan = pan_number && String(pan_number).trim() ? String(pan_number).trim().toUpperCase() : null;
     const cleanAadhar = aadhar_number && String(aadhar_number).trim() ? String(aadhar_number).replace(/\D/g, "") : null;
     const cleanGender = gender && String(gender).trim() ? String(gender).trim() : null;
@@ -5550,13 +5875,52 @@ app.put("/api/profile", verifyUserToken, async (req, res) => {
     const cleanAccNum = account_number && String(account_number).trim() ? String(account_number).trim() : null;
     const cleanIfsc = ifsc_code && String(ifsc_code).trim() ? String(ifsc_code).trim().toUpperCase() : null;
 
-    const cleanNomName = nominee_name && String(nominee_name).trim() ? String(nominee_name).trim() : null;
+    let cleanNomName = nominee_name && String(nominee_name).trim() ? String(nominee_name).trim() : null;
     const cleanNomRel = nominee_relationship && String(nominee_relationship).trim() ? String(nominee_relationship).trim() : null;
 
     const cleanAddr = (address || address_line1) && String(address || address_line1).trim() ? String(address || address_line1).trim() : null;
     const cleanCity = city && String(city).trim() ? String(city).trim() : null;
     const cleanState = state && String(state).trim() ? String(state).trim() : null;
     const cleanPin = pin_code && String(pin_code).trim() ? String(pin_code).trim() : null;
+
+    // Human-name validation & normalization
+    if (cleanFullName) {
+      if (!isValidHumanName(cleanFullName)) {
+        return err(res, "Full Name must contain only alphabets and spaces (no numbers or special characters).", 400);
+      }
+      cleanFullName = normalizeHumanName(cleanFullName);
+    }
+    if (cleanFather) {
+      if (!isValidHumanName(cleanFather)) {
+        return err(res, "Father's Name must contain only alphabets and spaces (no numbers or special characters).", 400);
+      }
+      cleanFather = normalizeHumanName(cleanFather);
+    }
+    if (cleanSpouse) {
+      if (!isValidHumanName(cleanSpouse)) {
+        return err(res, "Spouse's Name must contain only alphabets and spaces (no numbers or special characters).", 400);
+      }
+      cleanSpouse = normalizeHumanName(cleanSpouse);
+    }
+    if (cleanNomName) {
+      if (!isValidHumanName(cleanNomName)) {
+        return err(res, "Nominee Name must contain only alphabets and spaces (no numbers or special characters).", 400);
+      }
+      cleanNomName = normalizeHumanName(cleanNomName);
+    }
+
+    // Minimum Age 18 validation
+    if (cleanDob) {
+      const age = calculateAge(cleanDob);
+      if (age < 18) {
+        return err(res, `Applicant must be at least 18 years old (current calculated age: ${age}).`, 400);
+      }
+    }
+
+    // State validation
+    if (cleanState && !isValidState(cleanState)) {
+      return err(res, "Selected state is not valid. Please select from approved Indian states.", 400);
+    }
 
     if (cleanEmail) {
       const [dupEmailUser] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${cleanEmail} AND user_id <> ${uid}`;
@@ -5672,6 +6036,30 @@ app.put("/api/profile", verifyUserToken, async (req, res) => {
           await sql`INSERT INTO customer_nominees (submission_id, nominee_name, relation) VALUES (${sub.id}, ${cleanNomName}, ${cleanNomRel || null})`;
         }
       }
+    }
+
+    // 6. Sync Team Member Record (if user is a Team Member)
+    const [tmRec] = await sql`
+      SELECT id FROM team_members 
+      WHERE user_id = ${uid} 
+         OR (mobile_no IS NOT NULL AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = (SELECT RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) FROM users WHERE user_id = ${uid} LIMIT 1))
+      ORDER BY (user_id = ${uid}) DESC, created_at DESC
+      LIMIT 1`;
+    if (tmRec) {
+      await sql`
+        UPDATE team_members SET
+          user_id          = COALESCE(user_id, ${uid}),
+          full_name        = COALESCE(${cleanFullName}, full_name),
+          email_id         = COALESCE(${cleanEmail}, email_id),
+          full_address     = COALESCE(${cleanAddr}, full_address),
+          bank_name        = COALESCE(${cleanBankName}, bank_name),
+          branch_name      = COALESCE(${cleanBranchName}, branch_name),
+          account_no       = COALESCE(${cleanAccNum}, account_no),
+          ifsc_code        = COALESCE(${cleanIfsc}, ifsc_code),
+          nominee_name     = COALESCE(${cleanNomName}, nominee_name),
+          nominee_relation = COALESCE(${cleanNomRel}, nominee_relation),
+          updated_at       = NOW()
+        WHERE id = ${tmRec.id}`;
     }
 
     return ok(res, {}, "Profile updated successfully");
@@ -7393,7 +7781,7 @@ app.get("/api/associate/dashboard", verifyUserToken, requireAssociate, async (re
 app.get("/api/dashboard", verifyUserToken, async (req, res) => {
   try {
     const userId = req.user.user_id;
-    const isAssociate = req.user.user_type === "Associate";
+    const isSalesEntity = ["Associate", "Team Member"].includes(req.user.user_type);
 
     const [summary, monthlySales] = await Promise.all([
       sql`
@@ -7432,9 +7820,9 @@ app.get("/api/dashboard", verifyUserToken, async (req, res) => {
           JOIN users buyer ON buyer.user_id = b.user_id
           WHERE b.booking_status = 'Confirmed'
             AND (
-              (${isAssociate} = TRUE AND buyer.sponsor_user_id = ${userId})
+              (${isSalesEntity} = TRUE AND buyer.sponsor_user_id = ${userId})
               OR
-              (${isAssociate} = FALSE AND b.user_id = ${userId})
+              (${isSalesEntity} = FALSE AND b.user_id = ${userId})
             )
             AND COALESCE(b.confirmed_at, b.booking_date, b.created_at)
                 >= date_trunc('month', CURRENT_DATE) - INTERVAL '11 months'
@@ -7450,7 +7838,7 @@ app.get("/api/dashboard", verifyUserToken, async (req, res) => {
     ]);
 
     let associateSalesStats = null;
-    if (isAssociate) {
+    if (isSalesEntity) {
       const [associateStats] = await sql`
         SELECT
           COALESCE(t.total_gaj_sold, 0)::numeric AS total_gaj_sold,
@@ -7504,9 +7892,14 @@ app.get("/api/associate/network", verifyUserToken, requireAssociate, async (req,
         SELECT user_id, 1 AS depth
         FROM users
         WHERE sponsor_user_id = ${req.user.user_id}
+        UNION
+        SELECT user_id, 1 AS depth
+        FROM team_members
+        WHERE associate_id = ${req.user.user_id} AND user_id IS NOT NULL AND status <> 'rejected'
       )
       SELECT u.user_id, u.member_id, u.full_name, u.mobile_no,
              u.email, u.user_type, u.sponsor_user_id, u.account_status, u.registered_at,
+             tm.slot_number, tm.team_member_uid,
              COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
              COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
              COALESCE((
@@ -7516,10 +7909,12 @@ app.get("/api/associate/network", verifyUserToken, requireAssociate, async (req,
              MIN(d.depth) AS level
       FROM downline d
       JOIN users u ON d.user_id = u.user_id
+      LEFT JOIN team_members tm ON (tm.user_id = u.user_id OR tm.team_member_uid = u.member_id) AND tm.associate_id = ${req.user.user_id}
       LEFT JOIN associate_sales_tracker t ON u.user_id = t.associate_user_id
       WHERE u.user_id <> ${req.user.user_id}
-      GROUP BY u.user_id, u.member_id, u.full_name, u.mobile_no, u.email, u.user_type, u.sponsor_user_id, u.account_status, u.registered_at, t.total_gaj_sold, t.total_commission_earned
-      ORDER BY MIN(d.depth), u.registered_at DESC`;
+        AND u.user_type IN ('Associate', 'Team Member')
+      GROUP BY u.user_id, u.member_id, u.full_name, u.mobile_no, u.email, u.user_type, u.sponsor_user_id, u.account_status, u.registered_at, tm.slot_number, tm.team_member_uid, t.total_gaj_sold, t.total_commission_earned
+      ORDER BY COALESCE(tm.slot_number, 999), MIN(d.depth), u.registered_at DESC`;
 
     return ok(res, network);
   } catch (e) {
@@ -7555,7 +7950,7 @@ app.get("/api/admin/mlm/network",
   }
 );
 
-app.get("/api/associate/commissions", verifyUserToken, requireAssociate, async (req, res) => {
+app.get("/api/associate/commissions", verifyUserToken, requireSalesEntity, async (req, res) => {
   try {
     const { status, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
@@ -7766,7 +8161,7 @@ app.get("/api/associate/network/tree", verifyUserToken, requireAssociate, async 
     // 1. Fetch authenticated Associate profile as the root node
     const [rootUser] = await sql`
       SELECT u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id,
-             u.account_status AS status, COALESCE(r.rank_name, 'Associate') AS rank,
+             u.account_status AS status, COALESCE(r.rank_name, 'Associate Leader') AS rank,
              COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
              COALESCE(t.total_commission_earned, 0) AS commission_earned
       FROM users u
@@ -7775,7 +8170,7 @@ app.get("/api/associate/network/tree", verifyUserToken, requireAssociate, async 
       WHERE u.user_id = ${req.user.user_id}
       LIMIT 1`;
 
-    // 2. Query downline combining mlm_tree_closure with direct sponsors
+    // 2. Query downline combining mlm_tree_closure with direct sponsors and team members (excluding Customers)
     const rows = await sql`
       WITH downline AS (
         SELECT descendant_user_id AS user_id, depth
@@ -7785,19 +8180,31 @@ app.get("/api/associate/network/tree", verifyUserToken, requireAssociate, async 
         SELECT user_id, 1 AS depth
         FROM users
         WHERE sponsor_user_id = ${req.user.user_id}
+        UNION
+        SELECT user_id, 1 AS depth
+        FROM team_members
+        WHERE associate_id = ${req.user.user_id} AND user_id IS NOT NULL AND status <> 'rejected'
       )
       SELECT u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id,
-             u.account_status AS status, COALESCE(r.rank_name, 'Associate') AS rank,
+             u.account_status AS status,
+             tm.slot_number, tm.team_member_uid,
+             CASE
+               WHEN tm.slot_number IS NOT NULL THEN 'Slot #' || tm.slot_number || ' Team Member'
+               WHEN u.user_type = 'Team Member' THEN 'Team Member'
+               ELSE COALESCE(r.rank_name, 'Associate')
+             END AS rank,
              COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
              COALESCE(t.total_commission_earned, 0) AS commission_earned,
              MIN(d.depth) AS depth
       FROM downline d
       JOIN users u ON u.user_id = d.user_id
+      LEFT JOIN team_members tm ON (tm.user_id = u.user_id OR tm.team_member_uid = u.member_id) AND tm.associate_id = ${req.user.user_id}
       LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
       LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
       WHERE u.user_id <> ${req.user.user_id}
-      GROUP BY u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id, u.account_status, r.rank_name, t.total_gaj_sold, t.total_commission_earned
-      ORDER BY MIN(d.depth), u.full_name`;
+        AND u.user_type IN ('Associate', 'Team Member')
+      GROUP BY u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id, u.account_status, tm.slot_number, tm.team_member_uid, r.rank_name, t.total_gaj_sold, t.total_commission_earned
+      ORDER BY COALESCE(tm.slot_number, 999), MIN(d.depth), u.full_name`;
 
     const rootNode = rootUser ? { ...rootUser, children: [] } : { user_id: req.user.user_id, member_id: `MMR${req.user.user_id}`, full_name: req.user.full_name || 'Associate', children: [] };
     const byId = new Map(rows.map(row => [row.user_id, { ...row, children: [] }]));
@@ -12238,20 +12645,39 @@ app.get("/api/admin/associates/:id",
       if (!profile) return err(res, "Associate not found", 404);
 
       let directReferrals = [];
+      let teamMembers = [];
       let commissions = [];
       let payouts = [];
       let statusHistory = [];
 
       try {
-        [directReferrals, commissions, payouts, statusHistory] = await Promise.all([
+        [directReferrals, teamMembers, commissions, payouts, statusHistory] = await Promise.all([
           sql`SELECT rr.*, u.full_name, u.member_id, u.account_status FROM referral_registrations rr JOIN users u ON u.user_id = rr.referred_user_id WHERE rr.sponsor_user_id = ${uid} ORDER BY rr.created_at DESC LIMIT 50`.catch(() => []),
+          sql`
+            SELECT tm.id, tm.team_member_uid, tm.user_id, tm.slot_number, tm.full_name, tm.mobile_no, tm.email_id,
+                   tm.status, tm.created_at, tm.date_of_birth, tm.gender, tm.full_address,
+                   COALESCE(u.account_status, tm.status) as account_status,
+                   COALESCE(u.member_id, tm.team_member_uid) as member_id,
+                   COALESCE(t.total_gaj_sold, 0) as total_gaj_sold,
+                   COALESCE(t.total_commission_earned, 0) as total_commission_earned
+            FROM team_members tm
+            LEFT JOIN users u ON u.user_id = tm.user_id
+            LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
+            WHERE tm.associate_id = ${uid}
+            ORDER BY tm.slot_number ASC NULLS LAST, tm.created_at ASC
+          `.catch(() => []),
           sql`SELECT * FROM commission_transactions WHERE associate_user_id = ${uid} ORDER BY created_at DESC LIMIT 50`.catch(() => []),
           sql`SELECT * FROM associate_payout_requests WHERE associate_user_id = ${uid} ORDER BY requested_at DESC LIMIT 50`.catch(() => []),
           sql`SELECT * FROM associate_status_history WHERE associate_user_id = ${uid} ORDER BY changed_at DESC LIMIT 50`.catch(() => []),
         ]);
       } catch {}
 
-      return ok(res, { profile, direct_referrals: directReferrals, commissions, payouts, status_history: statusHistory });
+      profile.team_size = teamMembers.length;
+      profile.team_active_count = teamMembers.filter(m => ['approved', 'active', 'Active', 'Approved'].includes(m.status) || ['Active', 'Approved'].includes(m.account_status)).length;
+      profile.team_sales_gaj = Math.round(teamMembers.reduce((sum, m) => sum + Number(m.total_gaj_sold || 0), 0) * 100) / 100;
+      profile.team_commission_earned = Math.round(teamMembers.reduce((sum, m) => sum + Number(m.total_commission_earned || 0), 0) * 100) / 100;
+
+      return ok(res, { profile, direct_referrals: directReferrals, team_members: teamMembers, commissions, payouts, status_history: statusHistory });
     } catch (e) {
       return err(res, e.message);
     }
@@ -12346,9 +12772,17 @@ app.get("/api/admin/associates",
                  COALESCE(r.rank_name, 'Associate') AS rank_name,
                  COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
                  COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
+                 COALESCE(tm_stats.team_size, 0) AS team_size,
+                 COALESCE(tm_stats.active_team_members, 0) AS active_team_members,
                  COUNT(*) OVER() AS total_count
           FROM users u
           LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
+          LEFT JOIN LATERAL (
+            SELECT COUNT(*)::int AS team_size,
+                   COUNT(CASE WHEN status IN ('approved', 'active') THEN 1 END)::int AS active_team_members
+            FROM team_members tm_sub
+            WHERE tm_sub.associate_id = u.user_id
+          ) tm_stats ON true
           LEFT JOIN LATERAL (
             SELECT ae_sub.id, ae_sub.contact_no_1, ae_sub.email
             FROM associate_enrollment ae_sub
@@ -12550,9 +12984,11 @@ app.get("/api/admin/commissions",
       const pageSize = Math.min(Math.max(Number(limit) || 30, 1), 100);
       const rows = await sql`
         SELECT c.*, u.full_name AS associate_name, u.member_id, b.booking_serial, p.plot_number, s.site_name,
+               seller.full_name AS seller_name, seller.member_id AS seller_member_id,
                COUNT(*) OVER() AS total_count
         FROM commission_transactions c
         JOIN users u ON u.user_id = c.associate_user_id
+        LEFT JOIN users seller ON seller.user_id = c.seller_user_id
         LEFT JOIN bookings b ON b.booking_id = c.related_booking_id
         LEFT JOIN plots p ON p.plot_id = b.plot_id
         LEFT JOIN sites s ON s.site_id = p.site_id
@@ -12565,6 +13001,156 @@ app.get("/api/admin/commissions",
         LIMIT ${pageSize} OFFSET ${(pageNumber - 1) * pageSize}`;
       const total = Number(rows[0]?.total_count || 0);
       return ok(res, { items: rows.map(({ total_count, ...row }) => row), total, page: pageNumber, limit: pageSize });
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.get("/api/admin/team-members",
+  verifyAdminToken,
+  role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"),
+  async (req, res) => {
+    try {
+      const { status = "", associate_id = "", search = "", page = 1, limit = 20 } = req.query;
+      const pageNumber = Math.max(Number(page) || 1, 1);
+      const pageSize = Math.min(Math.max(Number(limit) || 20, 1), 100);
+      const searchTerm = `%${String(search || "").trim()}%`;
+      const statusFilter = String(status || "").trim().toLowerCase();
+
+      const rows = await sql`
+        SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id, tm.associate_name,
+               tm.slot_number, tm.full_name, tm.mobile_no, tm.email_id, tm.status,
+               tm.photo_url, tm.applicant_signature_url, tm.associate_signature_url,
+               tm.created_at, tm.updated_at, tm.bank_name, tm.account_no, tm.ifsc_code,
+               assoc.full_name AS assoc_full_name, assoc.member_id AS assoc_member_id, assoc.mobile_no AS assoc_mobile,
+               COALESCE(u.account_status, tm.status) AS account_status,
+               COALESCE(u.is_active, true) AS is_user_active,
+               COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
+               COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
+               COUNT(*) OVER() AS total_count
+        FROM team_members tm
+        LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
+        LEFT JOIN users u ON u.user_id = tm.user_id
+        LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
+        WHERE (${statusFilter} = '' OR ${statusFilter} = 'all' OR LOWER(tm.status) = ${statusFilter})
+          AND (${Number(associate_id) || 0} = 0 OR tm.associate_id = ${Number(associate_id) || 0})
+          AND (${searchTerm} = '%%'
+               OR tm.full_name ILIKE ${searchTerm}
+               OR tm.team_member_uid ILIKE ${searchTerm}
+               OR tm.mobile_no ILIKE ${searchTerm}
+               OR tm.email_id ILIKE ${searchTerm}
+               OR assoc.full_name ILIKE ${searchTerm}
+               OR assoc.member_id ILIKE ${searchTerm})
+        ORDER BY tm.created_at DESC
+        LIMIT ${pageSize} OFFSET ${(pageNumber - 1) * pageSize}`;
+
+      const total = Number(rows[0]?.total_count || 0);
+      return ok(res, {
+        items: rows.map(({ total_count, ...r }) => r),
+        total,
+        page: pageNumber,
+        limit: pageSize
+      });
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.patch("/api/admin/team-members/:id/status",
+  verifyAdminToken,
+  role("SuperAdmin", "Admin", "FinanceManager"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, authorized_signatory_name } = req.body;
+      if (!status) return err(res, "Status is required", 400);
+
+      const normalizedStatus = String(status).trim().toLowerCase();
+      const numId = Number(id);
+
+      const result = await sql.begin(async (tx) => {
+        const rows = isNaN(numId)
+          ? await tx`SELECT * FROM team_members WHERE team_member_uid = ${String(id)} LIMIT 1 FOR UPDATE`
+          : await tx`SELECT * FROM team_members WHERE id = ${numId} OR team_member_uid = ${String(id)} LIMIT 1 FOR UPDATE`;
+        if (!rows || rows.length === 0) throw new Error("Team member not found");
+        const current = rows[0];
+
+        const [updated] = await tx`
+          UPDATE team_members
+          SET status = ${normalizedStatus},
+              authorized_signatory_name = COALESCE(${authorized_signatory_name || null}, authorized_signatory_name),
+              updated_at = NOW()
+          WHERE id = ${current.id}
+          RETURNING *`;
+
+        let targetAccountStatus = "Pending";
+        let targetIsActive = true;
+        if (["approved", "active"].includes(normalizedStatus)) {
+          targetAccountStatus = "Approved";
+          targetIsActive = true;
+        } else if (normalizedStatus === "rejected") {
+          targetAccountStatus = "Rejected";
+          targetIsActive = false;
+        } else if (normalizedStatus === "inactive" || normalizedStatus === "blocked") {
+          targetAccountStatus = "Inactive";
+          targetIsActive = false;
+        }
+
+        let userId = current.user_id;
+        const cleanMobile = String(current.mobile_no || "").replace(/[^0-9]/g, "");
+        const cleanAadhar = String(current.aadhar_no || "").replace(/[^0-9]/g, "");
+        const cleanEmail = current.email_id ? String(current.email_id).trim().toLowerCase() : null;
+
+        if (!userId) {
+          const [existingUser] = await tx`
+            SELECT user_id, user_type, account_status, sponsor_user_id
+            FROM users
+            WHERE mobile_no = ${cleanMobile}
+               OR (aadhar_number = ${cleanAadhar} AND ${Boolean(cleanAadhar)})
+               OR (email = ${cleanEmail} AND ${Boolean(cleanEmail)})
+            LIMIT 1`;
+          if (existingUser) userId = existingUser.user_id;
+        }
+
+        if (userId) {
+          await tx`
+            UPDATE users
+            SET user_type = COALESCE(user_type, 'Team Member'),
+                sponsor_user_id = COALESCE(sponsor_user_id, ${current.associate_id}),
+                account_status = ${targetAccountStatus},
+                is_active = ${targetIsActive},
+                member_id = COALESCE(member_id, ${current.team_member_uid}),
+                updated_at = NOW()
+            WHERE user_id = ${userId}`;
+          if (current.user_id !== userId) {
+            await tx`UPDATE team_members SET user_id = ${userId} WHERE id = ${current.id}`;
+            updated.user_id = userId;
+          }
+        } else if (["approved", "active"].includes(normalizedStatus)) {
+          const [newUser] = await tx`
+            INSERT INTO users (
+              member_id, user_type, full_name, mobile_no, email,
+              pan_number, aadhar_number, sponsor_user_id, account_status, is_active, registered_at
+            ) VALUES (
+              ${current.team_member_uid}, 'Team Member', ${current.full_name}, ${cleanMobile}, ${cleanEmail},
+              ${current.pan_no || null}, ${cleanAadhar}, ${current.associate_id}, ${targetAccountStatus}, ${targetIsActive}, NOW()
+            )
+            ON CONFLICT (mobile_no) DO UPDATE
+            SET account_status = ${targetAccountStatus}, is_active = ${targetIsActive}, user_type = 'Team Member', sponsor_user_id = ${current.associate_id}
+            RETURNING user_id`;
+          if (newUser) {
+            userId = newUser.user_id;
+            await tx`UPDATE team_members SET user_id = ${userId} WHERE id = ${current.id}`;
+            updated.user_id = userId;
+          }
+        }
+        return updated;
+      });
+
+      await logAdminAudit(req, "MLM", "UpdateTeamMemberStatus", "team_members", result.id, sql.json({ status: normalizedStatus, previous_status: result.status }));
+      return ok(res, result, `Team member status updated to ${normalizedStatus}`);
     } catch (e) {
       return err(res, e.message);
     }
@@ -12692,6 +13278,9 @@ app.get("/api/commission-engine/summary", verifyUserToken, async (_req, res) => 
       seller_percentage: snapshot.seller_percentage,
       equal_distribution_percentage: snapshot.equal_distribution_percentage,
       equal_distribution_enabled: snapshot.equal_distribution_enabled,
+      team_direct_percentage: snapshot.team_direct_percentage,
+      team_passive_percentage: snapshot.team_passive_percentage,
+      associate_leader_percentage: snapshot.associate_leader_percentage,
       distribution_scope: snapshot.distribution_scope,
       payment_mode_rules: snapshot.payment_mode_rules,
       eligibility_rules: snapshot.eligibility_rules,
@@ -12730,7 +13319,7 @@ app.put("/api/admin/commission-engine/settings",
       const reason = String(req.body?.reason || "").trim();
       if (!reason) return err(res, "Change reason is required.", 400);
       const commissionModel = String(req.body?.commission_model || "");
-      if (!["Upline", "LevelWise", "EqualDistribution"].includes(commissionModel)) return err(res, "Invalid commission model.", 400);
+      if (!["Upline", "LevelWise", "EqualDistribution", "FlatTeam", "TeamMemberModel"].includes(commissionModel)) return err(res, "Invalid commission model.", 400);
       const maximumLevels = Number(req.body?.maximum_levels || 1);
       if (!Number.isInteger(maximumLevels) || maximumLevels < 1 || maximumLevels > 50) {
         return err(res, "Maximum levels must be between 1 and 50.", 400);
@@ -12739,7 +13328,11 @@ app.put("/api/admin/commission-engine/settings",
       const uplinePercentage = Number(req.body?.upline_percentage || 0);
       const sellerPercentage = Number(req.body?.seller_percentage ?? 50);
       const equalDistributionPercentage = Number(req.body?.equal_distribution_percentage ?? (100 - sellerPercentage));
-      if ([directPercentage, uplinePercentage, sellerPercentage, equalDistributionPercentage].some(value => !Number.isFinite(value) || value < 0 || value > 100)) {
+      const teamDirectPercentage = Number(req.body?.team_direct_percentage ?? 5);
+      const teamPassivePercentage = Number(req.body?.team_passive_percentage ?? 0.5);
+      const associateLeaderPercentage = Number(req.body?.associate_leader_percentage ?? 0.5);
+
+      if ([directPercentage, uplinePercentage, sellerPercentage, equalDistributionPercentage, teamDirectPercentage, teamPassivePercentage, associateLeaderPercentage].some(value => !Number.isFinite(value) || value < 0 || value > 100)) {
         return err(res, "Commission percentages must be between 0 and 100.", 400);
       }
       if (commissionModel === "EqualDistribution" && Math.round((sellerPercentage + equalDistributionPercentage) * 10000) / 10000 !== 100) {
@@ -12780,6 +13373,9 @@ app.put("/api/admin/commission-engine/settings",
             payment_mode_rules = ${sql.json(req.body?.payment_mode_rules || { full_payment: "instant", emi: "installment_wise" })},
             eligibility_rules = ${sql.json(req.body?.eligibility_rules || {})},
             bonus_rules = ${sql.json(req.body?.bonus_rules || {})},
+            team_direct_percentage = ${teamDirectPercentage},
+            team_passive_percentage = ${teamPassivePercentage},
+            associate_leader_percentage = ${associateLeaderPercentage},
             is_active = ${parseBool(req.body?.is_active, true)},
             version = version + 1,
             updated_by_admin_id = ${req.admin.admin_id},

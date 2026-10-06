@@ -114,6 +114,6 @@ export async function setPlotStatus(plotId, newStatus, options = {}) {
   };
 }
 
-module.exports = {
+export default {
   setPlotStatus
 };

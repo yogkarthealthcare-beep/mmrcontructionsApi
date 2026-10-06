@@ -1,5 +1,6 @@
 import { z } from "zod";
 import sql from "../db.js";
+import { normalizeHumanName, isValidHumanName, calculateAge, isValidState } from "../utils/validationHelper.js";
 
 // Helper functions for defense-in-depth sanitization
 function cleanString(val: unknown): string | null {
@@ -49,12 +50,36 @@ function normalizeDate(val: unknown): string | null {
 
 // Validation schema for defense in depth
 export const associateEnrollmentSchema = z.object({
-  fullName: z.preprocess((v) => cleanString(v) ?? "", z.string().min(1, "Full name is required")),
-  dob: z.preprocess((v) => normalizeDate(v) ?? cleanString(v) ?? "", z.string().min(1, "Date of birth is required")),
+  fullName: z.preprocess(
+    (v) => cleanString(v) ?? "",
+    z.string().min(1, "Full name is required")
+      .refine(v => isValidHumanName(v), { message: "Full Name must contain only alphabets and spaces" })
+      .transform(v => normalizeHumanName(v))
+  ),
+  dob: z.preprocess(
+    (v) => normalizeDate(v) ?? cleanString(v) ?? "",
+    z.string().min(1, "Date of birth is required")
+      .refine(v => calculateAge(v) >= 18, { message: "Associate must be at least 18 years old" })
+  ),
   gender: z.preprocess((v) => cleanString(v) ?? "", z.string().min(1, "Gender is required")),
-  fatherName: z.preprocess(cleanString, z.string().optional().nullable()),
-  motherName: z.preprocess(cleanString, z.string().optional().nullable()),
-  spouseName: z.preprocess(cleanString, z.string().optional().nullable()),
+  fatherName: z.preprocess(
+    cleanString,
+    z.string().optional().nullable()
+      .refine(v => !v || isValidHumanName(v), { message: "Father's Name must contain only alphabets and spaces" })
+      .transform(v => (v ? normalizeHumanName(v) : v))
+  ),
+  motherName: z.preprocess(
+    cleanString,
+    z.string().optional().nullable()
+      .refine(v => !v || isValidHumanName(v), { message: "Mother's Name must contain only alphabets and spaces" })
+      .transform(v => (v ? normalizeHumanName(v) : v))
+  ),
+  spouseName: z.preprocess(
+    cleanString,
+    z.string().optional().nullable()
+      .refine(v => !v || isValidHumanName(v), { message: "Spouse's Name must contain only alphabets and spaces" })
+      .transform(v => (v ? normalizeHumanName(v) : v))
+  ),
   contact1: z.preprocess((v) => cleanDigits(v) ?? "", z.string().min(10, "Contact number 1 must be at least 10 digits").max(15, "Contact number cannot exceed 15 digits")),
   contact2: z.preprocess(cleanDigits, z.string().optional().nullable()),
   nationality: z.preprocess((v) => cleanString(v) ?? "Indian", z.string().default("Indian")),
@@ -76,7 +101,11 @@ export const associateEnrollmentSchema = z.object({
   // Address Details
   permAddress: z.preprocess(cleanString, z.string().optional().nullable()),
   permCity: z.preprocess(cleanString, z.string().optional().nullable()),
-  permState: z.preprocess(cleanString, z.string().optional().nullable()),
+  permState: z.preprocess(
+    cleanString,
+    z.string().optional().nullable()
+      .refine(v => !v || isValidState(v), { message: "Selected permanent state is not valid" })
+  ),
   permCountry: z.preprocess((v) => cleanString(v) ?? "India", z.string().default("India")),
   permPin: z.preprocess(cleanString, z.string().optional().nullable()),
   localAddress: z.preprocess(cleanString, z.string().optional().nullable()),
@@ -97,7 +126,12 @@ export const associateEnrollmentSchema = z.object({
   branchCountry: z.preprocess((v) => cleanString(v) ?? "India", z.string().default("India")),
 
   // Nominee Details
-  nomineeName: z.preprocess(cleanString, z.string().optional().nullable()),
+  nomineeName: z.preprocess(
+    cleanString,
+    z.string().optional().nullable()
+      .refine(v => !v || isValidHumanName(v), { message: "Nominee Name must contain only alphabets and spaces" })
+      .transform(v => (v ? normalizeHumanName(v) : v))
+  ),
   nomineeDob: z.preprocess(normalizeDate, z.string().optional().nullable()),
   nomineeGender: z.preprocess(cleanString, z.string().optional().nullable()),
   nomineeNationality: z.preprocess((v) => cleanString(v) ?? "Indian", z.string().default("Indian")),
@@ -112,7 +146,11 @@ export const associateEnrollmentSchema = z.object({
   // Sponsor Details
   sponsorName: z.preprocess(cleanString, z.string().optional().nullable()),
   sponsorCode: z.preprocess(cleanString, z.string().optional().nullable()),
-  sponsorContact: z.preprocess(cleanDigits, z.string().optional().nullable())
+  sponsorContact: z.preprocess(cleanDigits, z.string().optional().nullable()),
+
+  // Submission Status Flags
+  isFinalSubmitted: z.preprocess((val) => val === "true" || val === true || val === "1" || val === 1, z.boolean().optional().nullable()),
+  is_final_submitted: z.preprocess((val) => val === "true" || val === true || val === "1" || val === 1, z.boolean().optional().nullable())
 });
 
 export type AssociateEnrollmentInput = z.infer<typeof associateEnrollmentSchema>;
@@ -191,6 +229,7 @@ export async function registerAssociateEnrollment(
           education = ${data.education || null},
           category = ${data.category || null},
           religion = ${data.religion || null},
+          is_final_submitted = COALESCE(${data.isFinalSubmitted !== undefined ? Boolean(data.isFinalSubmitted) : (data.is_final_submitted !== undefined ? Boolean(data.is_final_submitted) : null)}, is_final_submitted, FALSE),
           applicant_photo_path = COALESCE(${finalApplicantPhoto}, applicant_photo_path),
           sign_date = ${signDateStr || null},
           terms_accepted = ${Boolean(data.termsAccepted)},
@@ -215,19 +254,20 @@ export async function registerAssociateEnrollment(
       const count = Number(maxResult?.max_num || 0) + 1;
       generatedId = `MMR-ASC-${year}-${String(count).padStart(4, "0")}`;
 
+      const isFinal = Boolean(data.isFinalSubmitted || data.is_final_submitted || false);
       // 2. Insert master: associate_enrollment
       await tx`
         INSERT INTO associate_enrollment (
           id, full_name, dob, gender, father_name, mother_name, spouse_name,
           contact_no_1, contact_no_2, nationality, residential_status,
           pan_no, aadhar_no, email, occupation, annual_income, education,
-          category, religion, applicant_photo_path, sign_date,
+          category, religion, is_final_submitted, applicant_photo_path, sign_date,
           terms_accepted, terms_accepted_at, status
         ) VALUES (
           ${generatedId}, ${data.fullName}, ${dobStr}, ${data.gender}, ${data.fatherName || null}, ${data.motherName || null}, ${data.spouseName || null},
           ${contactStr}, ${data.contact2 || null}, ${data.nationality || 'Indian'}, ${data.residentialStatus || null},
           ${panStr}, ${aadharStr}, ${emailStr}, ${data.occupation || null}, ${data.annualIncome || null}, ${data.education || null},
-          ${data.category || null}, ${data.religion || null}, ${applicantPhotoPath || null}, ${signDateStr || null},
+          ${data.category || null}, ${data.religion || null}, ${isFinal}, ${applicantPhotoPath || null}, ${signDateStr || null},
           ${Boolean(data.termsAccepted)}, NOW(), 'pending'
         )
       `;

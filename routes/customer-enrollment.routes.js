@@ -3,6 +3,7 @@ import sql from "../db.js";
 import { saveFileToVPS } from "../services/fileStorage.service.js";
 import jwt from "jsonwebtoken";
 import { generateCustomerPdf } from "../services/customerPdfService.js";
+import { normalizeHumanName, isValidHumanName, calculateAge, isValidState } from "../utils/validationHelper.js";
 
 const router = express.Router();
 
@@ -158,9 +159,12 @@ async function ensureSchema() {
     await sql`CREATE INDEX IF NOT EXISTS idx_ces_user ON customer_enrollment_submissions(user_id)`;
 
     try {
+      await sql`ALTER TABLE customer_enrollment_submissions ADD COLUMN IF NOT EXISTS religion VARCHAR(50)`;
+      await sql`ALTER TABLE customer_enrollment_submissions ADD COLUMN IF NOT EXISTS is_final_submitted BOOLEAN DEFAULT FALSE`;
       await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS enrollment_status VARCHAR(20) DEFAULT 'Pending'`;
       await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS enrollment_status VARCHAR(20) DEFAULT 'Pending'`;
       await sql`ALTER TABLE associate_enrollment ADD COLUMN IF NOT EXISTS user_id INTEGER`;
+      await sql`ALTER TABLE associate_enrollment ADD COLUMN IF NOT EXISTS is_final_submitted BOOLEAN DEFAULT FALSE`;
     } catch (colErr) {
       console.warn("[ensureSchema column warning]", colErr.message);
     }
@@ -234,6 +238,44 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
       return err(res, "Terms and conditions must be accepted.");
     }
 
+    // Human name validation & normalization
+    if (!isValidHumanName(b.applicantName)) {
+      return err(res, "Applicant Name must contain only alphabets and spaces (no numbers or special characters).");
+    }
+    const cleanApplicantName = normalizeHumanName(b.applicantName);
+
+    let cleanFhName = null;
+    if (b.fhName && String(b.fhName).trim()) {
+      if (!isValidHumanName(b.fhName)) {
+        return err(res, "Father/Husband Name must contain only alphabets and spaces (no numbers or special characters).");
+      }
+      cleanFhName = normalizeHumanName(b.fhName);
+    }
+
+    let cleanCoApplicantName = null;
+    if (b.coApplicantName && String(b.coApplicantName).trim()) {
+      if (!isValidHumanName(b.coApplicantName)) {
+        return err(res, "Co-Applicant Name must contain only alphabets and spaces (no numbers or special characters).");
+      }
+      cleanCoApplicantName = normalizeHumanName(b.coApplicantName);
+    }
+
+    let cleanCoFhName = null;
+    if (b.coFhName && String(b.coFhName).trim()) {
+      if (!isValidHumanName(b.coFhName)) {
+        return err(res, "Co-Applicant Father/Husband Name must contain only alphabets and spaces (no numbers or special characters).");
+      }
+      cleanCoFhName = normalizeHumanName(b.coFhName);
+    }
+
+    // Minimum Age 18 check
+    if (b.dob) {
+      const age = calculateAge(b.dob);
+      if (age < 18) {
+        return err(res, `Applicant must be at least 18 years old (current calculated age: ${age}).`);
+      }
+    }
+
     // Helper functions for safe type parsing
     const parseDate = (val) => {
       if (!val || val === "null" || val === "undefined" || String(val).trim() === "") return null;
@@ -303,14 +345,16 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
             basic_sale_price = ${bsp},
             plc_dev_charges = ${plc},
             total_property_value = ${totalVal},
-            applicant_name = ${b.applicantName},
-            fh_name = ${b.fhName || null},
+            applicant_name = ${cleanApplicantName},
+            fh_name = ${cleanFhName},
             date_of_birth = ${dobVal},
             age = ${ageVal},
             gender = ${b.gender || null},
             marital_status = ${b.maritalStatus || null},
             nationality = ${b.nationality || null},
             nationality_other = ${b.nationalityOther || null},
+            religion = ${b.religion || null},
+            is_final_submitted = COALESCE(${b.isFinalSubmitted !== undefined ? Boolean(b.isFinalSubmitted) : (b.is_final_submitted !== undefined ? Boolean(b.is_final_submitted) : null)}, is_final_submitted, FALSE),
             pan_no = ${b.pan || null},
             aadhar_no = ${b.aadhar || null},
             occupation = ${b.occupation || null},
@@ -325,8 +369,8 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
             email_1 = ${b.email1 || null},
             photo_first_applicant_url = COALESCE(${finalPhoto1}, photo_first_applicant_url),
             photo_co_applicant_url = COALESCE(${finalPhoto2}, photo_co_applicant_url),
-            co_applicant_name = ${b.coApplicantName || null},
-            co_fh_name = ${b.coFhName || null},
+            co_applicant_name = ${cleanCoApplicantName},
+            co_fh_name = ${cleanCoFhName},
             co_relation = ${b.coRelation || null},
             co_date_of_birth = ${coDobVal},
             co_age = ${coAgeVal},
@@ -361,10 +405,11 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
 
         await tx`DELETE FROM customer_nominees WHERE submission_id = ${newSubmissionId}`;
       } else {
+        const isFinal = Boolean(b.isFinalSubmitted || b.is_final_submitted || false);
         const [newRow] = await tx`
           INSERT INTO customer_enrollment_submissions (
             user_id, form_date, application_no, project_name, property_type, property_type_other, plot_flat_no, block_tower, size_area, rate_per_unit, basic_sale_price, plc_dev_charges, total_property_value,
-            applicant_name, fh_name, date_of_birth, age, gender, marital_status, nationality, nationality_other, pan_no, aadhar_no, occupation,
+            applicant_name, fh_name, date_of_birth, age, gender, marital_status, nationality, nationality_other, religion, is_final_submitted, pan_no, aadhar_no, occupation,
             present_address, present_city, present_state_pin, permanent_address, permanent_city, permanent_state_pin, mobile_1, mobile_2, email_1, photo_first_applicant_url,
             co_applicant_name, co_fh_name, co_relation, co_date_of_birth, co_age, co_gender, co_pan_no, co_aadhar_no, co_present_address, co_mobile, co_email, photo_co_applicant_url,
             booking_amount, booking_amount_words, payment_mode, txn_cheque_no, txn_date, drawn_bank_branch,
@@ -373,9 +418,9 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
             declaration_accepted, signature_sole_first_applicant_url, signature_co_applicant_url, signature_authorized_signatory_url, terms_accepted, terms_accepted_at
           ) VALUES (
             ${user_id}, ${formDateVal}, ${b.applicationNo || appNo}, ${b.projectName || null}, ${b.propertyType || null}, ${b.propertyTypeOther || null}, ${b.plotFlatNo || null}, ${b.blockTower || null}, ${b.sizeArea || null}, ${rateVal}, ${bsp}, ${plc}, ${totalVal},
-            ${b.applicantName}, ${b.fhName || null}, ${dobVal}, ${ageVal}, ${b.gender || null}, ${b.maritalStatus || null}, ${b.nationality || null}, ${b.nationalityOther || null}, ${b.pan || null}, ${b.aadhar || null}, ${b.occupation || null},
+            ${cleanApplicantName}, ${cleanFhName}, ${dobVal}, ${ageVal}, ${b.gender || null}, ${b.maritalStatus || null}, ${b.nationality || null}, ${b.nationalityOther || null}, ${b.religion || null}, ${isFinal}, ${b.pan || null}, ${b.aadhar || null}, ${b.occupation || null},
             ${b.presentAddress || null}, ${b.presentCity || null}, ${b.presentStatePin || null}, ${b.permanentAddress || null}, ${b.permanentCity || null}, ${b.permanentStatePin || null}, ${b.mobile1}, ${b.mobile2 || null}, ${b.email1 || null}, ${photoFirstUrl},
-            ${b.coApplicantName || null}, ${b.coFhName || null}, ${b.coRelation || null}, ${coDobVal}, ${coAgeVal}, ${b.coGender || null}, ${b.coPan || null}, ${b.coAadhar || null}, ${b.coPresentAddress || null}, ${b.coMobile || null}, ${b.coEmail || null}, ${photoCoUrl},
+            ${cleanCoApplicantName}, ${cleanCoFhName}, ${b.coRelation || null}, ${coDobVal}, ${coAgeVal}, ${b.coGender || null}, ${b.coPan || null}, ${b.coAadhar || null}, ${b.coPresentAddress || null}, ${b.coMobile || null}, ${b.coEmail || null}, ${photoCoUrl},
             ${bookingAmountVal}, ${b.bookingAmountWords || null}, ${b.paymentMode || null}, ${b.txnNo || null}, ${txnDateVal}, ${b.drawnBankBranch || null},
             ${b.accHolderName || null}, ${b.accBankBranch || null}, ${b.accNumber || null}, ${b.ifscCode || null},
             ${b.associateName || null}, ${b.associateId || null}, ${b.associateMobile || null}, ${b.associateSignatureName || null},
@@ -389,9 +434,10 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
       if (b.nominees && Array.isArray(b.nominees)) {
         for (const nom of b.nominees) {
           if (nom.nomineeName) {
+            const nomClean = isValidHumanName(nom.nomineeName) ? normalizeHumanName(nom.nomineeName) : nom.nomineeName;
             await tx`
               INSERT INTO customer_nominees (submission_id, nominee_name, relation, age_dob, aadhar_no)
-              VALUES (${newSubmissionId}, ${nom.nomineeName}, ${nom.nomineeRelation || null}, ${nom.nomineeAgeDob || null}, ${nom.nomineeAadhar || null})
+              VALUES (${newSubmissionId}, ${nomClean}, ${nom.nomineeRelation || null}, ${nom.nomineeAgeDob || null}, ${nom.nomineeAadhar || null})
             `;
           }
         }

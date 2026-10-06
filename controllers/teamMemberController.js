@@ -200,12 +200,21 @@ export async function createTeamMemberController(req, res) {
             if (error.detail?.includes("aadhar_no")) {
                 msg = "A team member with this Aadhar Number has already been registered.";
             }
+            else if (error.detail?.includes("slot_number") || error.constraint?.includes("uq_team_members_assoc_slot")) {
+                msg = "This Associate has already reached the maximum limit of 10 direct Team Members.";
+            }
             else if (error.detail?.includes("team_member_uid")) {
                 msg = "UID generation collision. Please retry submission.";
             }
             return res.status(400).json({
                 success: false,
                 message: msg
+            });
+        }
+        if (error.message?.includes("maximum limit of 10") || error.message?.includes("Associate with ID")) {
+            return res.status(400).json({
+                success: false,
+                message: error.message
             });
         }
         return res.status(500).json({

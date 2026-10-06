@@ -7,6 +7,7 @@ import sql from "../db.js";
 import { sendEmail } from "../emailService.js";
 import { saveFileToVPS, deleteFileFromStorage } from "../services/fileStorage.service.js";
 import { generateInvestorPdf } from "../services/investorPdfService.js";
+import { normalizeHumanName, isValidHumanName, calculateAge, isValidState } from "../utils/validationHelper.js";
 
 const router = express.Router();
 const upload = multer({
@@ -726,7 +727,25 @@ router.get("/investor/profile", authInvestor, async (req, res) => {
 // PUT /api/investor/profile
 router.put("/investor/profile", authInvestor, async (req, res) => {
   try {
-    const { full_name, mobile_number, address, city, state, country, pincode, nominee_name, pan_number, aadhaar_number } = req.body;
+    let { full_name, mobile_number, address, city, state, country, pincode, nominee_name, pan_number, aadhaar_number } = req.body;
+
+    if (full_name) {
+      if (!isValidHumanName(full_name)) {
+        return err(res, "Full Name must contain only alphabets and spaces (no numbers or special characters).", 400);
+      }
+      full_name = normalizeHumanName(full_name);
+    }
+
+    if (nominee_name) {
+      if (!isValidHumanName(nominee_name)) {
+        return err(res, "Nominee Name must contain only alphabets and spaces (no numbers or special characters).", 400);
+      }
+      nominee_name = normalizeHumanName(nominee_name);
+    }
+
+    if (state && !isValidState(state)) {
+      return err(res, "Selected state is not valid. Please select from approved Indian states.", 400);
+    }
 
     if (mobile_number && !/^\d{10}$/.test(String(mobile_number).replace(/\D/g, ""))) {
       return err(res, "Please enter a valid 10 digit mobile number.", 400);
@@ -1614,6 +1633,81 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
       return err(res, "First name and mobile number are required.");
     }
 
+    // Human name validation & normalization
+    if (!isValidHumanName(body.invFirstName)) {
+      return err(res, "First Name must contain only alphabets and spaces (no numbers or special characters).");
+    }
+    body.invFirstName = normalizeHumanName(body.invFirstName);
+
+    if (body.invMiddleName && String(body.invMiddleName).trim()) {
+      if (!isValidHumanName(body.invMiddleName)) {
+        return err(res, "Middle Name must contain only alphabets and spaces (no numbers or special characters).");
+      }
+      body.invMiddleName = normalizeHumanName(body.invMiddleName);
+    }
+
+    if (body.invSurname && String(body.invSurname).trim()) {
+      if (!isValidHumanName(body.invSurname)) {
+        return err(res, "Surname must contain only alphabets and spaces (no numbers or special characters).");
+      }
+      body.invSurname = normalizeHumanName(body.invSurname);
+    }
+
+    if (body.fhFirstName && String(body.fhFirstName).trim()) {
+      if (!isValidHumanName(body.fhFirstName)) {
+        return err(res, "Father/Husband First Name must contain only alphabets and spaces (no numbers or special characters).");
+      }
+      body.fhFirstName = normalizeHumanName(body.fhFirstName);
+    }
+
+    if (body.fhMiddleName && String(body.fhMiddleName).trim()) {
+      if (!isValidHumanName(body.fhMiddleName)) {
+        return err(res, "Father/Husband Middle Name must contain only alphabets and spaces (no numbers or special characters).");
+      }
+      body.fhMiddleName = normalizeHumanName(body.fhMiddleName);
+    }
+
+    if (body.fhSurname && String(body.fhSurname).trim()) {
+      if (!isValidHumanName(body.fhSurname)) {
+        return err(res, "Father/Husband Surname must contain only alphabets and spaces (no numbers or special characters).");
+      }
+      body.fhSurname = normalizeHumanName(body.fhSurname);
+    }
+
+    if (body.declSignatureName && String(body.declSignatureName).trim()) {
+      if (!isValidHumanName(body.declSignatureName)) {
+        return err(res, "Declaration Signature Name must contain only alphabets and spaces.");
+      }
+      body.declSignatureName = normalizeHumanName(body.declSignatureName);
+    }
+
+    if (body.firstApplicantName && String(body.firstApplicantName).trim()) {
+      if (!isValidHumanName(body.firstApplicantName)) {
+        return err(res, "First Applicant Name must contain only alphabets and spaces.");
+      }
+      body.firstApplicantName = normalizeHumanName(body.firstApplicantName);
+    }
+
+    if (body.jointApplicantName && String(body.jointApplicantName).trim()) {
+      if (!isValidHumanName(body.jointApplicantName)) {
+        return err(res, "Joint Applicant Name must contain only alphabets and spaces.");
+      }
+      body.jointApplicantName = normalizeHumanName(body.jointApplicantName);
+    }
+
+    // Minimum Age 18 check
+    if (body.dob) {
+      const age = calculateAge(body.dob);
+      if (age < 18) {
+        return err(res, `Applicant must be at least 18 years old (current calculated age: ${age}).`);
+      }
+    }
+
+    // State check
+    if (body.state && !isValidState(body.state)) {
+      return err(res, "Selected state is not valid. Please select from approved Indian states.");
+    }
+
     const processBase64 = async (dataUrl, filename) => {
       if (!dataUrl) return null;
       const matches = dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
@@ -1633,38 +1727,100 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
       await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS corr_city VARCHAR(100)`;
       await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS corr_state VARCHAR(100)`;
       await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS corr_pin_code VARCHAR(20)`;
+      await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS religion VARCHAR(50)`;
+      await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS is_final_submitted BOOLEAN DEFAULT FALSE`;
     } catch (e) {}
 
     const photoUrl = await processBase64(body.photo, `photo_${Date.now()}.png`);
     const sigFirstUrl = await processBase64(body.signatureFirstApplicant, `sig1_${Date.now()}.png`);
     const sigJointUrl = await processBase64(body.signatureJointApplicant, `sig2_${Date.now()}.png`);
 
-    const newRow = await sql`
-      INSERT INTO investor_enrollments (
-        investor_id, form_no, form_date, branch_code, branch_name, investor_enrollment_id, project_name,
-        inv_first_name, inv_middle_name, inv_surname, fh_first_name, fh_middle_name, fh_surname,
-        dob, age, gender, occupation, occupation_other, address, city, state, pin_code,
-        corr_address, corr_city, corr_state, corr_pin_code,
-        mobile, alt_tel, email, pan, aadhar, amount, amount_words, payment_mode, txn_no, txn_date, bank_branch, ifsc_code, account_number,
-        nominees, decl_date, decl_place, decl_signature_name, first_applicant_name, joint_applicant_name,
-        photo_url, signature_first_url, signature_joint_url
-      ) VALUES (
-        ${investor_id}, ${body.formNo || null}, ${body.formDate || null}, ${body.branchCode || null}, ${body.branchName || null}, ${body.investorId || null}, ${body.projectName || null},
-        ${body.invFirstName}, ${body.invMiddleName || null}, ${body.invSurname || null}, ${body.fhFirstName || null}, ${body.fhMiddleName || null}, ${body.fhSurname || null},
-        ${body.dob || null}, ${body.age || null}, ${body.gender || null}, ${body.occupation || null}, ${body.occupationOther || null}, ${body.address || null}, ${body.city || null}, ${body.state || null}, ${body.pinCode || null},
-        ${body.corrAddress || body.corr_address || null}, ${body.corrCity || body.corr_city || null}, ${body.corrState || body.corr_state || null}, ${body.corrPinCode || body.corr_pin_code || null},
-        ${body.mobile}, ${body.altTel || null}, ${body.email || null}, ${body.pan || null}, ${body.aadhar || null}, ${body.amount || null}, ${body.amountWords || null}, ${body.paymentMode || null}, ${body.txnNo || null}, ${body.txnDate || null}, ${body.bankBranch || null}, ${body.ifscCode || body.ifsc_code || null}, ${body.accountNumber || body.account_number || null},
-        ${body.nominees ? JSON.stringify(body.nominees) : null}, ${body.declDate || null}, ${body.declPlace || null}, ${body.declSignatureName || null}, ${body.firstApplicantName || null}, ${body.jointApplicantName || null},
-        ${photoUrl || null}, ${sigFirstUrl || null}, ${sigJointUrl || null}
-      ) RETURNING id
-    `;
+    const [existing] = await sql`SELECT id FROM investor_enrollments WHERE investor_id = ${investor_id} ORDER BY created_at DESC LIMIT 1`;
+    let resultId;
+    if (existing) {
+      await sql`
+        UPDATE investor_enrollments SET
+          form_no = COALESCE(${body.formNo || null}, form_no),
+          form_date = COALESCE(${body.formDate || null}, form_date),
+          branch_code = ${body.branchCode || null},
+          branch_name = ${body.branchName || null},
+          project_name = ${body.projectName || null},
+          inv_first_name = ${body.invFirstName},
+          inv_middle_name = ${body.invMiddleName || null},
+          inv_surname = ${body.invSurname || null},
+          fh_first_name = ${body.fhFirstName || null},
+          fh_middle_name = ${body.fhMiddleName || null},
+          fh_surname = ${body.fhSurname || null},
+          dob = ${body.dob || null},
+          age = ${body.age || null},
+          gender = ${body.gender || null},
+          occupation = ${body.occupation || null},
+          occupation_other = ${body.occupationOther || null},
+          address = ${body.address || null},
+          city = ${body.city || null},
+          state = ${body.state || null},
+          pin_code = ${body.pinCode || null},
+          corr_address = ${body.corrAddress || body.corr_address || null},
+          corr_city = ${body.corrCity || body.corr_city || null},
+          corr_state = ${body.corrState || body.corr_state || null},
+          corr_pin_code = ${body.corrPinCode || body.corr_pin_code || null},
+          religion = ${body.religion || null},
+          mobile = ${body.mobile},
+          alt_tel = ${body.altTel || null},
+          email = ${body.email || null},
+          pan = ${body.pan || null},
+          aadhar = ${body.aadhar || null},
+          amount = ${body.amount || null},
+          amount_words = ${body.amountWords || null},
+          payment_mode = ${body.paymentMode || null},
+          txn_no = ${body.txnNo || null},
+          txn_date = ${body.txnDate || null},
+          bank_branch = ${body.bankBranch || null},
+          ifsc_code = ${body.ifscCode || body.ifsc_code || null},
+          account_number = ${body.accountNumber || body.account_number || null},
+          nominees = ${body.nominees ? (typeof body.nominees === 'string' ? body.nominees : JSON.stringify(body.nominees)) : null},
+          decl_date = ${body.declDate || null},
+          decl_place = ${body.declPlace || null},
+          decl_signature_name = ${body.declSignatureName || null},
+          first_applicant_name = ${body.firstApplicantName || null},
+          joint_applicant_name = ${body.jointApplicantName || null},
+          photo_url = COALESCE(${photoUrl}, photo_url),
+          signature_first_url = COALESCE(${sigFirstUrl}, signature_first_url),
+          signature_joint_url = COALESCE(${sigJointUrl}, signature_joint_url),
+          is_final_submitted = COALESCE(${Boolean(body.is_final_submitted || body.isFinalSubmit || false)}, is_final_submitted),
+          updated_at = NOW()
+        WHERE id = ${existing.id}
+      `;
+      resultId = existing.id;
+    } else {
+      const [newRow] = await sql`
+        INSERT INTO investor_enrollments (
+          investor_id, form_no, form_date, branch_code, branch_name, investor_enrollment_id, project_name,
+          inv_first_name, inv_middle_name, inv_surname, fh_first_name, fh_middle_name, fh_surname,
+          dob, age, gender, occupation, occupation_other, address, city, state, pin_code,
+          corr_address, corr_city, corr_state, corr_pin_code, religion,
+          mobile, alt_tel, email, pan, aadhar, amount, amount_words, payment_mode, txn_no, txn_date, bank_branch, ifsc_code, account_number,
+          nominees, decl_date, decl_place, decl_signature_name, first_applicant_name, joint_applicant_name,
+          photo_url, signature_first_url, signature_joint_url, is_final_submitted
+        ) VALUES (
+          ${investor_id}, ${body.formNo || null}, ${body.formDate || null}, ${body.branchCode || null}, ${body.branchName || null}, ${body.investorId || null}, ${body.projectName || null},
+          ${body.invFirstName}, ${body.invMiddleName || null}, ${body.invSurname || null}, ${body.fhFirstName || null}, ${body.fhMiddleName || null}, ${body.fhSurname || null},
+          ${body.dob || null}, ${body.age || null}, ${body.gender || null}, ${body.occupation || null}, ${body.occupationOther || null}, ${body.address || null}, ${body.city || null}, ${body.state || null}, ${body.pinCode || null},
+          ${body.corrAddress || body.corr_address || null}, ${body.corrCity || body.corr_city || null}, ${body.corrState || body.corr_state || null}, ${body.corrPinCode || body.corr_pin_code || null}, ${body.religion || null},
+          ${body.mobile}, ${body.altTel || null}, ${body.email || null}, ${body.pan || null}, ${body.aadhar || null}, ${body.amount || null}, ${body.amountWords || null}, ${body.paymentMode || null}, ${body.txnNo || null}, ${body.txnDate || null}, ${body.bankBranch || null}, ${body.ifscCode || body.ifsc_code || null}, ${body.accountNumber || body.account_number || null},
+          ${body.nominees ? (typeof body.nominees === 'string' ? body.nominees : JSON.stringify(body.nominees)) : null}, ${body.declDate || null}, ${body.declPlace || null}, ${body.declSignatureName || null}, ${body.firstApplicantName || null}, ${body.jointApplicantName || null},
+          ${photoUrl || null}, ${sigFirstUrl || null}, ${sigJointUrl || null}, ${Boolean(body.is_final_submitted || body.isFinalSubmit || false)}
+        ) RETURNING id
+      `;
+      resultId = newRow?.id;
+    }
 
     // Mark enrollment_status as Completed in investor_users
     try {
       await sql`UPDATE investor_users SET enrollment_status = 'Completed' WHERE id = ${investor_id}`;
     } catch (e) {}
 
-    return ok(res, newRow[0], "Investor enrollment submitted successfully.");
+    return ok(res, { id: resultId }, "Investor enrollment submitted successfully.");
   } catch (e) {
     console.error("Investor Enrollment Error:", e);
     return err(res, "Failed to submit enrollment form.");
