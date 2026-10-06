@@ -338,7 +338,7 @@ export async function registerAssociateEnrollment(
       const uidNum = Number(userId) || 0;
       await tx`
         UPDATE users SET
-          enrollment_status = 'Completed',
+          enrollment_status = COALESCE(enrollment_status, 'Pending'),
           pan_number = COALESCE(NULLIF(${panStr}, ''), pan_number),
           aadhar_number = COALESCE(NULLIF(${aadharStr}, ''), aadhar_number),
           updated_at = NOW()
