@@ -13846,14 +13846,43 @@ app.get("/api/admin/dashboard",
     console.log("[Dashboard API Start] /api/admin/dashboard");
     try {
       await ensureInquirySchema();
-      const [statsResult, sitesResult, recentBookingsResult, monthlySalesResult] = await Promise.all([
+      const [
+        statsResult,
+        sitesResult,
+        recentBookingsResult,
+        monthlySalesResult,
+        recentTeamMembersResult,
+        recentCustomersResult,
+        recentAssociatesResult,
+        recentInvestorsResult,
+        networkPreviewResult
+      ] = await Promise.all([
         timedDashboardQuery(
           "/api/admin/dashboard stats",
           () => sql`
             SELECT
               COALESCE((SELECT COUNT(*) FROM users WHERE user_type = 'Customer' AND account_status = 'Active'), 0)::int AS total_customers,
               COALESCE((SELECT COUNT(*) FROM users WHERE user_type = 'Associate' AND account_status = 'Active'), 0)::int AS total_associates,
+              COALESCE((SELECT COUNT(*) FROM team_members), 0)::int AS total_team_members,
+              COALESCE((SELECT COUNT(*) FROM team_members WHERE LOWER(status) = 'active'), 0)::int AS team_members_active,
+              COALESCE((SELECT COUNT(*) FROM team_members WHERE LOWER(status) = 'pending'), 0)::int AS team_members_pending,
+              COALESCE((SELECT COUNT(*) FROM team_members WHERE LOWER(status) IN ('inactive', 'suspended', 'rejected')), 0)::int AS team_members_inactive,
+              COALESCE((SELECT COUNT(*) FROM team_members WHERE date_trunc('day', created_at) = date_trunc('day', CURRENT_DATE)), 0)::int AS team_members_today,
+              COALESCE(
+                (SELECT COUNT(*) FROM investor_enrollments),
+                (SELECT COUNT(*) FROM users WHERE user_type = 'Investor'),
+                0
+              )::int AS total_investors,
+              COALESCE((SELECT COUNT(*) FROM bookings WHERE booking_status <> 'Cancelled'), 0)::int AS total_bookings,
               COALESCE((SELECT COUNT(DISTINCT plot_id) FROM bookings WHERE booking_status = 'Confirmed'), 0)::int AS total_plots_sold,
+              COALESCE((SELECT COUNT(DISTINCT plot_id) FROM bookings WHERE booking_status IN ('Confirmed', 'PaymentPending', 'InProcess')), 0)::int AS booked_plots,
+              COALESCE((
+                SELECT COUNT(*) FROM plots 
+                WHERE is_active = TRUE 
+                  AND (booking_id IS NULL OR plot_id NOT IN (
+                    SELECT plot_id FROM bookings WHERE booking_status IN ('Confirmed', 'PaymentPending', 'InProcess')
+                  ))
+              ), 0)::int AS available_plots,
               COALESCE((
                 SELECT SUM(COALESCE(total_due, emi_amount, 0))
                 FROM emi_schedules
@@ -13907,12 +13936,12 @@ app.get("/api/admin/dashboard",
           "/api/admin/dashboard recent-bookings",
           () => sql`
             SELECT b.booking_id, b.booking_serial, b.booking_status, b.booking_date,
-                   u.full_name, p.plot_number, s.site_name
+                   u.full_name, u.user_id, p.plot_number, s.site_name
             FROM bookings b
             JOIN users u ON b.user_id = u.user_id
             JOIN plots p ON b.plot_id = p.plot_id
             JOIN sites s ON p.site_id = s.site_id
-            ORDER BY b.created_at DESC LIMIT 5`,
+            ORDER BY b.created_at DESC LIMIT 6`,
           []
         ),
         timedDashboardQuery(
@@ -13945,43 +13974,118 @@ app.get("/api/admin/dashboard",
             LEFT JOIN sales s ON s.month_start = m.month_start
             ORDER BY m.month_start`,
           []
+        ),
+        timedDashboardQuery(
+          "/api/admin/dashboard recent-team-members",
+          () => sql`
+            SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id, tm.slot_number,
+                   tm.full_name, tm.mobile_no, tm.email_id, tm.status, tm.created_at,
+                   COALESCE(assoc.full_name, tm.associate_name, 'Direct') AS associate_name,
+                   assoc.member_id AS associate_member_id
+            FROM team_members tm
+            LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
+            ORDER BY tm.created_at DESC LIMIT 6`,
+          []
+        ),
+        timedDashboardQuery(
+          "/api/admin/dashboard recent-customers",
+          () => sql`
+            SELECT u.user_id, u.member_id, u.full_name, u.mobile_no, u.email,
+                   u.account_status, u.created_at, u.city, u.state
+            FROM users u
+            WHERE u.user_type = 'Customer'
+            ORDER BY u.created_at DESC LIMIT 6`,
+          []
+        ),
+        timedDashboardQuery(
+          "/api/admin/dashboard recent-associates",
+          () => sql`
+            SELECT u.user_id, u.member_id, u.full_name, u.mobile_no, u.email,
+                   u.account_status, u.created_at, u.city, u.state,
+                   COALESCE(r.rank_name, 'Associate') AS rank,
+                   COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold
+            FROM users u
+            LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
+            LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
+            WHERE u.user_type = 'Associate'
+            ORDER BY u.created_at DESC LIMIT 6`,
+          []
+        ),
+        timedDashboardQuery(
+          "/api/admin/dashboard recent-investors",
+          () => sql`
+            SELECT ie.id, ie.investor_enrollment_id, ie.investor_id,
+                   COALESCE(NULLIF(TRIM(CONCAT(ie.inv_first_name, ' ', COALESCE(ie.inv_surname, ''))), ''), ie.full_name, u.full_name, 'Investor') AS full_name,
+                   COALESCE(ie.mobile, ie.mobile_no, u.mobile_no) AS mobile_no,
+                   COALESCE(ie.amount, 0)::numeric AS amount,
+                   COALESCE(ie.enrollment_status, u.account_status, 'Active') AS status,
+                   COALESCE(ie.project_name, 'Main Fund') AS project_name,
+                   COALESCE(ie.created_at, u.created_at) AS created_at
+            FROM investor_enrollments ie
+            LEFT JOIN users u ON u.user_id = ie.investor_id
+            ORDER BY ie.created_at DESC LIMIT 6`,
+          []
+        ),
+        timedDashboardQuery(
+          "/api/admin/dashboard network-preview",
+          async () => {
+            const associates = await sql`
+              SELECT u.user_id, u.member_id, u.full_name, u.account_status, u.mobile_no,
+                     COALESCE(r.rank_name, 'Associate') AS rank,
+                     COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
+                     (SELECT COUNT(*)::int FROM team_members tm WHERE tm.associate_id = u.user_id) AS team_count,
+                     (SELECT COUNT(*)::int FROM users d WHERE d.sponsor_user_id = u.user_id AND d.user_type = 'Associate') AS direct_associates_count
+              FROM users u
+              LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
+              LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
+              WHERE u.user_type = 'Associate'
+              ORDER BY u.created_at ASC
+              LIMIT 6`;
+
+            const associateIds = associates.map(a => a.user_id).filter(Boolean);
+            let teamMembers = [];
+            if (associateIds.length > 0) {
+              teamMembers = await sql`
+                SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id,
+                       tm.slot_number, tm.full_name, tm.mobile_no, tm.status, tm.created_at
+                FROM team_members tm
+                WHERE tm.associate_id IN ${sql(associateIds)}
+                ORDER BY tm.slot_number ASC, tm.created_at ASC`;
+            }
+
+            return associates.map(assoc => {
+              const members = teamMembers.filter(m => m.associate_id === assoc.user_id);
+              return {
+                ...assoc,
+                team_members: members
+              };
+            });
+          },
+          []
         )
       ]);
-
-      const diagnostics = {
-        stats: {
-          elapsed_ms: statsResult.elapsed_ms,
-          size_bytes: statsResult.size_bytes,
-          error: statsResult.error
-        },
-        sites: {
-          elapsed_ms: sitesResult.elapsed_ms,
-          size_bytes: sitesResult.size_bytes,
-          error: sitesResult.error
-        },
-        recent_bookings: {
-          elapsed_ms: recentBookingsResult.elapsed_ms,
-          size_bytes: recentBookingsResult.size_bytes,
-          error: recentBookingsResult.error
-        },
-        monthly_sales: {
-          elapsed_ms: monthlySalesResult.elapsed_ms,
-          size_bytes: monthlySalesResult.size_bytes,
-          error: monthlySalesResult.error
-        }
-      };
 
       const rawStats = Array.isArray(statsResult.data) ? (statsResult.data[0] || {}) : (statsResult.data || {});
       const stats = {
         total_customers: Number(rawStats.total_customers || 0),
         total_associates: Number(rawStats.total_associates || 0),
+        total_team_members: Number(rawStats.total_team_members || 0),
+        team_members_active: Number(rawStats.team_members_active || 0),
+        team_members_pending: Number(rawStats.team_members_pending || 0),
+        team_members_inactive: Number(rawStats.team_members_inactive || 0),
+        team_members_today: Number(rawStats.team_members_today || 0),
+        total_investors: Number(rawStats.total_investors || 0),
+        total_bookings: Number(rawStats.total_bookings || 0),
         total_plots_sold: Number(rawStats.total_plots_sold || 0),
+        available_plots: Number(rawStats.available_plots || 0),
+        booked_plots: Number(rawStats.booked_plots || 0),
         monthly_emi_due: Number(rawStats.monthly_emi_due || 0),
         pending_approvals: Number(rawStats.pending_approvals || 0),
         open_enquiries: Number(rawStats.open_enquiries || 0),
         commission_due: Number(rawStats.commission_due || 0),
         total_revenue: Number(rawStats.total_revenue || 0),
       };
+
       const responseData = {
         totalCustomers: stats.total_customers,
         activeAssociates: stats.total_associates,
@@ -13992,7 +14096,11 @@ app.get("/api/admin/dashboard",
         stats,
         sites: Array.isArray(sitesResult.data) ? sitesResult.data : [],
         recent_bookings: Array.isArray(recentBookingsResult.data) ? recentBookingsResult.data : [],
-        diagnostics
+        recent_team_members: Array.isArray(recentTeamMembersResult.data) ? recentTeamMembersResult.data : [],
+        recent_customers: Array.isArray(recentCustomersResult.data) ? recentCustomersResult.data : [],
+        recent_associates: Array.isArray(recentAssociatesResult.data) ? recentAssociatesResult.data : [],
+        recent_investors: Array.isArray(recentInvestorsResult.data) ? recentInvestorsResult.data : [],
+        network_preview: Array.isArray(networkPreviewResult.data) ? networkPreviewResult.data : [],
       };
 
       const size = Buffer.byteLength(JSON.stringify(responseData));
@@ -14010,7 +14118,16 @@ app.get("/api/admin/dashboard",
         stats: {
           total_customers: 0,
           total_associates: 0,
+          total_team_members: 0,
+          team_members_active: 0,
+          team_members_pending: 0,
+          team_members_inactive: 0,
+          team_members_today: 0,
+          total_investors: 0,
+          total_bookings: 0,
           total_plots_sold: 0,
+          available_plots: 0,
+          booked_plots: 0,
           monthly_emi_due: 0,
           pending_approvals: 0,
           open_enquiries: 0,
@@ -14019,6 +14136,11 @@ app.get("/api/admin/dashboard",
         },
         sites: [],
         recent_bookings: [],
+        recent_team_members: [],
+        recent_customers: [],
+        recent_associates: [],
+        recent_investors: [],
+        network_preview: [],
         diagnostics: { error: e.message }
       }, "Dashboard loaded with fallback data.");
     }
