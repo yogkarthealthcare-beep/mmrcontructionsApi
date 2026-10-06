@@ -135,7 +135,7 @@ const apiLimiter = rateLimit({
   standardHeaders: "draft-7",
   legacyHeaders: false,
   message: rateLimitResponse,
-  skip: (req) => Boolean(req.headers.authorization),
+  skip: (req) => Boolean(req.headers.authorization) || (req.originalUrl && req.originalUrl.includes('/admin/')),
 });
 const authLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
@@ -161,7 +161,6 @@ const uploadLimiter = rateLimit({
 
 app.use("/api", apiLimiter);
 app.use("/api/auth", authLimiter);
-app.use("/api/admin/auth", authLimiter);
 app.use(["/api/book-plot/leads", "/api/inquiries"], publicFormLimiter);
 app.use(["/api/profile/upload-doc"], uploadLimiter);
 
