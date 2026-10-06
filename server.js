@@ -13840,232 +13840,222 @@ async function timedDashboardQuery(label, queryFactory, fallback) {
 
 app.get("/api/admin/dashboard",
   verifyAdminToken,
-  role("SuperAdmin", "FinanceManager", "SiteManager"),
+  role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"),
   async (req, res) => {
     const startedAt = Date.now();
     console.log("[Dashboard API Start] /api/admin/dashboard");
     try {
-      await ensureInquirySchema();
-      const [
-        statsResult,
-        sitesResult,
-        recentBookingsResult,
-        monthlySalesResult,
-        recentTeamMembersResult,
-        recentCustomersResult,
-        recentAssociatesResult,
-        recentInvestorsResult,
-        networkPreviewResult
-      ] = await Promise.all([
-        timedDashboardQuery(
-          "/api/admin/dashboard stats",
-          () => sql`
-            SELECT
-              COALESCE((SELECT COUNT(*) FROM users WHERE user_type = 'Customer' AND account_status = 'Active'), 0)::int AS total_customers,
-              COALESCE((SELECT COUNT(*) FROM users WHERE user_type = 'Associate' AND account_status = 'Active'), 0)::int AS total_associates,
-              COALESCE((SELECT COUNT(*) FROM team_members), 0)::int AS total_team_members,
-              COALESCE((SELECT COUNT(*) FROM team_members WHERE LOWER(status) = 'active'), 0)::int AS team_members_active,
-              COALESCE((SELECT COUNT(*) FROM team_members WHERE LOWER(status) = 'pending'), 0)::int AS team_members_pending,
-              COALESCE((SELECT COUNT(*) FROM team_members WHERE LOWER(status) IN ('inactive', 'suspended', 'rejected')), 0)::int AS team_members_inactive,
-              COALESCE((SELECT COUNT(*) FROM team_members WHERE date_trunc('day', created_at) = date_trunc('day', CURRENT_DATE)), 0)::int AS team_members_today,
-              COALESCE(
-                (SELECT COUNT(*) FROM investor_enrollments),
-                (SELECT COUNT(*) FROM users WHERE user_type = 'Investor'),
-                0
-              )::int AS total_investors,
-              COALESCE((SELECT COUNT(*) FROM bookings WHERE booking_status <> 'Cancelled'), 0)::int AS total_bookings,
-              COALESCE((SELECT COUNT(DISTINCT plot_id) FROM bookings WHERE booking_status = 'Confirmed'), 0)::int AS total_plots_sold,
-              COALESCE((SELECT COUNT(DISTINCT plot_id) FROM bookings WHERE booking_status IN ('Confirmed', 'PaymentPending', 'InProcess')), 0)::int AS booked_plots,
-              COALESCE((
-                SELECT COUNT(*) FROM plots 
-                WHERE is_active = TRUE 
-                  AND (booking_id IS NULL OR plot_id NOT IN (
-                    SELECT plot_id FROM bookings WHERE booking_status IN ('Confirmed', 'PaymentPending', 'InProcess')
-                  ))
-              ), 0)::int AS available_plots,
-              COALESCE((
-                SELECT SUM(COALESCE(total_due, emi_amount, 0))
-                FROM emi_schedules
-                WHERE emi_status IN ('Pending', 'Overdue', 'ProofSubmitted')
-                  AND date_trunc('month', due_date) = date_trunc('month', CURRENT_DATE)
-              ), 0)::numeric AS monthly_emi_due,
-              COALESCE((
-                SELECT COUNT(*) FROM users
-                WHERE account_status IN ('Pending', 'InfoRequested', 'InfoSubmitted')
-              ), 0)::int AS pending_approvals,
-              COALESCE((
-                SELECT COUNT(*) FROM inquiries
-                WHERE status IN ('New', 'Contacted', 'FollowUp')
-              ), 0)::int AS open_enquiries,
-              COALESCE((
-                SELECT SUM(net_amount) FROM commission_transactions
-                WHERE commission_status = 'Pending'
-              ), 0)::numeric AS commission_due,
-              (
-                COALESCE((SELECT SUM(advance_amount) FROM bookings WHERE booking_status <> 'Cancelled'), 0)
-                + COALESCE((SELECT SUM(paid_amount) FROM emi_schedules WHERE emi_status = 'Paid'), 0)
-              )::numeric AS total_revenue`,
-          [{}]
-        ),
-        timedDashboardQuery(
-          "/api/admin/dashboard sites",
-          () => sql`
-            SELECT
-              s.site_id,
-              s.site_name,
-              COUNT(DISTINCT p.plot_id)::int AS total_plots,
-              COUNT(DISTINCT p.plot_id) FILTER (
-                WHERE b.booking_status IN ('Confirmed', 'PaymentPending', 'InProcess')
-              )::int AS booked,
-              COUNT(DISTINCT p.plot_id) FILTER (
-                WHERE b.booking_status = 'Confirmed'
-              )::int AS sold,
-              COUNT(DISTINCT p.plot_id) FILTER (
-                WHERE b.booking_id IS NULL OR b.booking_status = 'Cancelled'
-              )::int AS vacant
-            FROM sites s
-            LEFT JOIN plots p ON p.site_id = s.site_id AND p.is_active = TRUE
-            LEFT JOIN bookings b ON b.plot_id = p.plot_id
-            WHERE s.is_active = TRUE
-            GROUP BY s.site_id, s.site_name
-            ORDER BY s.site_name
-            LIMIT 25`,
-          []
-        ),
-        timedDashboardQuery(
-          "/api/admin/dashboard recent-bookings",
-          () => sql`
-            SELECT b.booking_id, b.booking_serial, b.booking_status, b.booking_date,
-                   u.full_name, u.user_id, p.plot_number, s.site_name
-            FROM bookings b
-            JOIN users u ON b.user_id = u.user_id
-            JOIN plots p ON b.plot_id = p.plot_id
-            JOIN sites s ON p.site_id = s.site_id
-            ORDER BY b.created_at DESC LIMIT 6`,
-          []
-        ),
-        timedDashboardQuery(
-          "/api/admin/dashboard monthly-sales",
-          () => sql`
-            WITH months AS (
-              SELECT generate_series(
-                date_trunc('month', CURRENT_DATE) - INTERVAL '11 months',
-                date_trunc('month', CURRENT_DATE),
-                INTERVAL '1 month'
-              ) AS month_start
-            ),
-            sales AS (
-              SELECT
-                date_trunc('month', COALESCE(b.confirmed_at, b.booking_date, b.created_at)) AS month_start,
-                COUNT(DISTINCT b.booking_id)::int AS sales_count,
-                COALESCE(SUM(COALESCE(p.base_price, b.advance_amount, 0)), 0)::numeric AS total_sales
-              FROM bookings b
-              JOIN plots p ON p.plot_id = b.plot_id
-              WHERE b.booking_status = 'Confirmed'
-                AND COALESCE(b.confirmed_at, b.booking_date, b.created_at)
-                    >= date_trunc('month', CURRENT_DATE) - INTERVAL '11 months'
-              GROUP BY 1
-            )
-            SELECT
-              to_char(m.month_start, 'Mon YYYY') AS month,
-              COALESCE(s.sales_count, 0)::int AS sales_count,
-              COALESCE(s.total_sales, 0)::numeric AS total_sales
-            FROM months m
-            LEFT JOIN sales s ON s.month_start = m.month_start
-            ORDER BY m.month_start`,
-          []
-        ),
-        timedDashboardQuery(
-          "/api/admin/dashboard recent-team-members",
-          () => sql`
-            SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id, tm.slot_number,
-                   tm.full_name, tm.mobile_no, tm.email_id, tm.status, tm.created_at,
-                   COALESCE(assoc.full_name, tm.associate_name, 'Direct') AS associate_name,
-                   assoc.member_id AS associate_member_id
+      await ensureInquirySchema().catch(() => {});
+      await requireMlmSchema().catch(() => {});
+
+      // 1. Stats with bulletproof safe queries
+      let rawStats = {};
+      try {
+        const statsRows = await sql`
+          SELECT
+            COALESCE((SELECT COUNT(*) FROM users WHERE LOWER(user_type::text) = 'customer'), 0)::int AS total_customers,
+            COALESCE((SELECT COUNT(*) FROM users WHERE LOWER(user_type::text) = 'associate'), 0)::int AS total_associates,
+            COALESCE((SELECT COUNT(*) FROM team_members), (SELECT COUNT(*) FROM users WHERE LOWER(user_type::text) = 'teammember'), 0)::int AS total_team_members,
+            COALESCE((SELECT COUNT(*) FROM team_members WHERE LOWER(status) = 'active'), 0)::int AS team_members_active,
+            COALESCE((SELECT COUNT(*) FROM team_members WHERE LOWER(status) = 'pending'), 0)::int AS team_members_pending,
+            COALESCE((SELECT COUNT(*) FROM team_members WHERE LOWER(status) IN ('inactive', 'suspended', 'rejected')), 0)::int AS team_members_inactive,
+            COALESCE((SELECT COUNT(*) FROM team_members WHERE date_trunc('day', created_at) = date_trunc('day', CURRENT_DATE)), 0)::int AS team_members_today,
+            COALESCE(
+              (SELECT COUNT(*) FROM investor_enrollments),
+              (SELECT COUNT(*) FROM investor_users WHERE deleted_at IS NULL),
+              (SELECT COUNT(*) FROM users WHERE LOWER(user_type::text) = 'investor'),
+              0
+            )::int AS total_investors,
+            COALESCE((SELECT COUNT(*) FROM bookings WHERE booking_status::text <> 'Cancelled'), 0)::int AS total_bookings,
+            COALESCE((SELECT COUNT(*) FROM plots WHERE plot_status IN ('Sold', 'Booked')), (SELECT COUNT(DISTINCT plot_id) FROM bookings WHERE booking_status::text = 'Confirmed'), 0)::int AS total_plots_sold,
+            COALESCE((SELECT COUNT(*) FROM plots WHERE plot_status IN ('Booked', 'Sold', 'InProcess')), 0)::int AS booked_plots,
+            COALESCE((SELECT COUNT(*) FROM plots WHERE plot_status = 'Vacant'), 0)::int AS available_plots,
+            COALESCE((
+              SELECT SUM(COALESCE(total_due, emi_amount, 0))
+              FROM emi_schedules
+              WHERE emi_status::text IN ('Pending', 'Overdue', 'ProofSubmitted')
+                AND date_trunc('month', due_date) = date_trunc('month', CURRENT_DATE)
+            ), 0)::numeric AS monthly_emi_due,
+            COALESCE((
+              SELECT COUNT(*) FROM users
+              WHERE account_status::text IN ('Pending', 'InfoRequested', 'InfoSubmitted')
+            ), 0)::int AS pending_approvals,
+            COALESCE((
+              SELECT COUNT(*) FROM inquiries
+              WHERE status::text IN ('New', 'Contacted', 'FollowUp')
+            ), 0)::int AS open_enquiries,
+            COALESCE((
+              SELECT SUM(net_amount) FROM commission_transactions
+              WHERE commission_status::text = 'Pending'
+            ), 0)::numeric AS commission_due,
+            (
+              COALESCE((SELECT SUM(advance_amount) FROM bookings WHERE booking_status::text <> 'Cancelled'), 0)
+              + COALESCE((SELECT SUM(paid_amount) FROM emi_schedules WHERE emi_status::text = 'Paid'), 0)
+            )::numeric AS total_revenue`;
+        rawStats = statsRows[0] || {};
+      } catch (errStats) {
+        console.error("[Dashboard Stats Subquery Error]", errStats.message);
+      }
+
+      // 2. Sites with safe aggregation
+      let sitesList = [];
+      try {
+        sitesList = await sql`
+          SELECT
+            s.site_id,
+            s.site_name,
+            COUNT(p.plot_id)::int AS total_plots,
+            COUNT(p.plot_id) FILTER (WHERE p.plot_status IN ('Booked', 'InProcess'))::int AS booked,
+            COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Sold')::int AS sold,
+            COUNT(p.plot_id) FILTER (WHERE p.plot_status = 'Vacant' OR p.plot_id IS NULL)::int AS vacant
+          FROM sites s
+          LEFT JOIN plots p ON p.site_id = s.site_id
+          GROUP BY s.site_id, s.site_name
+          ORDER BY s.site_id
+          LIMIT 25`;
+      } catch (errSites) {
+        console.error("[Dashboard Sites Subquery Error]", errSites.message);
+      }
+
+      // 3. Recent Bookings with safe LEFT JOINs
+      let recentBookingsList = [];
+      try {
+        recentBookingsList = await sql`
+          SELECT b.booking_id,
+                 COALESCE(b.booking_serial, CONCAT('MMR-', b.booking_id)) AS booking_serial,
+                 COALESCE(b.booking_status::text, 'Confirmed') AS booking_status,
+                 COALESCE(b.booking_date, b.created_at) AS booking_date,
+                 COALESCE(u.full_name, 'Customer') AS full_name,
+                 u.user_id,
+                 COALESCE(b.plot_number, p.plot_number, '—') AS plot_number,
+                 COALESCE(s.site_name, 'Main Site') AS site_name
+          FROM bookings b
+          LEFT JOIN users u ON u.user_id = b.user_id
+          LEFT JOIN plots p ON p.plot_id = b.plot_id
+          LEFT JOIN sites s ON s.site_id = COALESCE(b.site_id, p.site_id)
+          ORDER BY b.created_at DESC
+          LIMIT 6`;
+      } catch (errBookings) {
+        console.error("[Dashboard Recent Bookings Subquery Error]", errBookings.message);
+      }
+
+      // 4. Recent Team Members with safe queries
+      let recentTeamMembersList = [];
+      try {
+        recentTeamMembersList = await sql`
+          SELECT tm.id,
+                 COALESCE(tm.team_member_uid, CONCAT('TM-', tm.id)) AS team_member_uid,
+                 tm.user_id, tm.associate_id, tm.slot_number,
+                 tm.full_name, tm.mobile_no, tm.email_id,
+                 COALESCE(tm.status, 'Active') AS status,
+                 tm.created_at,
+                 COALESCE(assoc.full_name, tm.associate_name, 'Direct') AS associate_name,
+                 assoc.member_id AS associate_member_id
+          FROM team_members tm
+          LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
+          ORDER BY tm.created_at DESC
+          LIMIT 6`;
+      } catch (errTM) {
+        console.error("[Dashboard Team Members Subquery Error]", errTM.message);
+      }
+
+      // 5. Recent Customers
+      let recentCustomersList = [];
+      try {
+        recentCustomersList = await sql`
+          SELECT u.user_id, u.member_id, u.full_name, u.mobile_no, u.email,
+                 COALESCE(u.account_status::text, 'Active') AS account_status,
+                 u.registered_at AS created_at, u.city, u.state
+          FROM users u
+          WHERE LOWER(u.user_type::text) = 'customer'
+          ORDER BY u.registered_at DESC
+          LIMIT 6`;
+      } catch (errCust) {
+        console.error("[Dashboard Customers Subquery Error]", errCust.message);
+      }
+
+      // 6. Recent Associates
+      let recentAssociatesList = [];
+      try {
+        recentAssociatesList = await sql`
+          SELECT u.user_id, u.member_id, u.full_name, u.mobile_no, u.email,
+                 COALESCE(u.account_status::text, 'Active') AS account_status,
+                 u.registered_at AS created_at, u.city, u.state,
+                 COALESCE(r.rank_name, 'Associate') AS rank,
+                 COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold
+          FROM users u
+          LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
+          LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
+          WHERE LOWER(u.user_type::text) = 'associate'
+          ORDER BY u.registered_at DESC
+          LIMIT 6`;
+      } catch (errAssoc) {
+        console.error("[Dashboard Associates Subquery Error]", errAssoc.message);
+      }
+
+      // 7. Recent Investors
+      let recentInvestorsList = [];
+      try {
+        recentInvestorsList = await sql`
+          SELECT ie.id,
+                 COALESCE(ie.investor_enrollment_id, CONCAT('INV-', ie.id)) AS investor_enrollment_id,
+                 ie.investor_id,
+                 COALESCE(NULLIF(TRIM(CONCAT(ie.inv_first_name, ' ', COALESCE(ie.inv_surname, ''))), ''), ie.full_name, u.full_name, 'Investor') AS full_name,
+                 COALESCE(ie.mobile, ie.mobile_no, u.mobile_no, '—') AS mobile_no,
+                 COALESCE(ie.amount, 0)::numeric AS amount,
+                 COALESCE(ie.enrollment_status, u.account_status::text, 'Active') AS status,
+                 COALESCE(ie.project_name, 'Main Fund') AS project_name,
+                 COALESCE(ie.created_at, u.registered_at) AS created_at
+          FROM investor_enrollments ie
+          LEFT JOIN users u ON u.user_id = ie.investor_id
+          ORDER BY ie.created_at DESC
+          LIMIT 6`;
+      } catch (errInv) {
+        console.error("[Dashboard Investors Subquery Error]", errInv.message);
+      }
+
+      // 8. Network Hierarchy Preview
+      let networkPreviewList = [];
+      try {
+        const associates = await sql`
+          SELECT u.user_id, u.member_id, u.full_name, u.account_status::text AS account_status, u.mobile_no,
+                 COALESCE(r.rank_name, 'Associate') AS rank,
+                 COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
+                 (SELECT COUNT(*)::int FROM team_members tm WHERE tm.associate_id = u.user_id) AS team_count,
+                 (SELECT COUNT(*)::int FROM users d WHERE d.sponsor_user_id = u.user_id AND LOWER(d.user_type::text) = 'associate') AS direct_associates_count
+          FROM users u
+          LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
+          LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
+          WHERE LOWER(u.user_type::text) = 'associate'
+          ORDER BY u.registered_at ASC
+          LIMIT 6`;
+
+        const associateIds = associates.map(a => a.user_id).filter(Boolean);
+        let teamMembers = [];
+        if (associateIds.length > 0) {
+          teamMembers = await sql`
+            SELECT tm.id,
+                   COALESCE(tm.team_member_uid, CONCAT('TM-', tm.id)) AS team_member_uid,
+                   tm.user_id, tm.associate_id,
+                   tm.slot_number, tm.full_name, tm.mobile_no,
+                   COALESCE(tm.status, 'Active') AS status,
+                   tm.created_at
             FROM team_members tm
-            LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
-            ORDER BY tm.created_at DESC LIMIT 6`,
-          []
-        ),
-        timedDashboardQuery(
-          "/api/admin/dashboard recent-customers",
-          () => sql`
-            SELECT u.user_id, u.member_id, u.full_name, u.mobile_no, u.email,
-                   u.account_status, u.created_at, u.city, u.state
-            FROM users u
-            WHERE u.user_type = 'Customer'
-            ORDER BY u.created_at DESC LIMIT 6`,
-          []
-        ),
-        timedDashboardQuery(
-          "/api/admin/dashboard recent-associates",
-          () => sql`
-            SELECT u.user_id, u.member_id, u.full_name, u.mobile_no, u.email,
-                   u.account_status, u.created_at, u.city, u.state,
-                   COALESCE(r.rank_name, 'Associate') AS rank,
-                   COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold
-            FROM users u
-            LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
-            LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
-            WHERE u.user_type = 'Associate'
-            ORDER BY u.created_at DESC LIMIT 6`,
-          []
-        ),
-        timedDashboardQuery(
-          "/api/admin/dashboard recent-investors",
-          () => sql`
-            SELECT ie.id, ie.investor_enrollment_id, ie.investor_id,
-                   COALESCE(NULLIF(TRIM(CONCAT(ie.inv_first_name, ' ', COALESCE(ie.inv_surname, ''))), ''), ie.full_name, u.full_name, 'Investor') AS full_name,
-                   COALESCE(ie.mobile, ie.mobile_no, u.mobile_no) AS mobile_no,
-                   COALESCE(ie.amount, 0)::numeric AS amount,
-                   COALESCE(ie.enrollment_status, u.account_status, 'Active') AS status,
-                   COALESCE(ie.project_name, 'Main Fund') AS project_name,
-                   COALESCE(ie.created_at, u.created_at) AS created_at
-            FROM investor_enrollments ie
-            LEFT JOIN users u ON u.user_id = ie.investor_id
-            ORDER BY ie.created_at DESC LIMIT 6`,
-          []
-        ),
-        timedDashboardQuery(
-          "/api/admin/dashboard network-preview",
-          async () => {
-            const associates = await sql`
-              SELECT u.user_id, u.member_id, u.full_name, u.account_status, u.mobile_no,
-                     COALESCE(r.rank_name, 'Associate') AS rank,
-                     COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
-                     (SELECT COUNT(*)::int FROM team_members tm WHERE tm.associate_id = u.user_id) AS team_count,
-                     (SELECT COUNT(*)::int FROM users d WHERE d.sponsor_user_id = u.user_id AND d.user_type = 'Associate') AS direct_associates_count
-              FROM users u
-              LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
-              LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
-              WHERE u.user_type = 'Associate'
-              ORDER BY u.created_at ASC
-              LIMIT 6`;
+            WHERE tm.associate_id IN ${sql(associateIds)}
+            ORDER BY tm.slot_number ASC, tm.created_at ASC`;
+        }
 
-            const associateIds = associates.map(a => a.user_id).filter(Boolean);
-            let teamMembers = [];
-            if (associateIds.length > 0) {
-              teamMembers = await sql`
-                SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id,
-                       tm.slot_number, tm.full_name, tm.mobile_no, tm.status, tm.created_at
-                FROM team_members tm
-                WHERE tm.associate_id IN ${sql(associateIds)}
-                ORDER BY tm.slot_number ASC, tm.created_at ASC`;
-            }
+        networkPreviewList = associates.map(assoc => {
+          const members = teamMembers.filter(m => m.associate_id === assoc.user_id);
+          return {
+            ...assoc,
+            team_members: members
+          };
+        });
+      } catch (errNet) {
+        console.error("[Dashboard Network Preview Subquery Error]", errNet.message);
+      }
 
-            return associates.map(assoc => {
-              const members = teamMembers.filter(m => m.associate_id === assoc.user_id);
-              return {
-                ...assoc,
-                team_members: members
-              };
-            });
-          },
-          []
-        )
-      ]);
-
-      const rawStats = Array.isArray(statsResult.data) ? (statsResult.data[0] || {}) : (statsResult.data || {});
       const stats = {
         total_customers: Number(rawStats.total_customers || 0),
         total_associates: Number(rawStats.total_associates || 0),
@@ -14092,15 +14082,14 @@ app.get("/api/admin/dashboard",
         plotsSold: stats.total_plots_sold,
         monthlyEmiDue: stats.monthly_emi_due,
         pendingApprovals: stats.pending_approvals,
-        monthlySalesChartData: Array.isArray(monthlySalesResult.data) ? monthlySalesResult.data : [],
         stats,
-        sites: Array.isArray(sitesResult.data) ? sitesResult.data : [],
-        recent_bookings: Array.isArray(recentBookingsResult.data) ? recentBookingsResult.data : [],
-        recent_team_members: Array.isArray(recentTeamMembersResult.data) ? recentTeamMembersResult.data : [],
-        recent_customers: Array.isArray(recentCustomersResult.data) ? recentCustomersResult.data : [],
-        recent_associates: Array.isArray(recentAssociatesResult.data) ? recentAssociatesResult.data : [],
-        recent_investors: Array.isArray(recentInvestorsResult.data) ? recentInvestorsResult.data : [],
-        network_preview: Array.isArray(networkPreviewResult.data) ? networkPreviewResult.data : [],
+        sites: sitesList,
+        recent_bookings: recentBookingsList,
+        recent_team_members: recentTeamMembersList,
+        recent_customers: recentCustomersList,
+        recent_associates: recentAssociatesList,
+        recent_investors: recentInvestorsList,
+        network_preview: networkPreviewList,
       };
 
       const size = Buffer.byteLength(JSON.stringify(responseData));
@@ -14114,7 +14103,6 @@ app.get("/api/admin/dashboard",
         plotsSold: 0,
         monthlyEmiDue: 0,
         pendingApprovals: 0,
-        monthlySalesChartData: [],
         stats: {
           total_customers: 0,
           total_associates: 0,
