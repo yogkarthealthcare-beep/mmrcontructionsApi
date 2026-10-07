@@ -42,7 +42,10 @@ router.post(
   userAuth,
   upload.fields([
     { name: "applicantPhoto", maxCount: 1 },
-    { name: "nomineePhoto", maxCount: 1 }
+    { name: "nomineePhoto", maxCount: 1 },
+    { name: "applicantSignature", maxCount: 1 },
+    { name: "signature", maxCount: 1 },
+    { name: "sponsorSignature", maxCount: 1 }
   ]),
   createAssociateEnrollment
 );

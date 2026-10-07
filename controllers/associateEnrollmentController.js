@@ -10,9 +10,11 @@ export async function createAssociateEnrollment(req, res) {
         const files = req.files;
         // 1. Validate the form body using Zod schema
         const validatedData = associateEnrollmentSchema.parse(req.body);
-        // 2. Upload photos via saveFileToVPS if provided
+        // 2. Upload photos and signatures via saveFileToVPS if provided
         let applicantPhotoUrl = null;
         let nomineePhotoUrl = null;
+        let applicantSignatureUrl = null;
+        let sponsorSignatureUrl = null;
         const applicantFile = files?.["applicantPhoto"]?.[0];
         if (applicantFile) {
             const uploadResult = await saveFileToVPS(applicantFile.buffer, {
@@ -33,8 +35,28 @@ export async function createAssociateEnrollment(req, res) {
             });
             nomineePhotoUrl = uploadResult.url;
         }
+        const applicantSignFile = files?.["applicantSignature"]?.[0] || files?.["signature"]?.[0];
+        if (applicantSignFile) {
+            const uploadResult = await saveFileToVPS(applicantSignFile.buffer, {
+                originalName: applicantSignFile.originalname,
+                module: "associate",
+                entityId: (userId || "guest").toString(),
+                subCategory: "signatures"
+            });
+            applicantSignatureUrl = uploadResult.url;
+        }
+        const sponsorSignFile = files?.["sponsorSignature"]?.[0];
+        if (sponsorSignFile) {
+            const uploadResult = await saveFileToVPS(sponsorSignFile.buffer, {
+                originalName: sponsorSignFile.originalname,
+                module: "associate",
+                entityId: (userId || "guest").toString(),
+                subCategory: "signatures"
+            });
+            sponsorSignatureUrl = uploadResult.url;
+        }
         // 3. Register associate via the service layer
-        const result = await registerAssociateEnrollment(validatedData, applicantPhotoUrl, nomineePhotoUrl, userId);
+        const result = await registerAssociateEnrollment(validatedData, applicantPhotoUrl, nomineePhotoUrl, userId, applicantSignatureUrl, sponsorSignatureUrl);
         return res.status(200).json({
             success: true,
             message: "Associate enrollment submitted successfully.",
@@ -157,7 +179,7 @@ export async function getMyAssociateEnrollment(req, res) {
              n.nominee_name, n.dob AS nominee_dob, n.gender AS nominee_gender, n.nationality AS nominee_nationality, n.residential_status AS nominee_res_status,
              n.relationship AS nominee_relationship, n.pan_name AS nominee_pan_name, n.pan_no AS nominee_pan_no, n.aadhar_name AS nominee_aadhar_name,
              n.aadhar_no AS nominee_aadhar_no, n.address AS nominee_address, n.photo_path AS nominee_photo_url,
-             sp.sponsor_name, sp.sponsor_code, sp.sponsor_contact
+              sp.sponsor_name, sp.sponsor_code, sp.sponsor_contact, sp.signature_path AS sponsor_signature_path
       FROM associate_enrollment e
       LEFT JOIN associate_address pa      ON e.id = pa.associate_id AND pa.address_type = 'permanent'
       LEFT JOIN associate_address la      ON e.id = la.associate_id AND la.address_type = 'local'
@@ -200,6 +222,8 @@ export async function getMyAssociateEnrollment(req, res) {
                 category: enrollment.category,
                 religion: enrollment.religion,
                 applicant_photo_url: enrollment.applicant_photo_path,
+                signature_url: enrollment.signature_path,
+                applicant_signature_url: enrollment.signature_path,
                 sign_date: enrollment.sign_date,
                 status: enrollment.status,
                 print_pdf_path: enrollment.print_pdf_path,
@@ -236,7 +260,8 @@ export async function getMyAssociateEnrollment(req, res) {
                 nominee_photo_url: enrollment.nominee_photo_url,
                 sponsor_name: enrollment.sponsor_name,
                 sponsor_code: enrollment.sponsor_code,
-                sponsor_contact: enrollment.sponsor_contact
+                sponsor_contact: enrollment.sponsor_contact,
+                sponsor_signature_url: enrollment.sponsor_signature_path
             }
         });
     }
@@ -277,19 +302,7 @@ export async function getAdminAssociateEnrollments(req, res) {
           COALESCE(e.created_at, u.registered_at) AS created_at,
           e.sign_date,
           COALESCE(e.status, 'Pending') AS app_status,
-          COALESCE(
-            CASE 
-              WHEN LOWER(COALESCE(e.status, '')) IN ('approved', 'completed') THEN 'Completed'
-              WHEN LOWER(COALESCE(e.status, '')) IN ('rejected') THEN 'Rejected'
-              WHEN LOWER(COALESCE(e.status, '')) IN ('pending', 'under_review', 'submitted') THEN 'Pending'
-              ELSE NULL
-            END,
-            CASE 
-              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
-              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
-              ELSE 'Pending'
-            END
-          ) AS enrollment_status
+          CASE WHEN e.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END AS enrollment_status
         FROM users u
         LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
         LEFT JOIN associate_enrollment e ON (
@@ -341,19 +354,7 @@ export async function getAdminAssociateEnrollments(req, res) {
           COALESCE(e.created_at, u.registered_at) AS created_at,
           e.sign_date,
           COALESCE(e.status, 'Pending') AS app_status,
-          COALESCE(
-            CASE 
-              WHEN LOWER(COALESCE(e.status, '')) IN ('approved', 'completed') THEN 'Completed'
-              WHEN LOWER(COALESCE(e.status, '')) IN ('rejected') THEN 'Rejected'
-              WHEN LOWER(COALESCE(e.status, '')) IN ('pending', 'under_review', 'submitted') THEN 'Pending'
-              ELSE NULL
-            END,
-            CASE 
-              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
-              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
-              ELSE 'Pending'
-            END
-          ) AS enrollment_status
+          CASE WHEN e.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END AS enrollment_status
         FROM users u
         LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
         LEFT JOIN associate_enrollment e ON (
@@ -394,7 +395,7 @@ export async function getAdminAssociateEnrollmentById(req, res) {
              n.nominee_name, n.dob AS nominee_dob, n.gender AS nominee_gender, n.nationality AS nominee_nationality, n.residential_status AS nominee_res_status,
              n.relationship AS nominee_relationship, n.pan_name AS nominee_pan_name, n.pan_no AS nominee_pan_no, n.aadhar_name AS nominee_aadhar_name,
              n.aadhar_no AS nominee_aadhar_no, n.address AS nominee_address, n.photo_path AS nominee_photo_url,
-             sp.sponsor_name, sp.sponsor_code, sp.sponsor_contact
+             sp.sponsor_name, sp.sponsor_code, sp.sponsor_contact, sp.signature_path AS sponsor_signature_path
       FROM associate_enrollment e
       LEFT JOIN associate_address pa      ON e.id = pa.associate_id AND pa.address_type = 'permanent'
       LEFT JOIN associate_address la      ON e.id = la.associate_id AND la.address_type = 'local'
@@ -475,6 +476,8 @@ export async function getAdminAssociateEnrollmentById(req, res) {
                 category: enrollment.category,
                 religion: enrollment.religion,
                 applicant_photo_url: enrollment.applicant_photo_path,
+                signature_url: enrollment.signature_path,
+                applicant_signature_url: enrollment.signature_path,
                 sign_date: enrollment.sign_date,
                 status: enrollment.status,
                 enrollment_status: 'Completed',
@@ -512,7 +515,8 @@ export async function getAdminAssociateEnrollmentById(req, res) {
                 nominee_photo_url: enrollment.nominee_photo_url,
                 sponsor_name: enrollment.sponsor_name,
                 sponsor_code: enrollment.sponsor_code,
-                sponsor_contact: enrollment.sponsor_contact
+                sponsor_contact: enrollment.sponsor_contact,
+                sponsor_signature_url: enrollment.sponsor_signature_path
             }
         });
     }

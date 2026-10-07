@@ -22,7 +22,10 @@ router.get("/associate-enrollment/me", userAuth, getMyAssociateEnrollment);
 // Authenticated route, handles multipart form uploads
 router.post("/associate-enrollment", userAuth, upload.fields([
     { name: "applicantPhoto", maxCount: 1 },
-    { name: "nomineePhoto", maxCount: 1 }
+    { name: "nomineePhoto", maxCount: 1 },
+    { name: "applicantSignature", maxCount: 1 },
+    { name: "signature", maxCount: 1 },
+    { name: "sponsorSignature", maxCount: 1 }
 ]), createAssociateEnrollment);
 // GET /api/associate-enrollment/:id/print
 router.get("/associate-enrollment/:id/print", userAuth, printAssociateEnrollment);

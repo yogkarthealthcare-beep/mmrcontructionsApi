@@ -162,11 +162,23 @@ interface ServiceResult {
 /**
  * Register or update an associate enrollment and related details in a single database transaction.
  */
+// Auto-ensure signature columns exist
+(async () => {
+  try {
+    await sql`ALTER TABLE associate_enrollment ADD COLUMN IF NOT EXISTS signature_path text`;
+    await sql`ALTER TABLE associate_sponsor ADD COLUMN IF NOT EXISTS signature_path text`;
+  } catch (e) {
+    // silently catch if table not yet initialized
+  }
+})();
+
 export async function registerAssociateEnrollment(
   data: AssociateEnrollmentInput,
   applicantPhotoPath: string | null,
   nomineePhotoPath: string | null,
-  userId: any = null
+  userId: any = null,
+  applicantSignaturePath: string | null = null,
+  sponsorSignaturePath: string | null = null
 ): Promise<ServiceResult> {
   const year = new Date().getFullYear();
   let generatedId = "";
@@ -189,7 +201,7 @@ export async function registerAssociateEnrollment(
 
     // 1. Check if an enrollment record already exists
     const [existing] = await tx`
-      SELECT id, applicant_photo_path 
+      SELECT id, applicant_photo_path, signature_path 
       FROM associate_enrollment 
       WHERE UPPER(pan_no) = ${panStr}
          OR aadhar_no = ${aadharStr}
@@ -207,6 +219,7 @@ export async function registerAssociateEnrollment(
     if (existing) {
       generatedId = existing.id;
       const finalApplicantPhoto = applicantPhotoPath || existing.applicant_photo_path || null;
+      const finalApplicantSign = applicantSignaturePath || existing.signature_path || null;
 
       // Update master record
       await tx`
@@ -231,6 +244,7 @@ export async function registerAssociateEnrollment(
           religion = ${data.religion || null},
           is_final_submitted = COALESCE(${data.isFinalSubmitted !== undefined ? Boolean(data.isFinalSubmitted) : (data.is_final_submitted !== undefined ? Boolean(data.is_final_submitted) : null)}, is_final_submitted, FALSE),
           applicant_photo_path = COALESCE(${finalApplicantPhoto}, applicant_photo_path),
+          signature_path = COALESCE(${finalApplicantSign}, signature_path),
           sign_date = ${signDateStr || null},
           terms_accepted = ${Boolean(data.termsAccepted)},
           terms_accepted_at = NOW(),
@@ -261,13 +275,13 @@ export async function registerAssociateEnrollment(
           id, full_name, dob, gender, father_name, mother_name, spouse_name,
           contact_no_1, contact_no_2, nationality, residential_status,
           pan_no, aadhar_no, email, occupation, annual_income, education,
-          category, religion, is_final_submitted, applicant_photo_path, sign_date,
+          category, religion, is_final_submitted, applicant_photo_path, signature_path, sign_date,
           terms_accepted, terms_accepted_at, status
         ) VALUES (
           ${generatedId}, ${data.fullName}, ${dobStr}, ${data.gender}, ${data.fatherName || null}, ${data.motherName || null}, ${data.spouseName || null},
           ${contactStr}, ${data.contact2 || null}, ${data.nationality || 'Indian'}, ${data.residentialStatus || null},
           ${panStr}, ${aadharStr}, ${emailStr}, ${data.occupation || null}, ${data.annualIncome || null}, ${data.education || null},
-          ${data.category || null}, ${data.religion || null}, ${isFinal}, ${applicantPhotoPath || null}, ${signDateStr || null},
+          ${data.category || null}, ${data.religion || null}, ${isFinal}, ${applicantPhotoPath || null}, ${applicantSignaturePath || null}, ${signDateStr || null},
           ${Boolean(data.termsAccepted)}, NOW(), 'pending'
         )
       `;
@@ -326,9 +340,9 @@ export async function registerAssociateEnrollment(
     if (data.sponsorName || data.sponsorCode) {
       await tx`
         INSERT INTO associate_sponsor (
-          associate_id, sponsor_name, sponsor_code, sponsor_contact
+          associate_id, sponsor_name, sponsor_code, sponsor_contact, signature_path
         ) VALUES (
-          ${generatedId}, ${data.sponsorName || null}, ${data.sponsorCode || null}, ${data.sponsorContact || null}
+          ${generatedId}, ${data.sponsorName || null}, ${data.sponsorCode || null}, ${data.sponsorContact || null}, ${sponsorSignaturePath || null}
         )
       `;
     }
