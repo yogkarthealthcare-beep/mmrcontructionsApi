@@ -259,6 +259,14 @@ export async function generateInvestorPdf(id) {
         doc.font("Helvetica").text(`I, ${fullName || "—"}, hereby declare that all the information provided in this Investor Enrollment Form is true, correct, and complete to the best of my knowledge. I confirm that I have carefully read, understood and agreed to the Terms and Conditions of M.M.R. Construction & Developers Private Limited.`, { width: 503, lineGap: 2 });
         y += 55;
         const signRow = y;
+        if (sigFirstBuf && sigFirstBuf.length > 0) {
+            try {
+                doc.image(sigFirstBuf, 50, signRow - 42, { fit: [180, 38], align: "center", valign: "center" });
+            }
+            catch (e) {
+                console.warn("[investorPdfService] Error embedding investor signature:", e);
+            }
+        }
         doc.lineWidth(1).strokeColor("#1e293b").moveTo(40, signRow).lineTo(240, signRow).stroke();
         doc.moveTo(355, signRow).lineTo(555, signRow).stroke();
         doc.fillColor("#0f172a").fontSize(8.5).font("Helvetica-Bold");

@@ -90,7 +90,7 @@ function drawPhotoBox(doc, label, x, y, photoPath) {
         doc.text(`PHOTO\n(${label})`, x, y + 42, { align: "center", width: boxWidth });
     }
 }
-import { resolveImageBuffer, drawPhotoBoxWithBuffer } from "./pdfImageHelper.js";
+import { resolveImageBuffer, drawPhotoBoxWithBuffer, drawSignatureBoxWithBuffer } from "./pdfImageHelper.js";
 export async function generateAssociatePdf(associateId) {
     // 1. Fetch data from DB
     const [associate] = await sql `SELECT * FROM associate_enrollment WHERE id = ${associateId}`;
@@ -106,10 +106,12 @@ export async function generateAssociatePdf(associateId) {
     const signDateStr = associate.sign_date ? new Date(associate.sign_date).toLocaleDateString("en-IN") : "";
     const dobStr = associate.dob ? new Date(associate.dob).toLocaleDateString("en-IN") : "";
     const nomineeDobStr = nominee?.dob ? new Date(nominee.dob).toLocaleDateString("en-IN") : "";
-    // Pre-fetch applicant and nominee photo buffers asynchronously (local disk, VPS storage, remote HTTP URL fallback)
-    const [applicantPhotoBuf, nomineePhotoBuf] = await Promise.all([
+    // Pre-fetch applicant/nominee photos and signature buffers asynchronously (local disk, VPS storage, remote HTTP URL fallback)
+    const [applicantPhotoBuf, nomineePhotoBuf, applicantSignBuf, sponsorSignBuf] = await Promise.all([
         resolveImageBuffer(associate.applicant_photo_path),
-        resolveImageBuffer(nominee?.photo_path)
+        resolveImageBuffer(nominee?.photo_path),
+        resolveImageBuffer(associate.signature_path),
+        resolveImageBuffer(sponsor?.signature_path)
     ]);
     return new Promise((resolve, reject) => {
         const chunks = [];
@@ -235,7 +237,7 @@ export async function generateAssociatePdf(associateId) {
         drawField(doc, "Code No.:", sponsor?.sponsor_code, 40, y, 250, 90);
         drawField(doc, "Contact No.:", sponsor?.sponsor_contact, 300, y, 255, 90);
         y += 24;
-        drawField(doc, "Sponsor's/Introducer's Signature:", "(on file — image attached)", 40, y, 515, 170);
+        drawSignatureBoxWithBuffer(doc, "Sponsor's/Introducer's Signature", 40, y, sponsorSignBuf, 220, 50);
         drawFooter(doc, 3, totalPages);
         // ─────────────────────────────────────────────────────────────────
         // PAGE 4: Terms & Conditions (Part 1)
@@ -354,6 +356,14 @@ export async function generateAssociatePdf(associateId) {
         doc.font("Helvetica").text(`I, ${associate.full_name || "—"}, hereby declare that all the above information is true & correct to my best knowledge and wish to associate with the company as per the above mentioned terms and conditions. I agree with all the above details, terms and conditions and am requested to consider my above details.`, { width: 503, lineGap: 2 });
         // Signature section
         const sigTop = 710;
+        if (applicantSignBuf && applicantSignBuf.length > 0) {
+            try {
+                doc.image(applicantSignBuf, 50, sigTop - 42, { fit: [180, 38], align: "center", valign: "center" });
+            }
+            catch (e) {
+                console.warn("[associatePdfService] Error embedding applicant signature:", e);
+            }
+        }
         doc.lineWidth(1).strokeColor("#1e293b").moveTo(40, sigTop).lineTo(240, sigTop).stroke();
         doc.moveTo(355, sigTop).lineTo(555, sigTop).stroke();
         doc.fillColor("#0f172a").fontSize(8.5).font("Helvetica-Bold");

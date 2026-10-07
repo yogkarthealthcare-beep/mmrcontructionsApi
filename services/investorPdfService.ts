@@ -320,6 +320,13 @@ export async function generateInvestorPdf(id: string): Promise<Buffer> {
 
     y += 55;
     const signRow = y;
+    if (sigFirstBuf && sigFirstBuf.length > 0) {
+      try {
+        doc.image(sigFirstBuf, 50, signRow - 42, { fit: [180, 38], align: "center", valign: "center" });
+      } catch (e) {
+        console.warn("[investorPdfService] Error embedding investor signature:", e);
+      }
+    }
     doc.lineWidth(1).strokeColor("#1e293b").moveTo(40, signRow).lineTo(240, signRow).stroke();
     doc.moveTo(355, signRow).lineTo(555, signRow).stroke();
     

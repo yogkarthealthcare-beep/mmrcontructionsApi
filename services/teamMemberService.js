@@ -4,7 +4,6 @@ import fs from "fs/promises";
 import path from "path";
 import { getStorageRoot, ensureDirExists } from "./fileStorage.service.js";
 import { normalizeHumanName, isValidHumanName, calculateAge } from "../utils/validationHelper.js";
-
 // Ensure table exists on first invocation
 let tableInitialized = false;
 export async function ensureTeamMembersTable() {

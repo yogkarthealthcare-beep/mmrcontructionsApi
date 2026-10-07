@@ -368,6 +368,13 @@ export async function generateCustomerPdf(id: string): Promise<Buffer> {
 
     y += 55;
     const signRow = y;
+    if (sigSoleBuf && sigSoleBuf.length > 0) {
+      try {
+        doc.image(sigSoleBuf, 50, signRow - 42, { fit: [180, 38], align: "center", valign: "center" });
+      } catch (e) {
+        console.warn("[customerPdfService] Error embedding applicant signature:", e);
+      }
+    }
     doc.lineWidth(1).strokeColor("#1e293b").moveTo(40, signRow).lineTo(240, signRow).stroke();
     doc.moveTo(355, signRow).lineTo(555, signRow).stroke();
     

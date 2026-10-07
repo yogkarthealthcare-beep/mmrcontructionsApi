@@ -296,6 +296,14 @@ export async function generateCustomerPdf(id) {
         doc.font("Helvetica").text(`I/We hereby declare that all the particulars and information given by me/us in this application form are true and correct to the best of my/our knowledge. I/We have carefully read, understood and agreed to abide by all the Terms & Conditions of the company mentioned above, and further changes made from time to time.`, { width: 503, lineGap: 2 });
         y += 55;
         const signRow = y;
+        if (sigSoleBuf && sigSoleBuf.length > 0) {
+            try {
+                doc.image(sigSoleBuf, 50, signRow - 42, { fit: [180, 38], align: "center", valign: "center" });
+            }
+            catch (e) {
+                console.warn("[customerPdfService] Error embedding applicant signature:", e);
+            }
+        }
         doc.lineWidth(1).strokeColor("#1e293b").moveTo(40, signRow).lineTo(240, signRow).stroke();
         doc.moveTo(355, signRow).lineTo(555, signRow).stroke();
         doc.fillColor("#0f172a").fontSize(8.5).font("Helvetica-Bold");
