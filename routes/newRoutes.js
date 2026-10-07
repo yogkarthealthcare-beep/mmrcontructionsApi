@@ -61,7 +61,7 @@ router.post('/auth/send-email-otp', async (req, res) => {
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
       return res.status(400).json({ success: false, message: 'Valid email required' });
 
-    if (rateLimit(`otp:${email}`, 5))
+    if (rateLimit(`otp:${email}`, 50))
       return res.status(429).json({ success: false, message: 'Too many requests. 15 minutes baad try karein.' });
 
     // Check if already verified user with this email
@@ -143,7 +143,7 @@ router.post('/auth/resend-email-otp', async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ success: false, message: 'Email required' });
 
-    if (rateLimit(`resend:${email}`, 3))
+    if (rateLimit(`resend:${email}`, 30))
       return res.status(429).json({ success: false, message: 'Bahut zyada requests. Thodi der baad try karein.' });
 
     const otp       = String(Math.floor(100000 + Math.random() * 900000));

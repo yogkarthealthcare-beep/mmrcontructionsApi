@@ -129,32 +129,50 @@ app.use(cors({
 
 
 
+const isRegistrationOrBypassed = (req) => {
+  const url = (req.originalUrl || req.url || req.path || '').toLowerCase();
+  return (
+    url.includes('/register') ||
+    url.includes('/signup') ||
+    url.includes('/verify-sponsor') ||
+    url.includes('/sponsor') ||
+    url.includes('/verify-otp') ||
+    url.includes('/verify-email-otp') ||
+    url.includes('/send-otp') ||
+    url.includes('/send-email-otp') ||
+    url.includes('/resend-otp') ||
+    url.includes('/enrollment') ||
+    url.includes('/enroll')
+  );
+};
+
 const rateLimitResponse = { success: false, message: "Too many requests. Please try again shortly." };
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 5000,
+  limit: 10000,
   standardHeaders: "draft-7",
   legacyHeaders: false,
   message: rateLimitResponse,
-  skip: (req) => Boolean(req.headers.authorization) || (req.originalUrl && req.originalUrl.includes('/admin/')),
+  skip: (req) => Boolean(req.headers.authorization) || (req.originalUrl && req.originalUrl.includes('/admin/')) || isRegistrationOrBypassed(req),
 });
 const authLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  limit: 60,
+  limit: 2000,
   standardHeaders: "draft-7",
   legacyHeaders: false,
   message: rateLimitResponse,
+  skip: (req) => isRegistrationOrBypassed(req),
 });
 const publicFormLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  limit: 100,
+  limit: 500,
   standardHeaders: "draft-7",
   legacyHeaders: false,
   message: rateLimitResponse,
 });
 const uploadLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  limit: 150,
+  limit: 500,
   standardHeaders: "draft-7",
   legacyHeaders: false,
   message: rateLimitResponse,
