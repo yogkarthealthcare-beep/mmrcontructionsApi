@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { ZodError } from "zod";
 import { saveFileToVPS } from "../services/fileStorage.service.js";
 import { associateEnrollmentSchema, registerAssociateEnrollment } from "../services/associateEnrollmentService.js";
+import { deleteAssociateProfile } from "../services/profileCleanupService.js";
 
 /**
  * Controller to handle POST /api/associate-enrollment
@@ -887,17 +888,18 @@ export async function updateAdminAssociateEnrollment(req: Request, res: Response
 export async function deleteAdminAssociateEnrollment(req: Request, res: Response): Promise<Response> {
   try {
     const rawId = String(req.params.id || "").trim();
-    await sql.begin(async (tx: any) => {
-      await tx`DELETE FROM associate_address WHERE associate_id = ${rawId}`;
-      await tx`DELETE FROM associate_bank_details WHERE associate_id = ${rawId}`;
-      await tx`DELETE FROM associate_nominee WHERE associate_id = ${rawId}`;
-      await tx`DELETE FROM associate_sponsor WHERE associate_id = ${rawId}`;
-      await tx`DELETE FROM associate_enrollment WHERE id = ${rawId}`;
-    });
-    return res.status(200).json({ success: true, message: "Associate enrollment deleted successfully." });
+    const actor = {
+      admin_id: (req as any).admin?.admin_id || (req as any).admin?.id || 1,
+      full_name: (req as any).admin?.full_name || (req as any).admin?.username || "Admin"
+    };
+    const result = await deleteAssociateProfile(rawId, actor);
+    return res.status(200).json({ success: true, message: result.message, data: result.data });
   } catch (error: any) {
     console.error("[deleteAdminAssociateEnrollment Error]:", error);
-    return res.status(500).json({ success: false, message: error.message });
+    if (error.message === "Associate not found" || error.statusCode === 404) {
+      return res.status(404).json({ success: false, message: error.message });
+    }
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message || "Failed to delete associate enrollment." });
   }
 }
 

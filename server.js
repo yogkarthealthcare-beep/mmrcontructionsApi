@@ -35,6 +35,7 @@ import unifiedPaymentRoutes from './routes/unified-payment.routes.js';
 import { ensureUnifiedPaymentSchema } from './services/unifiedPaymentSchema.service.js';
 import { runHistoricalPaymentMigration } from './services/unifiedPaymentMigration.service.js';
 import fileStorageService, { saveFileToVPS, deleteFileFromStorage, getStorageRoot } from "./services/fileStorage.service.js";
+import profileCleanupService, { deleteAssociateProfile, deleteCustomerProfile, deleteInvestorProfile } from "./services/profileCleanupService.js";
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
 import { getVersionInfo } from "./services/version.service.js";
@@ -9839,58 +9840,20 @@ app.post("/api/admin/users/:id/change-password",
 
 app.delete("/api/admin/customers/:id",
   verifyAdminToken,
-  role("SuperAdmin"),
+  role("SuperAdmin", "Admin"),
   async (req, res) => {
     try {
-      const uid = req.params.id;
-      await sql.begin(async tx => {
-        const [user] = await tx`SELECT user_id FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'`;
-        if (!user) throw new Error("Customer not found");
-
-        await tx`DELETE FROM customer_enrollment_submissions WHERE user_id = ${uid}`;
-        await tx`DELETE FROM user_addresses WHERE user_id = ${uid}`;
-        await tx`DELETE FROM user_documents WHERE user_id = ${uid}`;
-        await tx`DELETE FROM otp_log WHERE reference_id = ${uid}`;
-        await tx`DELETE FROM wallet_transactions WHERE user_id = ${uid}`;
-        await tx`DELETE FROM referral_registrations WHERE referred_user_id = ${uid}`;
-        
-        const bookings = await tx`SELECT booking_id, plot_id FROM bookings WHERE user_id = ${uid}`;
-        if (bookings.length > 0) {
-          const plotIds = bookings.map(b => b.plot_id).filter(id => id);
-          if (plotIds.length > 0) {
-            await tx`UPDATE plots SET plot_status = 'Available', is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
-          }
-          
-          for (const bk of bookings) {
-             await tx`DELETE FROM invoices WHERE booking_id = ${bk.booking_id}`;
-             await tx`DELETE FROM booking_invoices WHERE booking_id = ${bk.booking_id}`;
-             await tx`DELETE FROM booking_payment_records WHERE booking_id = ${bk.booking_id}`;
-             await tx`DELETE FROM buyback_applications WHERE booking_id = ${bk.booking_id}`;
-             
-             const emiSchedules = await tx`SELECT emi_id FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
-             if (emiSchedules.length > 0) {
-               const emiIds = emiSchedules.map(e => e.emi_id);
-               await tx`DELETE FROM emi_payment_proofs WHERE emi_id IN ${sql(emiIds)}`;
-               await tx`DELETE FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
-             }
-          }
-          
-          await tx`DELETE FROM bookings WHERE user_id = ${uid}`;
-        }
-        await tx`DELETE FROM invoices WHERE user_id = ${uid}`;
-
-        await tx`DELETE FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'`;
-
-        await tx`
-          INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-          VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
-                  'CustomerManagement', 'Deleted', 'users', ${uid})`;
-      });
-
-      return ok(res, {}, "Customer deleted successfully");
+      const actor = {
+        admin_id: req.admin?.admin_id || req.admin?.id || 1,
+        full_name: req.admin?.full_name || req.admin?.username || "Admin"
+      };
+      const result = await deleteCustomerProfile(req.params.id, actor);
+      return ok(res, result.data, result.message);
     } catch (e) {
-      if (e.message === "Customer not found") return err(res, e.message, 404);
-      return err(res, "Failed to delete customer: " + e.message);
+      if (e.message === "Customer not found" || e.statusCode === 404) {
+        return err(res, e.message, 404);
+      }
+      return err(res, "Failed to delete customer: " + e.message, e.statusCode || 500);
     }
   }
 );
@@ -12879,58 +12842,69 @@ app.delete("/api/admin/associates/:id",
   role("SuperAdmin", "Admin"),
   async (req, res) => {
     try {
-      const uid = req.params.id;
-      await sql.begin(async tx => {
-        const [user] = await tx`SELECT email FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'associate'`;
-        if (!user) throw new Error("Associate not found");
-
-        await tx`DELETE FROM associate_sales_tracker WHERE associate_user_id = ${uid}`;
-        await tx`DELETE FROM mlm_network WHERE associate_user_id = ${uid} OR sponsor_user_id = ${uid}`;
-        await tx`DELETE FROM mlm_tree_closure WHERE ancestor_user_id = ${uid} OR descendant_user_id = ${uid}`;
-        await tx`DELETE FROM referral_registrations WHERE sponsor_user_id = ${uid} OR referred_user_id = ${uid}`;
-        await tx`DELETE FROM otp_log WHERE reference_id = ${uid} AND user_type = 'Associate'`;
-        await tx`DELETE FROM user_addresses WHERE user_id = ${uid}`;
-        await tx`DELETE FROM wallet_transactions WHERE user_id = ${uid}`;
-        await tx`DELETE FROM associate_payout_requests WHERE associate_user_id = ${uid}`;
-
-        await tx`DELETE FROM user_documents WHERE user_id = ${uid}`;
-        
-        const bookings = await tx`SELECT booking_id, plot_id FROM bookings WHERE user_id = ${uid}`;
-        if (bookings.length > 0) {
-          const plotIds = bookings.map(b => b.plot_id).filter(id => id);
-          if (plotIds.length > 0) {
-            await tx`UPDATE plots SET plot_status = 'Available', is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
-          }
-          
-          for (const bk of bookings) {
-             await tx`DELETE FROM invoices WHERE booking_id = ${bk.booking_id}`;
-             await tx`DELETE FROM booking_invoices WHERE booking_id = ${bk.booking_id}`;
-             await tx`DELETE FROM booking_payment_records WHERE booking_id = ${bk.booking_id}`;
-             await tx`DELETE FROM buyback_applications WHERE booking_id = ${bk.booking_id}`;
-             
-             const emiSchedules = await tx`SELECT emi_id FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
-             if (emiSchedules.length > 0) {
-               const emiIds = emiSchedules.map(e => e.emi_id);
-               await tx`DELETE FROM emi_payment_proofs WHERE emi_id IN ${sql(emiIds)}`;
-               await tx`DELETE FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
-             }
-          }
-          await tx`DELETE FROM bookings WHERE user_id = ${uid}`;
-        }
-        await tx`DELETE FROM invoices WHERE user_id = ${uid}`;
-
-        await tx`DELETE FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'associate'`;
-
-        await tx`
-          INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-          VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
-                  'AssociateManagement', 'Deleted', 'users', ${uid})`;
-      });
-
-      return ok(res, {}, "Associate deleted successfully");
+      const actor = {
+        admin_id: req.admin?.admin_id || req.admin?.id || 1,
+        full_name: req.admin?.full_name || req.admin?.username || "Admin"
+      };
+      const result = await deleteAssociateProfile(req.params.id, actor);
+      return ok(res, result.data, result.message);
     } catch (e) {
-      if (e.message === "Associate not found") return err(res, e.message, 404);
-      return err(res, "Failed to delete associate: " + e.message);
+      if (e.message === "Associate not found" || e.statusCode === 404) {
+        return err(res, e.message, 404);
+      }
+      return err(res, "Failed to delete associate: " + e.message, e.statusCode || 500);
+    }
+  }
+);
+
+app.post("/api/admin/system/reset-associate-customer-data",
+  verifyAdminToken,
+  role("SuperAdmin"),
+  async (req, res) => {
+    try {
+      const tablesToTruncate = [
+        'associate_address',
+        'associate_bank_details',
+        'associate_nominee',
+        'associate_sponsor',
+        'associate_sales_tracker',
+        'associate_rank_history',
+        'associate_referral_links',
+        'associate_payouts',
+        'customer_nominees',
+        'customer_enrollment_submissions',
+        'user_addresses',
+        'user_bank_details',
+        'user_nominees',
+        'user_kyc_profiles',
+        'user_documents',
+        'user_device_tokens',
+        'wallet_transactions',
+        'wallets',
+        'payout_requests',
+        'kyc_requests',
+        'bank_account_verification',
+        'otp_log',
+        'associate_enrollment',
+        'team_members'
+      ];
+
+      for (const table of tablesToTruncate) {
+        try {
+          await sql.unsafe(`TRUNCATE TABLE ${table} CASCADE`);
+        } catch (e) {
+          console.warn(`[Reset Warning] Truncating ${table}:`, e.message);
+        }
+      }
+
+      await sql`DELETE FROM users WHERE user_id > 1`;
+      await ensureAdminUserAccount();
+      await sql`SELECT setval('users_user_id_seq', (SELECT COALESCE(MAX(user_id), 1) FROM users))`.catch(() => {});
+      await sql`SELECT setval(pg_get_serial_sequence('associate_enrollment', 'id'), 1, false)`.catch(() => {});
+
+      return ok(res, { success: true }, "Associate and Customer data reset successfully. Ready for fresh registrations.");
+    } catch (e) {
+      return err(res, "Failed to reset data: " + e.message, 500);
     }
   }
 );

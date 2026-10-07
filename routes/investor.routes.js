@@ -6,6 +6,7 @@ import multer from "multer";
 import sql from "../db.js";
 import { sendEmail } from "../emailService.js";
 import { saveFileToVPS, deleteFileFromStorage } from "../services/fileStorage.service.js";
+import { deleteInvestorProfile } from "../services/profileCleanupService.js";
 import { generateInvestorPdf } from "../services/investorPdfService.js";
 import { normalizeHumanName, isValidHumanName, calculateAge, isValidState } from "../utils/validationHelper.js";
 
@@ -2233,101 +2234,17 @@ router.put("/admin/investor-users/:id/status", authAdmin, async (req, res) => {
 // DELETE /api/admin/investor-enrollment/:id (Admin - Delete)
 router.delete(["/admin/investor-enrollment/:id", "/admin/investor-enrollments/:id", "/admin/investor-users/:id", "/admin/investors-portal/:id"], authAdmin, async (req, res) => {
   try {
-    const { id: rawId } = req.params;
-    if (!rawId) return err(res, "Invalid ID provided.", 400);
-
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(rawId).trim());
-    let investorId = null;
-    let enrollmentId = isUuid ? rawId : null;
-
-    if (isUuid) {
-      const [enrollment] = await sql`SELECT id, investor_id FROM investor_enrollments WHERE id = ${rawId}`;
-      if (enrollment) {
-        enrollmentId = enrollment.id;
-        investorId = enrollment.investor_id;
-      }
-    } else if (!isNaN(Number(rawId))) {
-      const numId = Number(rawId);
-      // Check if user exists in investor_users
-      const [invUser] = await sql`SELECT id FROM investor_users WHERE id = ${numId}`;
-      if (invUser) {
-        investorId = invUser.id;
-      } else {
-        // Check if there is an enrollment with investor_id = numId
-        const [enrollment] = await sql`SELECT id, investor_id FROM investor_enrollments WHERE investor_id = ${numId} LIMIT 1`;
-        if (enrollment) {
-          enrollmentId = enrollment.id;
-          investorId = enrollment.investor_id || numId;
-        } else {
-          // Check showcase investors table
-          const [inv] = await sql`SELECT id, user_id FROM investors WHERE id = ${numId} OR user_id = ${numId} LIMIT 1`;
-          if (inv) {
-            investorId = inv.user_id || inv.id;
-          } else {
-            investorId = numId;
-          }
-        }
-      }
-    }
-
-    if (!investorId && !enrollmentId) {
-      return err(res, "Investor or enrollment not found.", 404);
-    }
-
-    let profileImageUrl = null;
-    let profileImagePublicId = null;
-
-    await sql.begin(async tx => {
-      if (investorId) {
-        // Find and delete profile image from the investors table if it exists
-        try {
-          const [investorProfile] = await tx`SELECT profile_image_url, profile_image_public_id FROM investors WHERE user_id = ${investorId} OR id = ${investorId}`;
-          if (investorProfile) {
-            profileImageUrl = investorProfile.profile_image_url;
-            profileImagePublicId = investorProfile.profile_image_public_id;
-          }
-        } catch (e) {}
-
-        await tx`DELETE FROM investors WHERE user_id = ${investorId} OR id = ${investorId}`;
-        await tx`DELETE FROM investor_deposits WHERE investor_id = ${investorId}`;
-        await tx`DELETE FROM investor_documents WHERE investor_id = ${investorId}`;
-        await tx`DELETE FROM investor_notifications WHERE investor_id = ${investorId}`;
-        await tx`DELETE FROM investor_settlement_preferences WHERE investor_id = ${investorId}`;
-        await tx`DELETE FROM settlement_change_requests WHERE investor_id = ${investorId}`;
-        await tx`DELETE FROM investor_transactions WHERE investor_id = ${investorId}`;
-        await tx`DELETE FROM investor_withdrawals WHERE investor_id = ${investorId}`;
-        await tx`DELETE FROM investor_enrollments WHERE investor_id = ${investorId}`;
-        await tx`DELETE FROM investor_users WHERE id = ${investorId}`;
-      }
-
-      if (enrollmentId) {
-        await tx`DELETE FROM investor_enrollments WHERE id = ${enrollmentId}`;
-      }
-
-      try {
-        const actorId = Number(req.admin?.admin_id || req.admin?.id) || 1;
-        const actorName = String(req.admin?.full_name || req.admin?.username || 'Admin');
-        const targetIdNum = investorId && !isNaN(Number(investorId)) ? Number(investorId) : null;
-        await tx`
-          INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-          VALUES ('Admin', ${actorId}, ${actorName},
-                  'InvestorManagement', 'Deleted', 'investor_users', ${targetIdNum})`;
-      } catch (e) {
-        console.warn("[Investor Delete] audit_log insert error:", e.message);
-      }
-    });
-
-    if (profileImageUrl) {
-      try {
-        await deleteFileFromStorage(profileImageUrl, profileImagePublicId);
-      } catch (e) {}
-    }
-
-    return ok(res, {}, "Investor deleted successfully.");
+    const actor = {
+      admin_id: req.admin?.admin_id || req.admin?.id || 1,
+      full_name: req.admin?.full_name || req.admin?.username || "Admin"
+    };
+    const result = await deleteInvestorProfile(req.params.id, actor);
+    return ok(res, result.data, result.message);
   } catch (e) {
-    console.error("Failed to delete investor:", e);
-    if (e.message === "Enrollment not found." || e.message === "Investor not found.") return err(res, e.message, 404);
-    return err(res, "Failed to delete investor: " + e.message);
+    if (e.message === "Investor not found" || e.statusCode === 404) {
+      return err(res, e.message, 404);
+    }
+    return err(res, "Failed to delete investor: " + e.message, e.statusCode || 500);
   }
 });
 
