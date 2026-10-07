@@ -126,9 +126,11 @@ export const associateEnrollmentSchema = z.object({
 /**
  * Register or update an associate enrollment and related details in a single database transaction.
  */
-// Auto-ensure signature columns exist
+// Auto-ensure signature columns and user link columns exist
 (async () => {
     try {
+        await sql `ALTER TABLE associate_enrollment ADD COLUMN IF NOT EXISTS user_id integer`;
+        await sql `ALTER TABLE associate_enrollment ADD COLUMN IF NOT EXISTS member_id text`;
         await sql `ALTER TABLE associate_enrollment ADD COLUMN IF NOT EXISTS signature_path text`;
         await sql `ALTER TABLE associate_sponsor ADD COLUMN IF NOT EXISTS signature_path text`;
     }
@@ -153,20 +155,19 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
             const [u] = await tx `SELECT user_id, member_id, mobile_no, email, pan_number, aadhar_number FROM users WHERE user_id = ${userId}`;
             userRow = u;
         }
-        // 1. Check if an enrollment record already exists
+        // 1. Check if an enrollment record already exists for this user or credentials
         const [existing] = await tx `
       SELECT id, is_final_submitted, applicant_photo_path, signature_path 
       FROM associate_enrollment 
-      WHERE UPPER(pan_no) = ${panStr}
-         OR aadhar_no = ${aadharStr}
-         OR (${contactStr !== ''} AND contact_no_1 = ${contactStr})
-         OR (${emailStr !== null} AND LOWER(email) = ${emailStr || ''})
-         OR (${Boolean(userRow)} AND (
-            id = ${userRow?.member_id || ''}
-            OR contact_no_1 = ${userRow?.mobile_no || ''}
-            OR (email IS NOT NULL AND LOWER(email) = LOWER(${userRow?.email || ''}))
-         ))
-      ORDER BY created_at DESC
+      WHERE (${Boolean(userRow?.user_id)} AND user_id = ${userRow?.user_id || 0})
+         OR (${Boolean(userRow?.member_id)} AND (id = ${userRow?.member_id || ''} OR member_id = ${userRow?.member_id || ''}))
+         OR (
+           UPPER(pan_no) = ${panStr}
+           OR aadhar_no = ${aadharStr}
+           OR (${contactStr !== ''} AND contact_no_1 = ${contactStr})
+           OR (${emailStr !== null} AND LOWER(email) = ${emailStr || ''})
+         )
+      ORDER BY (user_id = ${userRow?.user_id || 0}) DESC, created_at DESC
       LIMIT 1
     `;
         if (existing) {
@@ -181,6 +182,8 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
             // Update master record
             await tx `
         UPDATE associate_enrollment SET
+          user_id = COALESCE(user_id, ${userRow?.user_id || null}),
+          member_id = COALESCE(member_id, ${userRow?.member_id || null}),
           full_name = ${data.fullName},
           dob = ${dobStr},
           gender = ${data.gender},
@@ -228,13 +231,13 @@ export async function registerAssociateEnrollment(data, applicantPhotoPath, nomi
             // 2. Insert master: associate_enrollment
             await tx `
         INSERT INTO associate_enrollment (
-          id, full_name, dob, gender, father_name, mother_name, spouse_name,
+          id, user_id, member_id, full_name, dob, gender, father_name, mother_name, spouse_name,
           contact_no_1, contact_no_2, nationality, residential_status,
           pan_no, aadhar_no, email, occupation, annual_income, education,
           category, religion, is_final_submitted, applicant_photo_path, signature_path, sign_date,
           terms_accepted, terms_accepted_at, status
         ) VALUES (
-          ${generatedId}, ${data.fullName}, ${dobStr}, ${data.gender}, ${data.fatherName || null}, ${data.motherName || null}, ${data.spouseName || null},
+          ${generatedId}, ${userRow?.user_id || null}, ${userRow?.member_id || null}, ${data.fullName}, ${dobStr}, ${data.gender}, ${data.fatherName || null}, ${data.motherName || null}, ${data.spouseName || null},
           ${contactStr}, ${data.contact2 || null}, ${data.nationality || 'Indian'}, ${data.residentialStatus || null},
           ${panStr}, ${aadharStr}, ${emailStr}, ${data.occupation || null}, ${data.annualIncome || null}, ${data.education || null},
           ${data.category || null}, ${data.religion || null}, ${isFinal}, ${applicantPhotoPath || null}, ${applicantSignaturePath || null}, ${signDateStr || null},

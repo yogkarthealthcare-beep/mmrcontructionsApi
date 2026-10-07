@@ -196,7 +196,7 @@ export async function getMyAssociateEnrollment(req: Request, res: Response): Pro
     }
 
     const [user] = await sql`
-      SELECT u.user_id, u.email, u.mobile_no, u.pan_number, u.aadhar_number, u.full_name,
+      SELECT u.user_id, u.member_id, u.email, u.mobile_no, u.pan_number, u.aadhar_number, u.full_name,
              u.date_of_birth, u.gender, u.father_name, u.mother_name, u.spouse_name,
              COALESCE(sp.member_id, sp.invitation_code, 'MMR0001') AS sponsor_code,
              COALESCE(sp.full_name, 'Suraj Kumar Verma') AS sponsor_name,
@@ -214,6 +214,7 @@ export async function getMyAssociateEnrollment(req: Request, res: Response): Pro
     const aadharVal = user.aadhar_number ? String(user.aadhar_number).trim() : null;
     const mobileVal = user.mobile_no ? String(user.mobile_no).trim() : null;
     const emailVal = user.email ? String(user.email).trim().toLowerCase() : null;
+    const memberIdVal = user.member_id ? String(user.member_id).trim() : null;
 
     const [enrollment] = await sql`
       SELECT e.*,
@@ -231,12 +232,16 @@ export async function getMyAssociateEnrollment(req: Request, res: Response): Pro
       LEFT JOIN associate_nominee n       ON e.id = n.associate_id
       LEFT JOIN associate_sponsor asp     ON e.id = asp.associate_id
       WHERE (
-        (${panVal !== null} AND UPPER(e.pan_no) = ${panVal || ''})
-        OR (${aadharVal !== null} AND e.aadhar_no = ${aadharVal || ''})
-        OR (${mobileVal !== null} AND e.contact_no_1 = ${mobileVal || ''})
-        OR (${emailVal !== null} AND LOWER(e.email) = ${emailVal || ''})
+        (${userId !== null && userId !== undefined} AND e.user_id = ${userId})
+        OR (${memberIdVal !== null} AND (e.id = ${memberIdVal || ''} OR e.member_id = ${memberIdVal || ''}))
+        OR (
+          (${panVal !== null && panVal !== ''} AND UPPER(e.pan_no) = ${panVal || ''})
+          OR (${aadharVal !== null && aadharVal !== ''} AND e.aadhar_no = ${aadharVal || ''})
+          OR (${mobileVal !== null && mobileVal !== ''} AND e.contact_no_1 = ${mobileVal || ''})
+          OR (${emailVal !== null && emailVal !== ''} AND LOWER(e.email) = ${emailVal || ''})
+        )
       )
-      ORDER BY e.created_at DESC
+      ORDER BY (e.user_id = ${userId}) DESC, e.created_at DESC
       LIMIT 1
     `;
 
