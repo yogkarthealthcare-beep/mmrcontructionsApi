@@ -321,8 +321,14 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
     await sql.begin(async (tx) => {
       let existingSub = null;
       if (user_id) {
-        const [ex] = await tx`SELECT id, photo_first_applicant_url, photo_co_applicant_url, signature_sole_first_applicant_url, signature_co_applicant_url FROM customer_enrollment_submissions WHERE user_id = ${user_id} ORDER BY created_at DESC LIMIT 1`;
+        const [ex] = await tx`SELECT id, is_final_submitted, photo_first_applicant_url, photo_co_applicant_url, signature_sole_first_applicant_url, signature_co_applicant_url FROM customer_enrollment_submissions WHERE user_id = ${user_id} ORDER BY created_at DESC LIMIT 1`;
         existingSub = ex;
+      }
+
+      if (existingSub && existingSub.is_final_submitted) {
+        const error = new Error("Enrollment is permanently finalized and cannot be modified.");
+        error.statusCode = 403;
+        throw error;
       }
 
       if (existingSub) {
@@ -510,10 +516,39 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
 
     return ok(res, { id: newSubmissionId, applicationNo: appNo }, "Enrollment submitted successfully.");
   } catch (e) {
+    if (e.statusCode === 403) {
+      return res.status(403).json({ success: false, message: e.message });
+    }
     console.error("Customer Enrollment Error:", e);
     return err(res, "Failed to submit enrollment form. Details: " + e.message);
   }
 });
+
+// Helper for validating Customer Enrollment before approval
+function validateCustomerEnrollmentForApproval(record, nominees = []) {
+  const missing = [];
+  if (!record.applicant_name && !record.applicantName) missing.push("Applicant Full Name");
+  if (!record.date_of_birth && !record.dob) missing.push("Applicant Date of Birth");
+  if (!record.gender) missing.push("Applicant Gender");
+  if (!record.mobile_1 && !record.mobile1) missing.push("Contact No 1 / Mobile");
+  if (!record.pan_no && !record.pan) missing.push("PAN Number");
+  if (!record.aadhar_no && !record.aadhar) missing.push("Aadhar Number");
+
+  if (!record.permanent_address && !record.present_address && !record.permanentAddress && !record.presentAddress) missing.push("Permanent Address");
+  if (!record.permanent_city && !record.present_city && !record.permanentCity && !record.presentCity) missing.push("Permanent City");
+  if (!record.permanent_state_pin && !record.present_state_pin && !record.permanentStatePin && !record.presentStatePin) missing.push("Permanent State & PIN");
+
+  if (!record.acc_number && !record.accNumber) missing.push("Bank Account Number");
+  if (!record.ifsc_code && !record.ifscCode) missing.push("Bank IFSC Code");
+
+  const hasNominee = (nominees && nominees.length > 0 && (nominees[0].nominee_name || nominees[0].nomineeName)) || (record.co_applicant_name || record.coApplicantName);
+  if (!hasNominee) missing.push("Nominee Details");
+
+  if (!record.photo_first_applicant_url && !record.photoFirstApplicant) missing.push("Applicant Photo");
+  if (!record.signature_sole_first_applicant_url && !record.signatureSoleFirstApplicant) missing.push("Applicant Signature");
+
+  return missing;
+}
 
 // GET /api/customer-enrollment/me (Get for logged-in user)
 router.get("/customer-enrollment/me", authUser, async (req, res) => {
@@ -706,6 +741,33 @@ router.patch("/admin/customer-enrollments/:id/status", authAdmin, async (req, re
       existing = resRow;
     }
 
+    const isApproving = appStatus && ['approved', 'completed'].includes(String(appStatus).toLowerCase());
+
+    if (isApproving) {
+      if (!existing) {
+        return res.status(422).json({
+          success: false,
+          message: "Enrollment Form has not been completed yet. Please complete and final-submit the Enrollment Form before approving."
+        });
+      }
+
+      if (!existing.is_final_submitted) {
+        return res.status(422).json({
+          success: false,
+          message: "Enrollment cannot be approved because Final Submit has not been completed."
+        });
+      }
+
+      const nomList = await sql`SELECT * FROM customer_nominees WHERE submission_id = ${existing.id}`;
+      const missing = validateCustomerEnrollmentForApproval(existing, nomList);
+      if (missing.length > 0) {
+        return res.status(422).json({
+          success: false,
+          message: `Enrollment cannot be approved. Missing:\n- ${missing.join("\n- ")}\n\nPlease complete the enrollment form and Final Submit it before approval.`
+        });
+      }
+    }
+
     if (existing) {
       const [updated] = await sql`
         UPDATE customer_enrollment_submissions
@@ -717,18 +779,15 @@ router.patch("/admin/customer-enrollments/:id/status", authAdmin, async (req, re
         RETURNING *
       `;
       if (existing.user_id) {
-        const uStatus = (appStatus === 'Pending' || appStatus === 'Hold/Pending KYC' || appStatus === 'Rejected') ? 'Pending' : 'Completed';
+        const uStatus = isApproving ? 'Completed' : ((appStatus === 'Pending' || appStatus === 'Hold/Pending KYC' || appStatus === 'Rejected') ? 'Pending' : 'Completed');
         await sql`UPDATE users SET enrollment_status = ${uStatus} WHERE user_id = ${existing.user_id}`;
       }
       return ok(res, updated, "Status updated successfully.");
     } else {
-      const userId = Number(id);
-      if (userId) {
-        const uStatus = (appStatus === 'Pending' || appStatus === 'Hold/Pending KYC' || appStatus === 'Rejected') ? 'Pending' : 'Completed';
-        await sql`UPDATE users SET enrollment_status = ${uStatus} WHERE user_id = ${userId}`;
-        return ok(res, { user_id: userId, enrollment_status: uStatus, application_status: appStatus }, "Status updated.");
-      }
-      return err(res, "Enrollment not found.", 404);
+      return res.status(422).json({
+        success: false,
+        message: "Enrollment Form has not been completed yet. Please complete and final-submit the Enrollment Form before approving."
+      });
     }
   } catch (e) {
     console.error("PATCH /api/admin/customer-enrollments/:id/status error:", e);
@@ -837,6 +896,35 @@ const handleAdminCustomerUpdate = async (req, res) => {
       existing = resRow;
     }
 
+    const appStatusVal = b.applicationStatus || b.application_status || (b.enrollment_status === 'Completed' ? 'Approved' : (b.enrollment_status === 'Pending' ? 'Pending' : null)) || null;
+    const isApproving = appStatusVal && ['approved', 'completed'].includes(String(appStatusVal).toLowerCase());
+
+    if (isApproving) {
+      if (!existing) {
+        return res.status(422).json({
+          success: false,
+          message: "Enrollment Form has not been completed yet. Please complete and final-submit the Enrollment Form before approving."
+        });
+      }
+
+      const isFinal = existing.is_final_submitted || Boolean(b.isFinalSubmitted || b.is_final_submitted);
+      if (!isFinal) {
+        return res.status(422).json({
+          success: false,
+          message: "Enrollment cannot be approved because Final Submit has not been completed."
+        });
+      }
+
+      const merged = { ...existing, ...b };
+      const missing = validateCustomerEnrollmentForApproval(merged, b.nominees || []);
+      if (missing.length > 0) {
+        return res.status(422).json({
+          success: false,
+          message: `Enrollment cannot be approved. Missing:\n- ${missing.join("\n- ")}\n\nPlease complete the enrollment form and Final Submit it before approval.`
+        });
+      }
+    }
+
     if (existing) {
       targetSubmissionId = existing.id;
       const [updated] = await sql`
@@ -898,7 +986,7 @@ const handleAdminCustomerUpdate = async (req, res) => {
           associate_id = ${b.associateId ?? b.associate_id ?? null},
           associate_mobile = ${b.associateMobile ?? b.associate_mobile ?? null},
           associate_signature_name = ${b.associateSignatureName ?? b.associate_signature_name ?? null},
-          application_status = COALESCE(${b.applicationStatus || b.application_status || (b.enrollment_status === 'Completed' ? 'Approved' : (b.enrollment_status === 'Pending' ? 'Pending' : null)) || null}, application_status),
+          application_status = COALESCE(${appStatusVal}, application_status),
           verified_by = ${b.verifiedBy ?? b.verified_by ?? null},
           payment_status = ${b.paymentStatus ?? b.payment_status ?? null},
           payment_status_date = ${parseDate(b.paymentStatusDate || b.payment_status_date)},
@@ -922,13 +1010,16 @@ const handleAdminCustomerUpdate = async (req, res) => {
 
       // Also ensure user's enrollment_status in users table is synced
       if (existing.user_id) {
-        const uStatus = (b.enrollment_status === 'Pending' || b.application_status === 'Pending' || b.applicationStatus === 'Pending') ? 'Pending' : 'Completed';
+        const uStatus = isApproving ? 'Completed' : ((b.enrollment_status === 'Pending' || b.application_status === 'Pending' || b.applicationStatus === 'Pending') ? 'Pending' : 'Completed');
         await sql`UPDATE users SET enrollment_status = ${uStatus} WHERE user_id = ${existing.user_id}`;
       }
 
       return ok(res, updated, "Customer enrollment updated successfully.");
     } else {
-      return err(res, "Customer enrollment submission not found.", 404);
+      return res.status(422).json({
+        success: false,
+        message: "Enrollment Form has not been completed yet. Please complete and final-submit the Enrollment Form before approving."
+      });
     }
   } catch (e) {
     console.error("PUT /api/customer-enrollment/:id error:", e);
@@ -945,6 +1036,42 @@ router.patch("/customer-enrollment/:id/office-use", authAdmin, async (req, res) 
     const { id } = req.params;
     const { applicationStatus, verifiedBy, paymentStatus, paymentStatusDate } = req.body;
     
+    const isApproving = applicationStatus && ['approved', 'completed'].includes(String(applicationStatus).toLowerCase());
+    
+    let existing;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      const [row] = await sql`SELECT * FROM customer_enrollment_submissions WHERE id = ${id}`;
+      existing = row;
+    } else {
+      const [row] = await sql`SELECT * FROM customer_enrollment_submissions WHERE user_id = ${Number(id)} ORDER BY created_at DESC LIMIT 1`;
+      existing = row;
+    }
+
+    if (isApproving) {
+      if (!existing) {
+        return res.status(422).json({
+          success: false,
+          message: "Enrollment Form has not been completed yet. Please complete and final-submit the Enrollment Form before approving."
+        });
+      }
+      if (!existing.is_final_submitted) {
+        return res.status(422).json({
+          success: false,
+          message: "Enrollment cannot be approved because Final Submit has not been completed."
+        });
+      }
+      const nomList = await sql`SELECT * FROM customer_nominees WHERE submission_id = ${existing.id}`;
+      const missing = validateCustomerEnrollmentForApproval(existing, nomList);
+      if (missing.length > 0) {
+        return res.status(422).json({
+          success: false,
+          message: `Enrollment cannot be approved. Missing:\n- ${missing.join("\n- ")}\n\nPlease complete the enrollment form and Final Submit it before approval.`
+        });
+      }
+    }
+
+    if (!existing) return res.status(422).json({ success: false, message: "Enrollment Form has not been completed yet." });
+
     const [updated] = await sql`
       UPDATE customer_enrollment_submissions
       SET application_status = COALESCE(${applicationStatus || null}, application_status),
@@ -952,11 +1079,14 @@ router.patch("/customer-enrollment/:id/office-use", authAdmin, async (req, res) 
           payment_status = COALESCE(${paymentStatus || null}, payment_status),
           payment_status_date = COALESCE(${paymentStatusDate || null}, payment_status_date),
           updated_at = NOW()
-      WHERE id = ${id}
+      WHERE id = ${existing.id}
       RETURNING *
     `;
     
-    if (!updated) return err(res, "Enrollment not found.", 404);
+    if (existing.user_id && isApproving) {
+      await sql`UPDATE users SET enrollment_status = 'Completed' WHERE user_id = ${existing.user_id}`;
+    }
+
     return ok(res, updated, "Office use details updated.");
   } catch (e) {
     console.error("PATCH /api/customer-enrollment/:id/office-use error:", e);

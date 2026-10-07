@@ -1735,7 +1735,13 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
     const sigFirstUrl = await processBase64(body.signatureFirstApplicant, `sig1_${Date.now()}.png`);
     const sigJointUrl = await processBase64(body.signatureJointApplicant, `sig2_${Date.now()}.png`);
 
-    const [existing] = await sql`SELECT id FROM investor_enrollments WHERE investor_id = ${investor_id} ORDER BY created_at DESC LIMIT 1`;
+    const [existing] = await sql`SELECT id, is_final_submitted FROM investor_enrollments WHERE investor_id = ${investor_id} ORDER BY created_at DESC LIMIT 1`;
+    if (existing && existing.is_final_submitted) {
+      return res.status(403).json({
+        success: false,
+        message: "Enrollment is permanently finalized and cannot be modified."
+      });
+    }
     let resultId;
     if (existing) {
       await sql`
@@ -2007,6 +2013,43 @@ router.get("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
   }
 });
 
+// Helper for validating Investor Enrollment before approval
+function validateInvestorEnrollmentForApproval(record) {
+  const missing = [];
+  if (!record.inv_first_name && !record.invFirstName && !record.first_name) missing.push("Investor Name");
+  if (!record.dob && !record.date_of_birth) missing.push("Date of Birth");
+  if (!record.gender) missing.push("Gender");
+  if (!record.mobile && !record.mobile_no && !record.mobile_number) missing.push("Contact / Mobile");
+  if (!record.pan && !record.pan_no && !record.pan_number) missing.push("PAN Number");
+  if (!record.aadhar && !record.aadhar_no && !record.aadhaar_number) missing.push("Aadhar Number");
+
+  if (!record.address) missing.push("Address");
+  if (!record.city) missing.push("City");
+  if (!record.state) missing.push("State");
+  if (!record.pin_code && !record.pincode && !record.pinCode) missing.push("PIN Code");
+
+  if (!record.account_number && !record.acc_number && !record.accountNumber) missing.push("Bank Account Number");
+  if (!record.ifsc_code && !record.ifsc && !record.ifscCode) missing.push("Bank IFSC Code");
+  if (!record.bank_branch && !record.bank_name && !record.bankBranch) missing.push("Bank Name / Branch");
+
+  // Check Nominees
+  let hasNominee = false;
+  if (record.nominees) {
+    try {
+      const parsed = typeof record.nominees === 'string' ? JSON.parse(record.nominees) : record.nominees;
+      if (Array.isArray(parsed) && parsed.length > 0 && (parsed[0].name || parsed[0].nominee_name || parsed[0].nomineeName)) {
+        hasNominee = true;
+      }
+    } catch (e) {}
+  }
+  if (!hasNominee && !record.nominee_name) missing.push("Nominee Details");
+
+  if (!record.photo_url && !record.photo) missing.push("Applicant Photo");
+  if (!record.signature_first_url && !record.signatureFirstApplicant) missing.push("Applicant Signature");
+
+  return missing;
+}
+
 // PUT /api/admin/investor-enrollment/:id (Admin - Update)
 router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
   try {
@@ -2025,6 +2068,42 @@ router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
     } else {
       const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE investor_id = ${Number(id)} ORDER BY created_at DESC LIMIT 1`;
       existing = resRow;
+    }
+
+    const appStatusVal = b.appStatus ?? b.app_status ?? b.enrollment_status ?? existing?.app_status ?? 'Pending';
+    const isApproving = appStatusVal && ['approved', 'completed'].includes(String(appStatusVal).toLowerCase());
+
+    if (isApproving) {
+      if (!existing) {
+        return res.status(422).json({
+          success: false,
+          message: "Enrollment Form has not been completed yet. Please complete and final-submit the Enrollment Form before approving."
+        });
+      }
+
+      const isFinal = existing.is_final_submitted || Boolean(b.is_final_submitted || b.isFinalSubmit);
+      if (!isFinal) {
+        return res.status(422).json({
+          success: false,
+          message: "Enrollment cannot be approved because Final Submit has not been completed."
+        });
+      }
+
+      const merged = { ...existing, ...b };
+      const missing = validateInvestorEnrollmentForApproval(merged);
+      if (missing.length > 0) {
+        return res.status(422).json({
+          success: false,
+          message: `Enrollment cannot be approved. Missing:\n- ${missing.join("\n- ")}\n\nPlease complete the enrollment form and Final Submit it before approval.`
+        });
+      }
+    }
+
+    if (!existing) {
+      return res.status(422).json({
+        success: false,
+        message: "Enrollment Form has not been completed yet. Please complete and final-submit the Enrollment Form before approving."
+      });
     }
 
     const formNoVal = b.formNo ?? b.form_no ?? existing?.form_no ?? null;
@@ -2078,58 +2157,30 @@ router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
     const firstApplicantNameVal = b.firstApplicantName ?? b.first_applicant_name ?? existing?.first_applicant_name ?? null;
     const jointApplicantNameVal = b.jointApplicantName ?? b.joint_applicant_name ?? existing?.joint_applicant_name ?? null;
 
-    const appStatusVal = b.appStatus ?? b.app_status ?? b.enrollment_status ?? existing?.app_status ?? 'Completed';
     const verifiedByVal = b.verifiedBy ?? b.verified_by ?? existing?.verified_by ?? null;
     const paymentStatusVal = b.paymentStatus ?? b.payment_status ?? existing?.payment_status ?? null;
     const paymentStatusDateVal = b.paymentStatusDate ?? b.payment_status_date ?? existing?.payment_status_date ?? null;
     const authorizedSignatoryVal = b.authorizedSignatory ?? b.authorized_signatory ?? existing?.authorized_signatory ?? null;
 
-    let updated;
-    if (existing) {
-      const [u] = await sql`
-        UPDATE investor_enrollments
-        SET
-          form_no = ${formNoVal}, form_date = ${formDateVal}, branch_code = ${branchCodeVal}, branch_name = ${branchNameVal}, investor_enrollment_id = ${investorEnrollmentIdVal}, project_name = ${projectNameVal},
-          inv_first_name = ${invFirstNameVal}, inv_middle_name = ${invMiddleNameVal}, inv_surname = ${invSurnameVal}, fh_first_name = ${fhFirstNameVal}, fh_middle_name = ${fhMiddleNameVal}, fh_surname = ${fhSurnameVal},
-          dob = ${dobVal}, age = ${ageVal}, gender = ${genderVal}, occupation = ${occupationVal}, occupation_other = ${occupationOtherVal}, address = ${addressVal}, city = ${cityVal}, state = ${stateVal}, pin_code = ${pinCodeVal},
-          corr_address = ${corrAddressVal}, corr_city = ${corrCityVal}, corr_state = ${corrStateVal}, corr_pin_code = ${corrPinCodeVal},
-          mobile = ${mobileVal}, alt_tel = ${altTelVal}, email = ${emailVal}, pan = ${panVal}, aadhar = ${aadharVal}, amount = ${amountVal}, amount_words = ${amountWordsVal}, payment_mode = ${paymentModeVal}, txn_no = ${txnNoVal}, txn_date = ${txnDateVal}, bank_branch = ${bankBranchVal}, ifsc_code = ${ifscCodeVal}, account_number = ${accountNumberVal},
-          nominees = ${nomineesVal}, decl_date = ${declDateVal}, decl_place = ${declPlaceVal}, decl_signature_name = ${declSignatureNameVal}, first_applicant_name = ${firstApplicantNameVal}, joint_applicant_name = ${jointApplicantNameVal},
-          app_status = ${appStatusVal}, verified_by = ${verifiedByVal}, payment_status = ${paymentStatusVal}, payment_status_date = ${paymentStatusDateVal}, authorized_signatory = ${authorizedSignatoryVal},
-          updated_at = NOW()
-        WHERE id = ${existing.id}
-        RETURNING *
-      `;
-      updated = u;
-    } else if (!isUuid && Number(id)) {
-      // Insert if user exists
-      const invId = Number(id);
-      const [newRow] = await sql`
-        INSERT INTO investor_enrollments (
-          investor_id, form_no, form_date, branch_code, branch_name, investor_enrollment_id, project_name,
-          inv_first_name, inv_middle_name, inv_surname, fh_first_name, fh_middle_name, fh_surname,
-          dob, age, gender, occupation, occupation_other, address, city, state, pin_code,
-          corr_address, corr_city, corr_state, corr_pin_code,
-          mobile, alt_tel, email, pan, aadhar, amount, amount_words, payment_mode, txn_no, txn_date, bank_branch, ifsc_code, account_number,
-          nominees, decl_date, decl_place, decl_signature_name, first_applicant_name, joint_applicant_name,
-          app_status, verified_by, payment_status, payment_status_date, authorized_signatory
-        ) VALUES (
-          ${invId}, ${formNoVal}, ${formDateVal}, ${branchCodeVal}, ${branchNameVal}, ${investorEnrollmentIdVal}, ${projectNameVal},
-          ${invFirstNameVal}, ${invMiddleNameVal}, ${invSurnameVal}, ${fhFirstNameVal}, ${fhMiddleNameVal}, ${fhSurnameVal},
-          ${dobVal}, ${ageVal}, ${genderVal}, ${occupationVal}, ${occupationOtherVal}, ${addressVal}, ${cityVal}, ${stateVal}, ${pinCodeVal},
-          ${corrAddressVal}, ${corrCityVal}, ${corrStateVal}, ${corrPinCodeVal},
-          ${mobileVal}, ${altTelVal}, ${emailVal}, ${panVal}, ${aadharVal}, ${amountVal}, ${amountWordsVal}, ${paymentModeVal}, ${txnNoVal}, ${txnDateVal}, ${bankBranchVal}, ${ifscCodeVal}, ${accountNumberVal},
-          ${nomineesVal}, ${declDateVal}, ${declPlaceVal}, ${declSignatureNameVal}, ${firstApplicantNameVal}, ${jointApplicantNameVal},
-          ${appStatusVal}, ${verifiedByVal}, ${paymentStatusVal}, ${paymentStatusDateVal}, ${authorizedSignatoryVal}
-        )
-        RETURNING *
-      `;
-      updated = newRow;
-    }
+    const [updated] = await sql`
+      UPDATE investor_enrollments
+      SET
+        form_no = ${formNoVal}, form_date = ${formDateVal}, branch_code = ${branchCodeVal}, branch_name = ${branchNameVal}, investor_enrollment_id = ${investorEnrollmentIdVal}, project_name = ${projectNameVal},
+        inv_first_name = ${invFirstNameVal}, inv_middle_name = ${invMiddleNameVal}, inv_surname = ${invSurnameVal}, fh_first_name = ${fhFirstNameVal}, fh_middle_name = ${fhMiddleNameVal}, fh_surname = ${fhSurnameVal},
+        dob = ${dobVal}, age = ${ageVal}, gender = ${genderVal}, occupation = ${occupationVal}, occupation_other = ${occupationOtherVal}, address = ${addressVal}, city = ${cityVal}, state = ${stateVal}, pin_code = ${pinCodeVal},
+        corr_address = ${corrAddressVal}, corr_city = ${corrCityVal}, corr_state = ${corrStateVal}, corr_pin_code = ${corrPinCodeVal},
+        mobile = ${mobileVal}, alt_tel = ${altTelVal}, email = ${emailVal}, pan = ${panVal}, aadhar = ${aadharVal}, amount = ${amountVal}, amount_words = ${amountWordsVal}, payment_mode = ${paymentModeVal}, txn_no = ${txnNoVal}, txn_date = ${txnDateVal}, bank_branch = ${bankBranchVal}, ifsc_code = ${ifscCodeVal}, account_number = ${accountNumberVal},
+        nominees = ${nomineesVal}, decl_date = ${declDateVal}, decl_place = ${declPlaceVal}, decl_signature_name = ${declSignatureNameVal}, first_applicant_name = ${firstApplicantNameVal}, joint_applicant_name = ${jointApplicantNameVal},
+        app_status = ${appStatusVal}, verified_by = ${verifiedByVal}, payment_status = ${paymentStatusVal}, payment_status_date = ${paymentStatusDateVal}, authorized_signatory = ${authorizedSignatoryVal},
+        updated_at = NOW()
+      WHERE id = ${existing.id}
+      RETURNING *
+    `;
 
     // Also update investor_users if applicable
     const invUserId = existing?.investor_id || (!isUuid ? Number(id) : null);
     if (invUserId) {
+      const uEnrollmentStatus = isApproving ? 'Completed' : 'Pending';
       await sql`
         UPDATE investor_users
         SET
@@ -2145,12 +2196,11 @@ router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
           bank_name = COALESCE(${bankBranchVal}, bank_name),
           account_number = COALESCE(${accountNumberVal}, account_number),
           ifsc_code = COALESCE(${ifscCodeVal}, ifsc_code),
-          enrollment_status = 'Completed'
+          enrollment_status = ${uEnrollmentStatus}
         WHERE id = ${invUserId}
       `;
     }
 
-    if (!updated) return err(res, "Enrollment record not found.", 404);
     return ok(res, updated, "Investor enrollment updated successfully.");
   } catch (e) {
     console.error("Update Enrollment Error:", e);

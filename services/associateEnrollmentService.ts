@@ -201,7 +201,7 @@ export async function registerAssociateEnrollment(
 
     // 1. Check if an enrollment record already exists
     const [existing] = await tx`
-      SELECT id, applicant_photo_path, signature_path 
+      SELECT id, is_final_submitted, applicant_photo_path, signature_path 
       FROM associate_enrollment 
       WHERE UPPER(pan_no) = ${panStr}
          OR aadhar_no = ${aadharStr}
@@ -217,6 +217,11 @@ export async function registerAssociateEnrollment(
     `;
 
     if (existing) {
+      if (existing.is_final_submitted) {
+        const lockErr: any = new Error("Enrollment is permanently finalized and cannot be modified.");
+        lockErr.statusCode = 403;
+        throw lockErr;
+      }
       generatedId = existing.id;
       const finalApplicantPhoto = applicantPhotoPath || existing.applicant_photo_path || null;
       const finalApplicantSign = applicantSignaturePath || existing.signature_path || null;

@@ -85,6 +85,13 @@ export async function createAssociateEnrollment(req: Request, res: Response): Pr
   } catch (error: any) {
     console.error("[AssociateEnrollmentController Error]:", error);
 
+    if (error.statusCode === 403 || error.status === 403) {
+      return res.status(403).json({
+        success: false,
+        message: error.message || "Enrollment is permanently finalized and cannot be modified."
+      });
+    }
+
     // Zod validation errors
     if (error instanceof ZodError) {
       const formatErrors = error.issues.map((err: any) => ({
@@ -189,8 +196,13 @@ export async function getMyAssociateEnrollment(req: Request, res: Response): Pro
     }
 
     const [user] = await sql`
-      SELECT u.user_id, u.email, u.mobile_no, u.pan_number, u.aadhar_number, u.full_name
+      SELECT u.user_id, u.email, u.mobile_no, u.pan_number, u.aadhar_number, u.full_name,
+             u.date_of_birth, u.gender, u.father_name, u.mother_name, u.spouse_name,
+             COALESCE(sp.member_id, sp.invitation_code, 'MMR0001') AS sponsor_code,
+             COALESCE(sp.full_name, 'Suraj Kumar Verma') AS sponsor_name,
+             COALESCE(sp.mobile_no, '7071951011') AS sponsor_contact
       FROM users u
+      LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
       WHERE u.user_id = ${userId}
     `;
 
@@ -211,13 +223,13 @@ export async function getMyAssociateEnrollment(req: Request, res: Response): Pro
              n.nominee_name, n.dob AS nominee_dob, n.gender AS nominee_gender, n.nationality AS nominee_nationality, n.residential_status AS nominee_res_status,
              n.relationship AS nominee_relationship, n.pan_name AS nominee_pan_name, n.pan_no AS nominee_pan_no, n.aadhar_name AS nominee_aadhar_name,
              n.aadhar_no AS nominee_aadhar_no, n.address AS nominee_address, n.photo_path AS nominee_photo_url,
-              sp.sponsor_name, sp.sponsor_code, sp.sponsor_contact, sp.signature_path AS sponsor_signature_path
+             asp.sponsor_name, asp.sponsor_code, asp.sponsor_contact, asp.signature_path AS sponsor_signature_path
       FROM associate_enrollment e
       LEFT JOIN associate_address pa      ON e.id = pa.associate_id AND pa.address_type = 'permanent'
       LEFT JOIN associate_address la      ON e.id = la.associate_id AND la.address_type = 'local'
       LEFT JOIN associate_bank_details b  ON e.id = b.associate_id
       LEFT JOIN associate_nominee n       ON e.id = n.associate_id
-      LEFT JOIN associate_sponsor sp      ON e.id = sp.associate_id
+      LEFT JOIN associate_sponsor asp     ON e.id = asp.associate_id
       WHERE (
         (${panVal !== null} AND UPPER(e.pan_no) = ${panVal || ''})
         OR (${aadharVal !== null} AND e.aadhar_no = ${aadharVal || ''})
@@ -229,27 +241,61 @@ export async function getMyAssociateEnrollment(req: Request, res: Response): Pro
     `;
 
     if (!enrollment) {
-      return res.status(200).json({ success: true, data: null });
+      return res.status(200).json({
+        success: true,
+        data: {
+          is_new: true,
+          full_name: user.full_name || '',
+          contact_primary: user.mobile_no || '',
+          contact_1: user.mobile_no || '',
+          contact_no_1: user.mobile_no || '',
+          contact1: user.mobile_no || '',
+          mobile_no: user.mobile_no || '',
+          email: user.email || '',
+          pan_number: user.pan_number || '',
+          pan_no: user.pan_number || '',
+          aadhar_number: user.aadhar_number || '',
+          aadhar_no: user.aadhar_number || '',
+          dob: user.date_of_birth || null,
+          gender: user.gender || '',
+          father_name: user.father_name || '',
+          mother_name: user.mother_name || '',
+          spouse_name: user.spouse_name || '',
+          sponsor_name: user.sponsor_name || 'Suraj Kumar Verma',
+          sponsor_code: user.sponsor_code || 'MMR0001',
+          sponsor_contact: user.sponsor_contact || '7071951011'
+        }
+      });
     }
+
+    const primaryContact = enrollment.contact_no_1 || user.mobile_no || '';
 
     return res.status(200).json({
       success: true,
       data: {
         associate_id: enrollment.id,
         associateId: enrollment.id,
-        full_name: enrollment.full_name,
-        dob: enrollment.dob,
-        gender: enrollment.gender,
-        father_name: enrollment.father_name,
-        mother_name: enrollment.mother_name,
-        spouse_name: enrollment.spouse_name,
-        contact_primary: enrollment.contact_no_1,
-        contact_secondary: enrollment.contact_no_2,
-        nationality: enrollment.nationality,
-        residential_status: enrollment.residential_status,
-        pan_number: enrollment.pan_no,
-        aadhar_number: enrollment.aadhar_no,
-        email: enrollment.email,
+        full_name: enrollment.full_name || user.full_name || '',
+        dob: enrollment.dob || user.date_of_birth || null,
+        gender: enrollment.gender || user.gender || '',
+        father_name: enrollment.father_name || user.father_name || '',
+        mother_name: enrollment.mother_name || user.mother_name || '',
+        spouse_name: enrollment.spouse_name || user.spouse_name || '',
+        contact_primary: primaryContact,
+        contact_1: primaryContact,
+        contact_no_1: primaryContact,
+        contact1: primaryContact,
+        mobile_no: primaryContact,
+        contact_secondary: enrollment.contact_no_2 || '',
+        contact_2: enrollment.contact_no_2 || '',
+        contact2: enrollment.contact_no_2 || '',
+        nationality: enrollment.nationality || 'Indian',
+        residential_status: enrollment.residential_status || 'Resident Individual',
+        pan_number: enrollment.pan_no || user.pan_number || '',
+        pan_no: enrollment.pan_no || user.pan_number || '',
+        aadhar_number: enrollment.aadhar_no || user.aadhar_number || '',
+        aadhar_no: enrollment.aadhar_no || user.aadhar_number || '',
+        email: enrollment.email || user.email || '',
         occupation: enrollment.occupation,
         annual_income: enrollment.annual_income,
         education: enrollment.education,
@@ -260,6 +306,8 @@ export async function getMyAssociateEnrollment(req: Request, res: Response): Pro
         applicant_signature_url: enrollment.signature_path,
         sign_date: enrollment.sign_date,
         status: enrollment.status,
+        is_final_submitted: Boolean(enrollment.is_final_submitted),
+        isFinalSubmitted: Boolean(enrollment.is_final_submitted),
         print_pdf_path: enrollment.print_pdf_path,
         perm_address_line1: enrollment.perm_address_line1,
         perm_city: enrollment.perm_city,
@@ -292,9 +340,9 @@ export async function getMyAssociateEnrollment(req: Request, res: Response): Pro
         nominee_aadhar_no: enrollment.nominee_aadhar_no,
         nominee_address: enrollment.nominee_address,
         nominee_photo_url: enrollment.nominee_photo_url,
-        sponsor_name: enrollment.sponsor_name,
-        sponsor_code: enrollment.sponsor_code,
-        sponsor_contact: enrollment.sponsor_contact,
+        sponsor_name: enrollment.sponsor_name || user.sponsor_name || 'Suraj Kumar Verma',
+        sponsor_code: enrollment.sponsor_code || user.sponsor_code || 'MMR0001',
+        sponsor_contact: enrollment.sponsor_contact || user.sponsor_contact || '7071951011',
         sponsor_signature_url: enrollment.sponsor_signature_path
       }
     });
@@ -492,6 +540,8 @@ export async function getAdminAssociateEnrollmentById(req: Request, res: Respons
             contact_primary: user.mobile_no,
             contact_1: user.mobile_no,
             contact_no_1: user.mobile_no,
+            contact1: user.mobile_no,
+            mobile_no: user.mobile_no,
             pan_no: user.pan_number,
             pan_number: user.pan_number,
             aadhar_no: user.aadhar_number,
@@ -525,8 +575,12 @@ export async function getAdminAssociateEnrollmentById(req: Request, res: Respons
         contact_primary: enrollment.contact_no_1,
         contact_1: enrollment.contact_no_1,
         contact_no_1: enrollment.contact_no_1,
+        contact1: enrollment.contact_no_1,
+        mobile_no: enrollment.contact_no_1,
         contact_secondary: enrollment.contact_no_2,
         contact_no_2: enrollment.contact_no_2,
+        contact_2: enrollment.contact_no_2,
+        contact2: enrollment.contact_no_2,
         nationality: enrollment.nationality,
         residential_status: enrollment.residential_status,
         pan_number: enrollment.pan_no,
@@ -620,9 +674,83 @@ export async function updateAdminAssociateEnrollment(req: Request, res: Response
     `;
 
     const newStatus = b.status || b.app_status || (b.enrollment_status === 'Completed' ? 'approved' : (b.enrollment_status === 'Rejected' ? 'rejected' : 'pending'));
-    const enrollStatus = (b.enrollment_status === 'Completed' || b.status === 'approved' || b.status === 'Completed') ? 'Completed' : (b.enrollment_status === 'Rejected' || b.status === 'rejected' ? 'Rejected' : 'Pending');
+    const isApproving = newStatus === 'approved' || b.enrollment_status === 'Completed' || b.status === 'Completed' || b.status === 'approved';
+    const enrollStatus = isApproving ? 'Completed' : (newStatus === 'rejected' || b.enrollment_status === 'Rejected' ? 'Rejected' : 'Pending');
 
-    let targetId = existing ? existing.id : (rawId.startsWith('MMR-ASC-') ? rawId : (matchedUser?.member_id || rawId));
+    if (isApproving) {
+      if (!existing) {
+        return res.status(422).json({
+          success: false,
+          message: "Enrollment Form has not been completed yet. Please complete and final-submit the Enrollment Form before approving."
+        });
+      }
+
+      if (!existing.is_final_submitted) {
+        return res.status(422).json({
+          success: false,
+          message: "Enrollment cannot be approved because Final Submit has not been completed."
+        });
+      }
+
+      const [permAddr] = await sql`SELECT * FROM associate_address WHERE associate_id = ${existing.id} AND address_type = 'permanent' LIMIT 1`;
+      const [bank] = await sql`SELECT * FROM associate_bank_details WHERE associate_id = ${existing.id} LIMIT 1`;
+      const [nominee] = await sql`SELECT * FROM associate_nominee WHERE associate_id = ${existing.id} LIMIT 1`;
+
+      const missingFields: string[] = [];
+      const fullName = existing.full_name || b.full_name || b.fullName;
+      const dob = existing.dob || b.dob;
+      const gender = existing.gender || b.gender;
+      const contact1 = existing.contact_no_1 || b.contact_primary || b.contact_1 || b.contact1;
+      const panNo = existing.pan_no || b.pan_number || b.pan_no || b.panNo;
+      const aadharNo = existing.aadhar_no || b.aadhar_number || b.aadhar_no || b.aadharNo;
+
+      if (!fullName) missingFields.push("Full Name");
+      if (!dob) missingFields.push("Date of Birth");
+      if (!gender) missingFields.push("Gender");
+      if (!contact1) missingFields.push("Contact Number");
+      if (!panNo) missingFields.push("PAN Number");
+      if (!aadharNo) missingFields.push("Aadhar Number");
+
+      const permLine = permAddr?.local_address || b.perm_address_line1 || b.permAddress;
+      const permCity = permAddr?.city || b.perm_city || b.permCity;
+      const permState = permAddr?.state || b.perm_state || b.permState;
+      const permPin = permAddr?.pin_code || b.perm_pincode || b.permPin;
+      if (!permLine || !permCity || !permState || !permPin) {
+        missingFields.push("Permanent Address (Address, City, State, PIN)");
+      }
+
+      const bankName = bank?.bank_name || b.bank_name || b.bankName;
+      const accNo = bank?.account_no || b.account_number || b.accNo;
+      const ifsc = bank?.ifsc_code || b.ifsc_code || b.ifsc;
+      if (!bankName || !accNo || !ifsc) {
+        missingFields.push("Bank Details (Bank Name, Account Number, IFSC)");
+      }
+
+      const nomName = nominee?.nominee_name || b.nominee_name || b.nomineeName;
+      const nomRel = nominee?.relationship || b.nominee_relationship || b.nomineeRelationship;
+      if (!nomName || !nomRel) {
+        missingFields.push("Nominee Details (Name, Relationship)");
+      }
+
+      if (!existing.applicant_photo_path) missingFields.push("Applicant Photo");
+      if (!existing.signature_path) missingFields.push("Applicant Signature");
+
+      if (missingFields.length > 0) {
+        return res.status(422).json({
+          success: false,
+          message: `Enrollment cannot be approved. Missing required fields: ${missingFields.join(", ")}. Please complete all required fields and final-submit before approval.`
+        });
+      }
+    }
+
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: "Associate enrollment record not found."
+      });
+    }
+
+    let targetId = existing.id;
 
     if (existing) {
       await sql.begin(async (tx: any) => {
@@ -726,75 +854,6 @@ export async function updateAdminAssociateEnrollment(req: Request, res: Response
             VALUES (${existing.id}, ${b.sponsor_name || b.sponsorName || ''}, ${b.sponsor_code || b.sponsorCode || ''}, ${b.sponsor_contact || b.sponsorContact || null})
           `;
         }
-      });
-    } else {
-      let generatedId = rawId.startsWith('MMR-ASC-') ? rawId : (matchedUser?.member_id || rawId);
-      await sql.begin(async (tx: any) => {
-        await tx`
-          INSERT INTO associate_enrollment (
-            id, full_name, dob, gender, father_name, mother_name, spouse_name,
-            contact_no_1, contact_no_2, nationality, residential_status,
-            pan_no, aadhar_no, email, occupation, annual_income, education,
-            category, religion, applicant_photo_path, sign_date,
-            terms_accepted, terms_accepted_at, status
-          ) VALUES (
-            ${generatedId},
-            ${b.full_name || b.fullName || matchedUser?.full_name || 'Associate'},
-            ${b.dob || matchedUser?.date_of_birth || '1990-01-01'},
-            ${b.gender || matchedUser?.gender || 'Male'},
-            ${b.father_name || b.fatherName || matchedUser?.father_name || null},
-            ${b.mother_name || b.motherName || matchedUser?.mother_name || null},
-            ${b.spouse_name || b.spouseName || null},
-            ${b.contact_primary || b.contact_1 || b.contact1 || b.contact_no_1 || matchedUser?.mobile_no || '0000000000'},
-            ${b.contact_secondary || b.contact_2 || b.contact2 || b.contact_no_2 || null},
-            ${b.nationality || 'Indian'},
-            ${b.residential_status || b.residentialStatus || null},
-            ${(b.pan_number || b.pan_no || b.panNo || matchedUser?.pan_number || 'PAN0000000').toUpperCase()},
-            ${b.aadhar_number || b.aadhar_no || b.aadharNo || matchedUser?.aadhar_number || '000000000000'},
-            ${b.email || matchedUser?.email || null},
-            ${b.occupation || null},
-            ${b.annual_income || b.annualIncome || null},
-            ${b.education || null},
-            ${b.category || null},
-            ${b.religion || null},
-            ${b.applicant_photo_url || null},
-            ${b.sign_date || b.signDate || null},
-            true, NOW(), ${newStatus}
-          )
-          ON CONFLICT (id) DO UPDATE SET
-            status = EXCLUDED.status,
-            full_name = EXCLUDED.full_name
-        `;
-
-        if (b.perm_address_line1 || b.permAddress) {
-          await tx`
-            INSERT INTO associate_address (associate_id, address_type, local_address, city, state, country, pin_code)
-            VALUES (${generatedId}, 'permanent', ${b.perm_address_line1 || b.permAddress || ''}, ${b.perm_city || b.permCity || ''}, ${b.perm_state || b.permState || ''}, ${b.perm_country || b.permCountry || 'India'}, ${b.perm_pincode || b.permPin || ''})
-          `;
-        }
-
-        if (b.bank_name || b.bankName) {
-          await tx`
-            INSERT INTO associate_bank_details (associate_id, bank_name, account_holder_name, account_no, ifsc_code, micr_code, branch_name, branch_code, swift_code, branch_country)
-            VALUES (${generatedId}, ${b.bank_name || b.bankName || ''}, ${b.account_holder_name || b.accHolder || ''}, ${b.account_number || b.accNo || ''}, ${b.ifsc_code || b.ifsc || ''}, ${b.micr_code || b.micr || null}, ${b.branch_name || b.branchName || null}, ${b.branch_code || b.branchCode || null}, ${b.swift_code || b.swift || null}, ${b.branch_country || b.branchCountry || 'India'})
-          `;
-        }
-
-        if (b.nominee_name || b.nomineeName) {
-          await tx`
-            INSERT INTO associate_nominee (associate_id, nominee_name, dob, gender, nationality, residential_status, relationship, pan_name, pan_no, aadhar_name, aadhar_no, address)
-            VALUES (${generatedId}, ${b.nominee_name || b.nomineeName}, ${b.nominee_dob || b.nomineeDob || null}, ${b.nominee_gender || b.nomineeGender || 'Male'}, ${b.nominee_nationality || 'Indian'}, ${b.nominee_res_status || 'Resident'}, ${b.nominee_relationship || 'Nominee'}, ${b.nominee_pan_name || null}, ${b.nominee_pan_no || null}, ${b.nominee_aadhar_name || null}, ${b.nominee_aadhar_no || null}, ${b.nominee_address || null})
-          `;
-        }
-
-        if (b.sponsor_name || b.sponsor_code) {
-          await tx`
-            INSERT INTO associate_sponsor (associate_id, sponsor_name, sponsor_code, sponsor_contact)
-            VALUES (${generatedId}, ${b.sponsor_name || b.sponsorName || ''}, ${b.sponsor_code || b.sponsorCode || ''}, ${b.sponsor_contact || b.sponsorContact || null})
-          `;
-        }
-
-        targetId = generatedId;
       });
     }
 

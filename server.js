@@ -5219,9 +5219,13 @@ app.post("/api/auth/login", async (req, res) => {
     return ok(res, {
       token, refresh_token: refreshToken,
       user: {
-        user_id: user.user_id, full_name: user.full_name,
-        user_type: user.user_type, member_id: user.member_id,
-        invitation_code: user.invitation_code, email: user.email,
+        user_id: user.user_id,
+        full_name: user.full_name,
+        mobile_no: user.mobile_no,
+        user_type: user.user_type,
+        member_id: user.member_id,
+        invitation_code: user.invitation_code,
+        email: user.email,
         account_status: user.account_status,
         email_verified: Boolean(user.email_verified || user.is_otp_verified)
       },
@@ -10096,32 +10100,10 @@ app.post("/api/admin/users/:id/approve",
           member_id = ${memberId},
           invitation_code = ${user.user_type === "Associate" ? invCode : user.invitation_code},
           is_verified = TRUE,
-          enrollment_status = 'Completed',
           approved_by_admin_id = ${req.admin.admin_id},
           approved_at = NOW(),
           updated_at = NOW()
         WHERE user_id = ${uid}`;
-
-      // Mark all active user documents as Approved & Verified
-      await sql`
-        UPDATE user_documents SET
-          is_verified = TRUE,
-          review_status = 'Approved',
-          reupload_requested = FALSE,
-          verified_by_admin_id = ${req.admin.admin_id},
-          verified_at = NOW()
-        WHERE user_id = ${uid} AND is_active = TRUE`;
-
-      // Update or insert user KYC profile
-      await sql`
-        INSERT INTO user_kyc_profiles (user_id, status, admin_remarks, reviewed_at, reviewed_by_admin_id, updated_at)
-        VALUES (${uid}, 'Approved', ${verify_note || 'Approved by Admin'}, NOW(), ${req.admin.admin_id}, NOW())
-        ON CONFLICT (user_id) DO UPDATE SET
-          status = 'Approved',
-          admin_remarks = EXCLUDED.admin_remarks,
-          reviewed_at = NOW(),
-          reviewed_by_admin_id = EXCLUDED.reviewed_by_admin_id,
-          updated_at = NOW()`;
 
       // For associate: insert tracker + MLM node
       if (user.user_type === "Associate") {

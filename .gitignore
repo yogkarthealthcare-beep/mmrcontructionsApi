@@ -15,6 +15,5 @@ inspect_sites.*
 sync_site4_plots.*
 scratch.*
 temp_*
-test_*
-
-
+scratch/
+scratch/.*
