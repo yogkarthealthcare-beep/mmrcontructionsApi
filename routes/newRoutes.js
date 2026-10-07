@@ -216,41 +216,49 @@ router.post('/auth/register', async (req, res) => {
 async function resolveEnrollmentStatus(u, userType) {
   try {
     const raw = String(u.enrollment_status || '').toLowerCase();
-    if (raw === 'completed') return 'completed';
+    if (raw === 'completed' || raw === 'approved') return 'completed';
+    if (raw === 'rejected') return 'rejected';
 
     if (userType === 'Customer') {
       const [sub] = await sql`
-        SELECT id FROM customer_enrollment_submissions 
+        SELECT id, application_status FROM customer_enrollment_submissions 
         WHERE user_id = ${u.user_id} 
            OR (mobile_1 IS NOT NULL AND mobile_1 = ${u.mobile_no})
         LIMIT 1
       `;
-      if (sub) {
-        try { await sql`UPDATE users SET enrollment_status = 'Completed' WHERE user_id = ${u.user_id}`; } catch {}
+      if (sub && ['completed', 'approved'].includes(String(sub.application_status || '').toLowerCase())) {
         return 'completed';
+      }
+      if (sub && ['rejected'].includes(String(sub.application_status || '').toLowerCase())) {
+        return 'rejected';
       }
     } else if (userType === 'Associate') {
       const [sub] = await sql`
-        SELECT id FROM associate_enrollment 
-        WHERE user_id = ${u.user_id} 
+        SELECT id, status FROM associate_enrollment 
+        WHERE id = ${u.member_id || ''} 
            OR (contact_no_1 IS NOT NULL AND contact_no_1 = ${u.mobile_no})
         LIMIT 1
       `;
-      if (sub) {
-        try { await sql`UPDATE users SET enrollment_status = 'Completed' WHERE user_id = ${u.user_id}`; } catch {}
+      if (sub && ['completed', 'approved'].includes(String(sub.status || '').toLowerCase())) {
         return 'completed';
+      }
+      if (sub && ['rejected'].includes(String(sub.status || '').toLowerCase())) {
+        return 'rejected';
       }
     } else if (userType === 'Investor') {
       const invId = u.id || u.user_id;
       const [sub] = await sql`
-        SELECT id FROM investor_enrollments 
+        SELECT id, status, enrollment_status FROM investor_enrollments 
         WHERE investor_id = ${invId} 
            OR (mobile IS NOT NULL AND mobile = ${u.mobile_number || u.mobile_no})
         LIMIT 1
       `;
-      if (sub) {
-        try { await sql`UPDATE investor_users SET enrollment_status = 'Completed' WHERE id = ${invId}`; } catch {}
+      const s = String(sub?.enrollment_status || sub?.status || '').toLowerCase();
+      if (sub && ['completed', 'approved'].includes(s)) {
         return 'completed';
+      }
+      if (sub && ['rejected'].includes(s)) {
+        return 'rejected';
       }
     }
     return 'pending';

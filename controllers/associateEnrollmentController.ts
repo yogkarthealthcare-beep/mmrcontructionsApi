@@ -336,8 +336,20 @@ export async function getAdminAssociateEnrollments(req: Request, res: Response):
           COALESCE(pa.city, 'Kanpur') AS city,
           COALESCE(e.created_at, u.registered_at) AS created_at,
           e.sign_date,
-          COALESCE(e.status, 'Pending') AS app_status,
-          CASE WHEN e.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END AS enrollment_status
+          COALESCE(e.status, u.enrollment_status, 'Pending') AS app_status,
+          COALESCE(
+            CASE 
+              WHEN LOWER(COALESCE(e.status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(e.status, '')) IN ('rejected') THEN 'Rejected'
+              WHEN LOWER(COALESCE(e.status, '')) IN ('pending', 'under_review', 'submitted') THEN 'Pending'
+              ELSE NULL
+            END,
+            CASE 
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
+              ELSE 'Pending'
+            END
+          ) AS enrollment_status
         FROM users u
         LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
         LEFT JOIN associate_enrollment e ON (
@@ -387,8 +399,20 @@ export async function getAdminAssociateEnrollments(req: Request, res: Response):
           COALESCE(pa.city, 'Kanpur') AS city,
           COALESCE(e.created_at, u.registered_at) AS created_at,
           e.sign_date,
-          COALESCE(e.status, 'Pending') AS app_status,
-          CASE WHEN e.id IS NOT NULL THEN 'Completed' ELSE COALESCE(u.enrollment_status, 'Pending') END AS enrollment_status
+          COALESCE(e.status, u.enrollment_status, 'Pending') AS app_status,
+          COALESCE(
+            CASE 
+              WHEN LOWER(COALESCE(e.status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(e.status, '')) IN ('rejected') THEN 'Rejected'
+              WHEN LOWER(COALESCE(e.status, '')) IN ('pending', 'under_review', 'submitted') THEN 'Pending'
+              ELSE NULL
+            END,
+            CASE 
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
+              ELSE 'Pending'
+            END
+          ) AS enrollment_status
         FROM users u
         LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
         LEFT JOIN associate_enrollment e ON (

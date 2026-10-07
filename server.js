@@ -12622,10 +12622,21 @@ app.get("/api/admin/associates/:id",
       try {
         const [p] = await sql`
           SELECT u.*, sp.full_name AS sponsor_name, sp.member_id AS sponsor_member_id,
-                 COALESCE(u.enrollment_status, CASE WHEN ae.id IS NOT NULL THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
+                 COALESCE(
+                   CASE 
+                     WHEN LOWER(COALESCE(ae.status, '')) IN ('approved', 'completed') THEN 'Completed'
+                     WHEN LOWER(COALESCE(ae.status, '')) IN ('rejected') THEN 'Rejected'
+                     WHEN LOWER(COALESCE(ae.status, '')) IN ('pending', 'submitted') THEN 'Pending'
+                     ELSE NULL
+                   END,
+                   CASE 
+                     WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
+                     WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
+                     ELSE 'Pending'
+                   END
+                 ) AS enrollment_status,
                  CASE 
-                   WHEN ae.id IS NOT NULL THEN TRUE
-                   WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
+                   WHEN LOWER(COALESCE(ae.status, u.enrollment_status, '')) IN ('completed', 'approved') THEN TRUE
                    ELSE FALSE
                  END AS is_verified,
                  ae.id AS associate_enrollment_id,
@@ -12635,7 +12646,7 @@ app.get("/api/admin/associates/:id",
           FROM users u
           LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
           LEFT JOIN LATERAL (
-            SELECT ae_sub.id, ae_sub.contact_no_1, ae_sub.email
+            SELECT ae_sub.id, ae_sub.contact_no_1, ae_sub.email, ae_sub.status
             FROM associate_enrollment ae_sub
             WHERE (u.mobile_no IS NOT NULL AND ae_sub.contact_no_1 = u.mobile_no)
                OR (u.email IS NOT NULL AND LOWER(ae_sub.email) = LOWER(u.email))
@@ -12780,10 +12791,21 @@ app.get("/api/admin/associates",
           SELECT u.user_id, u.member_id, u.full_name, u.email, u.mobile_no, 
                  COALESCE(u.account_status, 'Active') AS account_status,
                  u.invitation_code, u.registered_at, sp.full_name AS sponsor_name,
-                 COALESCE(u.enrollment_status, CASE WHEN ae.id IS NOT NULL THEN 'Completed' ELSE 'Pending' END) AS enrollment_status,
+                 COALESCE(
+                   CASE 
+                     WHEN LOWER(COALESCE(ae.status, '')) IN ('approved', 'completed') THEN 'Completed'
+                     WHEN LOWER(COALESCE(ae.status, '')) IN ('rejected') THEN 'Rejected'
+                     WHEN LOWER(COALESCE(ae.status, '')) IN ('pending', 'submitted') THEN 'Pending'
+                     ELSE NULL
+                   END,
+                   CASE 
+                     WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
+                     WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
+                     ELSE 'Pending'
+                   END
+                 ) AS enrollment_status,
                  CASE 
-                   WHEN ae.id IS NOT NULL THEN TRUE
-                   WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
+                   WHEN LOWER(COALESCE(ae.status, u.enrollment_status, '')) IN ('completed', 'approved') THEN TRUE
                    ELSE FALSE
                  END AS is_verified,
                  ae.id AS associate_enrollment_id,
@@ -12802,7 +12824,7 @@ app.get("/api/admin/associates",
             WHERE tm_sub.associate_id = u.user_id
           ) tm_stats ON true
           LEFT JOIN LATERAL (
-            SELECT ae_sub.id, ae_sub.contact_no_1, ae_sub.email
+            SELECT ae_sub.id, ae_sub.contact_no_1, ae_sub.email, ae_sub.status
             FROM associate_enrollment ae_sub
             WHERE (u.mobile_no IS NOT NULL AND ae_sub.contact_no_1 = u.mobile_no)
                OR (u.email IS NOT NULL AND LOWER(ae_sub.email) = LOWER(u.email))
