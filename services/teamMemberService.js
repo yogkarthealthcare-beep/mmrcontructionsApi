@@ -137,18 +137,20 @@ export async function saveSignatureDataUrl(dataUrl, associateId, sigType) {
     }
 }
 /**
- * Auto-generate UID in format MMR-TM-YYYY-XXXX (e.g. MMR-TM-2026-0001)
+ * Auto-generate UID in format MMR-TM-XXXXX (e.g. MMR-TM-00001)
  */
 async function generateTeamMemberUid(tx) {
-    const currentYear = new Date().getFullYear();
-    const prefix = `MMR-TM-${currentYear}-%`;
     const [res] = await tx `
-    SELECT COUNT(*)::integer AS cnt
+    SELECT COALESCE(MAX(
+      CASE
+        WHEN team_member_uid ~* '^MMR-TM-[0-9]+$' THEN SUBSTRING(team_member_uid FROM 8)::integer
+        WHEN team_member_uid ~* '^MMR-TM-[0-9]+-[0-9]+$' THEN SUBSTRING(team_member_uid FROM 13)::integer
+        ELSE id END
+    ), 0) + 1 AS next_seq
     FROM team_members
-    WHERE team_member_uid LIKE ${prefix}
   `;
-    const nextSeq = (res?.cnt || 0) + 1;
-    return `MMR-TM-${currentYear}-${String(nextSeq).padStart(4, "0")}`;
+    const nextSeq = res?.next_seq || 1;
+    return `MMR-TM-${String(nextSeq).padStart(5, "0")}`;
 }
 /**
  * 1. Prefill Endpoint

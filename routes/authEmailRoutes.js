@@ -315,17 +315,26 @@ async function canResend(email) {
 
 async function createUserWithUniqueMemberId(db, pending) {
   await db`SELECT pg_advisory_xact_lock(hashtext('users_member_id_registration'))`;
-  const [sequence] = await db`
+  const isAssociate = String(pending.user_type || '').toLowerCase() === 'associate';
+  const prefix = isAssociate ? 'MMR-ASC-' : 'MMR-CUS-';
+  const [sequence] = isAssociate ? await db`
     SELECT COALESCE(MAX(
       CASE
-        WHEN member_id ~ '^MMR[0-9]+$'
-          THEN SUBSTRING(member_id FROM 4)::integer
-        WHEN member_id ~ '^MMR-[AC]-[0-9]+$'
-          THEN SUBSTRING(member_id FROM 7)::integer
+        WHEN member_id ~* '^MMR-ASC-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
+        WHEN member_id ~* '^MMR-A-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
+        WHEN member_id ~* '^MMR[0-9]+$' AND LOWER(user_type::TEXT) = 'associate' THEN SUBSTRING(member_id FROM 4)::integer
+        ELSE 0 END
+    ), 0) + 1 AS next_value
+    FROM users` : await db`
+    SELECT COALESCE(MAX(
+      CASE
+        WHEN member_id ~* '^MMR-CUS-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
+        WHEN member_id ~* '^MMR-C-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
+        WHEN member_id ~* '^MMR[0-9]+$' AND LOWER(user_type::TEXT) = 'customer' THEN SUBSTRING(member_id FROM 4)::integer
         ELSE 0 END
     ), 0) + 1 AS next_value
     FROM users`;
-  const memberId = `MMR${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
+  const memberId = `${prefix}${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
   let created;
   try {
     [created] = await db`
@@ -483,18 +492,28 @@ router.post('/register-quick', async (req, res) => {
       const passwordHash = await bcrypt.hash(password, 12);
 
       if (userType === 'Investor') {
+        const [invSeq] = await sql`
+          SELECT COALESCE(MAX(
+            CASE
+              WHEN member_id ~* '^MMR-INV-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
+              ELSE id END
+          ), 0) + 1 AS next_value
+          FROM investor_users`;
+        const memberId = `MMR-INV-${String(Number(invSeq?.next_value || 1)).padStart(5, '0')}`;
+
         const [createdInvestor] = await sql`
           INSERT INTO investor_users (
-            full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
+            member_id, full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
           ) VALUES (
-            ${fullName}, ${mobileNo}, ${email}, ${passwordHash},
+            ${memberId}, ${fullName}, ${mobileNo}, ${email}, ${passwordHash},
             'active', true, NOW(), NOW()
           )
-          RETURNING id, full_name, email, mobile_number, status, is_verified`;
+          RETURNING id, member_id, full_name, email, mobile_number, status, is_verified`;
 
         const payload = {
           id: createdInvestor.id,
           user_id: createdInvestor.id,
+          member_id: createdInvestor.member_id,
           user_type: 'Investor',
           role: 'Investor',
           email: createdInvestor.email,
@@ -899,20 +918,30 @@ router.post('/verify-email-otp', async (req, res) => {
         return err(res, 'Mobile number already registered', 409);
       }
 
+      const [invSeq] = await sql`
+        SELECT COALESCE(MAX(
+          CASE
+            WHEN member_id ~* '^MMR-INV-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
+            ELSE id END
+        ), 0) + 1 AS next_value
+        FROM investor_users`;
+      const memberId = `MMR-INV-${String(Number(invSeq?.next_value || 1)).padStart(5, '0')}`;
+
       const [createdInvestor] = await sql`
         INSERT INTO investor_users (
-          full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
+          member_id, full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
         ) VALUES (
-          ${pending.full_name}, ${pending.mobile_no}, ${pending.email}, ${pending.password_hash},
+          ${memberId}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email}, ${pending.password_hash},
           'active', true, NOW(), NOW()
         )
-        RETURNING id, full_name, email, mobile_number, status, is_verified`;
+        RETURNING id, member_id, full_name, email, mobile_number, status, is_verified`;
 
       await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
 
       const payload = {
         id: createdInvestor.id,
         user_id: createdInvestor.id,
+        member_id: createdInvestor.member_id,
         user_type: 'Investor',
         role: 'Investor',
         email: createdInvestor.email,

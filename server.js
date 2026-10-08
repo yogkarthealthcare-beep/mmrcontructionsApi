@@ -2889,19 +2889,61 @@ const safeInsertOtpLog = async (userType, refId, mobile, otpCode, purpose, expir
   }
 };
 
-// Generate member ID: MMR00001
+// Generate member ID with strict role prefixes:
+// Associate -> MMR-ASC-00001
+// Customer  -> MMR-CUS-00001
+// TeamMember-> MMR-TM-00001
+// Investor  -> MMR-INV-00001
 const genMemberID = async (userType) => {
-  const [row] = await sql`
-    SELECT COALESCE(MAX(
-      CASE
-        WHEN member_id ~ '^MMR[0-9]+$'
-          THEN SUBSTRING(member_id FROM 4)::integer
-        WHEN member_id ~ '^MMR-[AC]-[0-9]+$'
-          THEN SUBSTRING(member_id FROM 7)::integer
-        ELSE 0 END
-    ), 0) + 1 AS seq
-    FROM users`;
-  return "MMR" + String(row.seq).padStart(5, "0");
+  const normType = String(userType || "").toLowerCase().trim();
+  if (normType.includes("assoc")) {
+    const [row] = await sql`
+      SELECT COALESCE(MAX(
+        CASE
+          WHEN member_id ~* '^MMR-ASC-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
+          WHEN member_id ~* '^MMR-A-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
+          WHEN member_id ~* '^MMR[0-9]+$' AND LOWER(user_type::TEXT) = 'associate' THEN SUBSTRING(member_id FROM 4)::integer
+          ELSE 0 END
+      ), 0) + 1 AS seq
+      FROM users`;
+    return `MMR-ASC-${String(row?.seq || 1).padStart(5, "0")}`;
+  } else if (normType.includes("team")) {
+    const [row] = await sql`
+      SELECT COALESCE(MAX(
+        CASE
+          WHEN team_member_uid ~* '^MMR-TM-[0-9]+$' THEN SUBSTRING(team_member_uid FROM 8)::integer
+          WHEN team_member_uid ~* '^MMR-TM-[0-9]+-[0-9]+$' THEN SUBSTRING(team_member_uid FROM 13)::integer
+          ELSE 0 END
+      ), 0) + 1 AS seq
+      FROM team_members`;
+    return `MMR-TM-${String(row?.seq || 1).padStart(5, "0")}`;
+  } else if (normType.includes("invest")) {
+    try {
+      const [row] = await sql`
+        SELECT COALESCE(MAX(
+          CASE
+            WHEN member_id ~* '^MMR-INV-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
+            ELSE id END
+        ), 0) + 1 AS seq
+        FROM investor_users`;
+      return `MMR-INV-${String(row?.seq || 1).padStart(5, "0")}`;
+    } catch (_) {
+      const [row] = await sql`SELECT COALESCE(MAX(id), 0) + 1 AS seq FROM investor_users`;
+      return `MMR-INV-${String(row?.seq || 1).padStart(5, "0")}`;
+    }
+  } else {
+    // Default: Customer
+    const [row] = await sql`
+      SELECT COALESCE(MAX(
+        CASE
+          WHEN member_id ~* '^MMR-CUS-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
+          WHEN member_id ~* '^MMR-C-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
+          WHEN member_id ~* '^MMR[0-9]+$' AND LOWER(user_type::TEXT) = 'customer' THEN SUBSTRING(member_id FROM 4)::integer
+          ELSE 0 END
+      ), 0) + 1 AS seq
+      FROM users`;
+    return `MMR-CUS-${String(row?.seq || 1).padStart(5, "0")}`;
+  }
 };
 
 // Generate invite code for Associates
@@ -4809,18 +4851,20 @@ app.post("/api/auth/register-quick", async (req, res) => {
     
     if (authSettings.email_otp_enabled === false) {
       if (user_type === "Investor") {
+        const memberId = await genMemberID("Investor");
         const [createdInvestor] = await sql`
           INSERT INTO investor_users (
-            full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
+            member_id, full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
           ) VALUES (
-            ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
+            ${memberId}, ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
             'active', true, NOW(), NOW()
           )
-          RETURNING id, full_name, email, mobile_number, status, is_verified`;
+          RETURNING id, member_id, full_name, email, mobile_number, status, is_verified`;
 
         const payload = {
           id: createdInvestor.id,
           user_id: createdInvestor.id,
+          member_id: createdInvestor.member_id,
           user_type: "Investor",
           role: "Investor",
           email: createdInvestor.email,
@@ -4838,6 +4882,7 @@ app.post("/api/auth/register-quick", async (req, res) => {
           user: {
             id: createdInvestor.id,
             user_id: createdInvestor.id,
+            member_id: createdInvestor.member_id,
             full_name: createdInvestor.full_name,
             email: createdInvestor.email,
             mobile_no: createdInvestor.mobile_number,
@@ -4845,14 +4890,7 @@ app.post("/api/auth/register-quick", async (req, res) => {
           }
         }, "Registration successful. Logging in...", 201);
       } else {
-        const [sequence] = await sql`
-          SELECT COALESCE(MAX(
-            CASE
-              WHEN member_id ~ '^MMR[0-9]+$' THEN SUBSTRING(member_id FROM 4)::integer
-              WHEN member_id ~ '^MMR-[AC]-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
-              ELSE 0 END
-          ), 0) + 1 AS next_value FROM users`;
-        const memberId = `MMR${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
+        const memberId = await genMemberID(user_type);
 
         const [createdUser] = await sql`
           INSERT INTO users (
@@ -4971,20 +5009,22 @@ app.post("/api/auth/verify-email-otp", async (req, res) => {
     }
 
     if (pending.user_type === "Investor") {
+      const memberId = await genMemberID("Investor");
       const [createdInvestor] = await sql`
         INSERT INTO investor_users (
-          full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
+          member_id, full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
         ) VALUES (
-          ${pending.full_name}, ${pending.mobile_no}, ${pending.email}, ${pending.password_hash},
+          ${memberId}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email}, ${pending.password_hash},
           'active', true, NOW(), NOW()
         )
-        RETURNING id, full_name, email, mobile_number, status, is_verified`;
+        RETURNING id, member_id, full_name, email, mobile_number, status, is_verified`;
 
       await sql`DELETE FROM pending_registrations WHERE email = ${cleanEmail}`;
 
       const payload = {
         id: createdInvestor.id,
         user_id: createdInvestor.id,
+        member_id: createdInvestor.member_id,
         user_type: "Investor",
         role: "Investor",
         email: createdInvestor.email,
@@ -4999,6 +5039,7 @@ app.post("/api/auth/verify-email-otp", async (req, res) => {
         user: {
           id: createdInvestor.id,
           user_id: createdInvestor.id,
+          member_id: createdInvestor.member_id,
           full_name: createdInvestor.full_name,
           email: createdInvestor.email,
           mobile_no: createdInvestor.mobile_number,
@@ -5008,14 +5049,7 @@ app.post("/api/auth/verify-email-otp", async (req, res) => {
     }
 
     // Customer or Associate
-    const [sequence] = await sql`
-      SELECT COALESCE(MAX(
-        CASE
-          WHEN member_id ~ '^MMR[0-9]+$' THEN SUBSTRING(member_id FROM 4)::integer
-          WHEN member_id ~ '^MMR-[AC]-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
-          ELSE 0 END
-      ), 0) + 1 AS next_value FROM users`;
-    const memberId = `MMR${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
+    const memberId = await genMemberID(pending.user_type);
 
     const [createdUser] = await sql`
       INSERT INTO users (
@@ -5782,7 +5816,17 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
   try {
     const [user] = await sql`
       SELECT u.user_id,
-             COALESCE(NULLIF(TRIM(u.member_id), ''), NULLIF(TRIM(u.invitation_code), ''), NULLIF(TRIM(tm.team_member_uid), ''), NULLIF(TRIM(ces.application_no), ''), ('MMR' || LPAD(u.user_id::text, 5, '0'))) AS member_id,
+             COALESCE(
+               NULLIF(TRIM(u.member_id), ''),
+               NULLIF(TRIM(u.invitation_code), ''),
+               NULLIF(TRIM(tm.team_member_uid), ''),
+               NULLIF(TRIM(ces.application_no), ''),
+               CASE 
+                 WHEN LOWER(u.user_type::TEXT) = 'associate' THEN ('MMR-ASC-' || LPAD(u.user_id::text, 5, '0'))
+                 WHEN LOWER(u.user_type::TEXT) = 'team member' THEN ('MMR-TM-' || LPAD(u.user_id::text, 5, '0'))
+                 ELSE ('MMR-CUS-' || LPAD(u.user_id::text, 5, '0'))
+               END
+             ) AS member_id,
              COALESCE(NULLIF(TRIM(u.user_type::text), ''), 'Customer') AS user_type,
              COALESCE(NULLIF(TRIM(u.full_name), ''), NULLIF(TRIM(tm.full_name), ''), NULLIF(TRIM(ces.applicant_name), '')) AS full_name,
              COALESCE(u.date_of_birth, tm.date_of_birth, ces.date_of_birth) AS date_of_birth,
@@ -8351,14 +8395,7 @@ app.post("/api/associate/customers", verifyUserToken, requireAssociate, async (r
 
     const passwordHash = await bcrypt.hash(password, 12);
 
-    const [sequence] = await sql`
-      SELECT COALESCE(MAX(
-        CASE
-          WHEN member_id ~ '^MMR[0-9]+$' THEN SUBSTRING(member_id FROM 4)::integer
-          WHEN member_id ~ '^MMR-[AC]-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
-          ELSE 0 END
-      ), 0) + 1 AS next_value FROM users`;
-    const memberId = `MMR${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
+    const memberId = await genMemberID("Customer");
 
     const [createdUser] = await sql`
       INSERT INTO users (
@@ -9079,9 +9116,10 @@ const getAdminUsersPage = async (query, defaults = {}) => {
   const rows = await sql.unsafe(`
     SELECT u.user_id,
            CASE 
-             WHEN u.user_id = 1 THEN 'MMR00001'
              WHEN u.member_id IS NOT NULL AND u.member_id != '' THEN u.member_id
-             ELSE CONCAT('MMR', LPAD(u.user_id::text, 5, '0'))
+             WHEN LOWER(u.user_type::TEXT) = 'associate' THEN CONCAT('MMR-ASC-', LPAD(u.user_id::text, 5, '0'))
+             WHEN LOWER(u.user_type::TEXT) = 'team member' THEN CONCAT('MMR-TM-', LPAD(u.user_id::text, 5, '0'))
+             ELSE CONCAT('MMR-CUS-', LPAD(u.user_id::text, 5, '0'))
            END AS member_id,
            u.user_type, u.full_name, u.mobile_no,
            u.email, u.account_status, u.registered_at, u.updated_at,

@@ -475,14 +475,23 @@ router.post(["/investor/verify-otp", "/investor/auth/verify-otp"], async (req, r
     if (new Date() > new Date(pending.expires_at)) return err(res, "OTP has expired.", 400);
     if (pending.otp_code !== cleanOtp) return err(res, "Invalid OTP.", 400);
 
+    const [invSeq] = await sql`
+      SELECT COALESCE(MAX(
+        CASE
+          WHEN member_id ~* '^MMR-INV-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
+          ELSE id END
+      ), 0) + 1 AS seq
+      FROM investor_users`;
+    const memberId = `MMR-INV-${String(invSeq?.seq || 1).padStart(5, '0')}`;
+
     const [newInvestor] = await sql`
       INSERT INTO investor_users (
-        full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
+        member_id, full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
       ) VALUES (
-        ${pending.full_name}, ${pending.mobile_no}, ${pending.email}, ${pending.password_hash},
+        ${memberId}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email}, ${pending.password_hash},
         'active', true, NOW(), NOW()
       )
-      RETURNING id, full_name, email, mobile_number, status, is_verified, created_at
+      RETURNING id, member_id, full_name, email, mobile_number, status, is_verified, created_at
     `;
 
     await sql`DELETE FROM pending_registrations WHERE email = ${cleanEmail}`;
@@ -507,7 +516,9 @@ router.post(["/investor/login", "/investor/auth/login"], async (req, res) => {
 
     const [user] = await sql`
       SELECT * FROM investor_users
-      WHERE LOWER(email) = ${loginId} OR mobile_number = ${loginId}
+      WHERE LOWER(email) = ${loginId} 
+         OR mobile_number = ${loginId}
+         OR LOWER(COALESCE(member_id, '')) = ${loginId}
       LIMIT 1
     `;
 
