@@ -9124,7 +9124,7 @@ const getAdminUsersPage = async (query, defaults = {}) => {
            u.user_type, u.full_name, u.mobile_no,
            u.email, u.account_status, u.registered_at, u.updated_at,
            COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
-           CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted') OR u.user_id = 1 THEN TRUE ELSE FALSE END AS is_verified,
+           CASE WHEN LOWER(COALESCE(ces.application_status, u.enrollment_status, '')) IN ('completed', 'approved') THEN TRUE ELSE FALSE END AS is_verified,
            COALESCE(pa.address_line1, ces.permanent_address, ces.present_address) AS address,
            COALESCE(pa.city, ces.permanent_city, ces.present_city) AS city,
            COALESCE(pa.state, ces.permanent_state_pin, ces.present_state_pin) AS state,
