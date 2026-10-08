@@ -1451,8 +1451,9 @@ const requireMlmSchema = (() => {
         } catch(e) {}
         
         try {
-          await sql`DELETE FROM associate_ranks WHERE rank_id NOT IN (SELECT MIN(rank_id) FROM associate_ranks GROUP BY rank_name)`;
+          await sql`DELETE FROM associate_ranks WHERE ctid NOT IN (SELECT MIN(ctid) FROM associate_ranks GROUP BY rank_name)`;
           await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_associate_ranks_name ON associate_ranks(rank_name)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_associate_ranks_id ON associate_ranks(rank_id)`;
         } catch(e) {}
         try {
           await sql`DELETE FROM associate_referral_links WHERE id NOT IN (SELECT MIN(id) FROM associate_referral_links GROUP BY invite_code)`;
