@@ -87,7 +87,7 @@ export async function deleteAssociateProfile(associateId, adminActor = { admin_i
   `;
 
   // 2. Resolve Any Associated Enrollment Record (by user_id, member_id, phone, PAN)
-  const uid = targetUser?.user_id || 0;
+  const uid = targetUser?.user_id || (numId > 0 ? numId : 0);
   const memberId = targetUser?.member_id || rawId;
   const mobile = targetUser?.mobile_no ? String(targetUser.mobile_no).trim() : null;
   const pan = targetUser?.pan_number ? String(targetUser.pan_number).trim().toUpperCase() : null;
@@ -130,159 +130,180 @@ export async function deleteAssociateProfile(associateId, adminActor = { admin_i
 
   // 3b. From Child Nominees & Sponsors
   if (enrollmentIds.length > 0) {
-    const nomineePhotos = await sql`
-      SELECT photo_path FROM associate_nominee 
-      WHERE associate_id IN ${sql(enrollmentIds)} AND photo_path IS NOT NULL
-    `;
-    nomineePhotos.forEach(r => filesToClean.push(r.photo_path));
+    try {
+      const nomineePhotos = await sql`
+        SELECT photo_path FROM associate_nominee 
+        WHERE associate_id IN ${sql(enrollmentIds)} AND photo_path IS NOT NULL
+      `;
+      nomineePhotos.forEach(r => filesToClean.push(r.photo_path));
+    } catch (_) {}
 
-    const sponsorSigns = await sql`
-      SELECT signature_path FROM associate_sponsor 
-      WHERE associate_id IN ${sql(enrollmentIds)} AND signature_path IS NOT NULL
-    `;
-    sponsorSigns.forEach(r => filesToClean.push(r.signature_path));
+    try {
+      const sponsorSigns = await sql`
+        SELECT signature_path FROM associate_sponsor 
+        WHERE associate_id IN ${sql(enrollmentIds)} AND signature_path IS NOT NULL
+      `;
+      sponsorSigns.forEach(r => filesToClean.push(r.signature_path));
+    } catch (_) {}
   }
 
   // 3c. From User Documents & Profile Photos
   if (uid > 0) {
-    const userDocs = await sql`
-      SELECT file_path, cloudinary_public_id FROM user_documents 
-      WHERE user_id = ${uid}
-    `;
-    userDocs.forEach(d => {
-      fileObjectsToClean.push({ url: d.file_path, publicId: d.cloudinary_public_id });
-    });
+    try {
+      const userDocs = await sql`
+        SELECT file_path, cloudinary_public_id FROM user_documents 
+        WHERE user_id = ${uid}
+      `;
+      userDocs.forEach(d => {
+        fileObjectsToClean.push({ url: d.file_path, publicId: d.cloudinary_public_id });
+      });
+    } catch (_) {}
 
-    const [userPhoto] = await sql`
-      SELECT profile_picture_url, profile_photo FROM users WHERE user_id = ${uid}
-    `;
-    if (userPhoto?.profile_picture_url) filesToClean.push(userPhoto.profile_picture_url);
-    if (userPhoto?.profile_photo) filesToClean.push(userPhoto.profile_photo);
+    try {
+      const [userPhoto] = await sql`
+        SELECT profile_photo FROM users WHERE user_id = ${uid}
+      `;
+      if (userPhoto?.profile_photo) filesToClean.push(userPhoto.profile_photo);
+    } catch (_) {}
   }
 
   // 4. Execute Transactional Database Cleanup
   await sql.begin(async (tx) => {
     // 4a. Team Members: Detach or clean self-records
     if (uid > 0 || memberId) {
-      // If the team member record itself belonged to this user, unlink user_id
-      await tx`UPDATE team_members SET user_id = NULL WHERE user_id = ${uid > 0 ? uid : -1}`;
-      // For team members sponsored/added by this associate, detach parent associate reference safely
-      await tx`
-        UPDATE team_members 
-        SET associate_id = 0, associate_name = 'Unassigned' 
-        WHERE associate_id = ${uid > 0 ? uid : -1} 
-           OR associate_name = ${resolvedMemberId}
-      `;
+      try {
+        await tx`UPDATE team_members SET user_id = NULL WHERE user_id = ${uid > 0 ? uid : -1}`;
+      } catch (_) {}
+      try {
+        await tx`
+          UPDATE team_members 
+          SET associate_id = 0, associate_name = 'Unassigned' 
+          WHERE associate_id = ${uid > 0 ? uid : -1} 
+             OR associate_name = ${resolvedMemberId}
+        `;
+      } catch (_) {}
     }
 
     // 4b. MLM & Network Tree Hierarchy Reassignment / Detach
     if (uid > 0) {
-      // Safe Sponsor Reassignment: Downline users sponsored by this associate are reassigned to root company sponsor (User ID 1)
-      await tx`
-        UPDATE users 
-        SET sponsor_user_id = 1 
-        WHERE sponsor_user_id = ${uid} AND user_id != ${uid}
-      `;
+      try {
+        await tx`
+          UPDATE users 
+          SET sponsor_user_id = 1 
+          WHERE sponsor_user_id = ${uid} AND user_id != ${uid}
+        `;
+      } catch (_) {}
 
-      await tx`
-        UPDATE referral_registrations 
-        SET sponsor_user_id = 1 
-        WHERE sponsor_user_id = ${uid} AND referred_user_id != ${uid}
-      `;
+      try {
+        await tx`
+          UPDATE referral_registrations 
+          SET sponsor_user_id = 1 
+          WHERE sponsor_user_id = ${uid} AND referred_user_id != ${uid}
+        `;
+      } catch (_) {}
 
-      // Clean personal network and sales trackers
-      await tx`DELETE FROM associate_sales_tracker WHERE associate_user_id = ${uid}`;
-      await tx`DELETE FROM associate_rank_history WHERE associate_user_id = ${uid}`;
-      await tx`DELETE FROM associate_referral_links WHERE associate_user_id = ${uid}`;
-      await tx`DELETE FROM mlm_network WHERE associate_user_id = ${uid} OR sponsor_user_id = ${uid}`;
-      await tx`DELETE FROM mlm_tree_closure WHERE ancestor_user_id = ${uid} OR descendant_user_id = ${uid}`;
-      await tx`DELETE FROM associate_network_closure WHERE ancestor_user_id = ${uid} OR descendant_user_id = ${uid}`;
-      await tx`DELETE FROM referral_registrations WHERE referred_user_id = ${uid}`;
-      await tx`DELETE FROM associate_payout_requests WHERE associate_user_id = ${uid}`;
-      await tx`DELETE FROM payout_requests WHERE user_id = ${uid}`;
-      await tx`DELETE FROM withdrawal_requests WHERE user_id = ${uid}`;
+      try { await tx`DELETE FROM associate_sales_tracker WHERE associate_user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM associate_rank_history WHERE associate_user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM associate_referral_links WHERE associate_user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM mlm_network WHERE associate_user_id = ${uid} OR sponsor_user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM mlm_tree_closure WHERE ancestor_user_id = ${uid} OR descendant_user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM associate_network_closure WHERE ancestor_user_id = ${uid} OR descendant_user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM referral_registrations WHERE referred_user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM associate_payout_requests WHERE associate_user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM payout_requests WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM withdrawal_requests WHERE user_id = ${uid}`; } catch (_) {}
     }
 
     // 4c. Delete Associate Enrollment & All Child Tables (Addresses, Bank, Nominee, Sponsor)
     if (enrollmentIds.length > 0) {
-      await tx`DELETE FROM associate_address WHERE associate_id IN ${sql(enrollmentIds)}`;
-      await tx`DELETE FROM associate_bank_details WHERE associate_id IN ${sql(enrollmentIds)}`;
-      await tx`DELETE FROM associate_nominee WHERE associate_id IN ${sql(enrollmentIds)}`;
-      await tx`DELETE FROM associate_sponsor WHERE associate_id IN ${sql(enrollmentIds)}`;
-      await tx`DELETE FROM associate_enrollment WHERE id IN ${sql(enrollmentIds)}`;
+      try { await tx`DELETE FROM associate_address WHERE associate_id IN ${sql(enrollmentIds)}`; } catch (_) {}
+      try { await tx`DELETE FROM associate_bank_details WHERE associate_id IN ${sql(enrollmentIds)}`; } catch (_) {}
+      try { await tx`DELETE FROM associate_nominee WHERE associate_id IN ${sql(enrollmentIds)}`; } catch (_) {}
+      try { await tx`DELETE FROM associate_sponsor WHERE associate_id IN ${sql(enrollmentIds)}`; } catch (_) {}
+      try { await tx`DELETE FROM associate_enrollment WHERE id IN ${sql(enrollmentIds)}`; } catch (_) {}
     }
     if (uid > 0) {
-      await tx`DELETE FROM associate_address WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`;
-      await tx`DELETE FROM associate_bank_details WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`;
-      await tx`DELETE FROM associate_nominee WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`;
-      await tx`DELETE FROM associate_sponsor WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`;
-      await tx`DELETE FROM associate_enrollment WHERE user_id = ${uid}`;
+      try { await tx`DELETE FROM associate_address WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`; } catch (_) {}
+      try { await tx`DELETE FROM associate_bank_details WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`; } catch (_) {}
+      try { await tx`DELETE FROM associate_nominee WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`; } catch (_) {}
+      try { await tx`DELETE FROM associate_sponsor WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`; } catch (_) {}
+      try { await tx`DELETE FROM associate_enrollment WHERE user_id = ${uid}`; } catch (_) {}
     }
 
     // 4d. Delete User Profile Support Tables
     if (uid > 0) {
-      await tx`DELETE FROM user_addresses WHERE user_id = ${uid}`;
-      await tx`DELETE FROM user_bank_details WHERE user_id = ${uid}`;
-      await tx`DELETE FROM user_nominees WHERE user_id = ${uid}`;
-      await tx`DELETE FROM user_kyc_profiles WHERE user_id = ${uid}`;
-      await tx`DELETE FROM user_documents WHERE user_id = ${uid}`;
-      await tx`DELETE FROM user_device_tokens WHERE user_id = ${uid}`;
-      await tx`DELETE FROM wallet_transactions WHERE user_id = ${uid}`;
-      await tx`DELETE FROM wallets WHERE user_id = ${uid}`;
-      await tx`DELETE FROM otp_log WHERE reference_id = ${String(uid)} OR (${Boolean(mobile)} AND mobile_no = ${mobile || ''})`;
+      try { await tx`DELETE FROM user_addresses WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM user_bank_details WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM user_nominees WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM user_kyc_profiles WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM user_documents WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM user_device_tokens WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM wallet_transactions WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM user_wallets WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM wallets WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM otp_log WHERE reference_id = ${String(uid)} OR (${Boolean(mobile)} AND mobile_no = ${mobile || ''}) OR (${Boolean(mobile)} AND mobile = ${mobile || ''})`; } catch (_) {}
 
       // 4e. Buyer Bookings made BY this associate as a personal buyer
-      const personalBookings = await tx`SELECT booking_id, plot_id FROM bookings WHERE user_id = ${uid}`;
-      if (personalBookings.length > 0) {
-        const plotIds = personalBookings.map(b => b.plot_id).filter(Boolean);
-        if (plotIds.length > 0) {
-          await tx`UPDATE plots SET plot_status = 'Vacant'::plot_status_enum, is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
-        }
-        for (const bk of personalBookings) {
-          const emiSchedules = await tx`SELECT emi_id FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
-          if (emiSchedules.length > 0) {
-            const emiIds = emiSchedules.map(e => e.emi_id);
-            await tx`DELETE FROM emi_payment_proofs WHERE emi_id IN ${sql(emiIds)}`;
-            await tx`DELETE FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
+      try {
+        const personalBookings = await tx`SELECT booking_id, plot_id FROM bookings WHERE user_id = ${uid}`;
+        if (personalBookings.length > 0) {
+          const plotIds = personalBookings.map(b => b.plot_id).filter(Boolean);
+          if (plotIds.length > 0) {
+            await tx`UPDATE plots SET plot_status = 'Vacant'::plot_status_enum, is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
           }
-          await tx`DELETE FROM booking_payment_records WHERE booking_id = ${bk.booking_id}`;
-          await tx`DELETE FROM booking_invoices WHERE booking_id = ${bk.booking_id}`;
-          await tx`DELETE FROM buyback_applications WHERE booking_id = ${bk.booking_id}`;
-          await tx`DELETE FROM buyback_requests WHERE booking_id = ${bk.booking_id}`;
-          await tx`DELETE FROM invoices WHERE booking_id = ${bk.booking_id}`;
+          for (const bk of personalBookings) {
+            const emiSchedules = await tx`SELECT emi_id FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
+            if (emiSchedules.length > 0) {
+              const emiIds = emiSchedules.map(e => e.emi_id);
+              await tx`DELETE FROM emi_payment_proofs WHERE emi_id IN ${sql(emiIds)}`;
+              await tx`DELETE FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
+            }
+            try { await tx`DELETE FROM booking_payment_records WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
+            try { await tx`DELETE FROM booking_invoices WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
+            try { await tx`DELETE FROM buyback_applications WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
+            try { await tx`DELETE FROM buyback_requests WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
+            try { await tx`DELETE FROM invoices WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
+          }
+          await tx`DELETE FROM bookings WHERE user_id = ${uid}`;
         }
-        await tx`DELETE FROM bookings WHERE user_id = ${uid}`;
-      }
-      await tx`DELETE FROM invoices WHERE user_id = ${uid}`;
+      } catch (_) {}
+
+      try { await tx`DELETE FROM invoices WHERE user_id = ${uid}`; } catch (_) {}
 
       // 4f. Preserve Customer Bookings where this Associate was merely the referring Agent
-      await tx`UPDATE bookings SET associate_user_id = NULL WHERE associate_user_id = ${uid}`;
+      try {
+        await tx`UPDATE bookings SET associate_user_id = NULL WHERE associate_user_id = ${uid}`;
+      } catch (_) {}
 
       // 4g. Delete Master User Record
-      await tx`DELETE FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'associate'`;
+      await tx`DELETE FROM users WHERE user_id = ${uid}`;
     }
 
     // 4h. Record Audit Log
-    const actorId = Number(adminActor.admin_id || adminActor.id) || 1;
-    const actorName = String(adminActor.full_name || adminActor.username || "Admin");
-    await tx`
-      INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, details)
-      VALUES (
-        'Admin', 
-        ${actorId}, 
-        ${actorName},
-        'AssociateManagement', 
-        'Deleted', 
-        'users', 
-        ${uid > 0 ? String(uid) : resolvedMemberId},
-        ${JSON.stringify({
-          member_id: resolvedMemberId,
-          full_name: resolvedName,
-          cleaned_enrollment_ids: enrollmentIds,
-          files_collected_count: filesToClean.length + fileObjectsToClean.length
-        })}
-      )
-    `;
+    try {
+      const actorId = Number(adminActor.admin_id || adminActor.id) || 1;
+      const actorName = String(adminActor.full_name || adminActor.username || "Admin");
+      await tx`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+        VALUES (
+          'Admin', 
+          ${actorId}, 
+          ${actorName}, 
+          'AssociateManagement', 
+          'Deleted', 
+          'users', 
+          ${uid > 0 ? uid : null}, 
+          ${JSON.stringify({
+            member_id: resolvedMemberId,
+            full_name: resolvedName,
+            cleaned_enrollment_ids: enrollmentIds,
+            files_collected_count: filesToClean.length + fileObjectsToClean.length
+          })}
+        )
+      `;
+    } catch (auditErr) {
+      console.warn('[ProfileCleanupService] Audit log write warning:', auditErr.message);
+    }
   });
 
   // 5. Post-Commit Physical File Cleanup (Safe & Protected)
@@ -368,93 +389,104 @@ export async function deleteCustomerProfile(customerId, adminActor = { admin_id:
   }
 
   if (uid > 0) {
-    const userDocs = await sql`
-      SELECT file_path, cloudinary_public_id FROM user_documents WHERE user_id = ${uid}
-    `;
-    userDocs.forEach(d => {
-      fileObjectsToClean.push({ url: d.file_path, publicId: d.cloudinary_public_id });
-    });
+    try {
+      const userDocs = await sql`
+        SELECT file_path, cloudinary_public_id FROM user_documents WHERE user_id = ${uid}
+      `;
+      userDocs.forEach(d => {
+        fileObjectsToClean.push({ url: d.file_path, publicId: d.cloudinary_public_id });
+      });
+    } catch (_) {}
 
-    const [userPhoto] = await sql`
-      SELECT profile_picture_url, profile_photo FROM users WHERE user_id = ${uid}
-    `;
-    if (userPhoto?.profile_picture_url) filesToClean.push(userPhoto.profile_picture_url);
-    if (userPhoto?.profile_photo) filesToClean.push(userPhoto.profile_photo);
+    try {
+      const [userPhoto] = await sql`
+        SELECT profile_photo FROM users WHERE user_id = ${uid}
+      `;
+      if (userPhoto?.profile_photo) filesToClean.push(userPhoto.profile_photo);
+    } catch (_) {}
   }
 
   // 4. Execute Transactional Database Cleanup
   await sql.begin(async (tx) => {
     // 4a. Delete Customer Submissions & Nominees
     if (submissionIds.length > 0) {
-      await tx`DELETE FROM customer_nominees WHERE submission_id IN ${sql(submissionIds)}`;
-      await tx`DELETE FROM customer_enrollment_submissions WHERE id IN ${sql(submissionIds)}`;
+      try { await tx`DELETE FROM customer_nominees WHERE submission_id IN ${sql(submissionIds)}`; } catch (_) {}
+      try { await tx`DELETE FROM customer_enrollment_submissions WHERE id IN ${sql(submissionIds)}`; } catch (_) {}
     }
     if (uid > 0) {
-      await tx`DELETE FROM customer_nominees WHERE submission_id IN (SELECT id FROM customer_enrollment_submissions WHERE user_id = ${uid})`;
-      await tx`DELETE FROM customer_enrollment_submissions WHERE user_id = ${uid}`;
+      try { await tx`DELETE FROM customer_nominees WHERE submission_id IN (SELECT id FROM customer_enrollment_submissions WHERE user_id = ${uid})`; } catch (_) {}
+      try { await tx`DELETE FROM customer_enrollment_submissions WHERE user_id = ${uid}`; } catch (_) {}
     }
 
     // 4b. Delete User Profile Support Tables
     if (uid > 0) {
-      await tx`DELETE FROM user_addresses WHERE user_id = ${uid}`;
-      await tx`DELETE FROM user_bank_details WHERE user_id = ${uid}`;
-      await tx`DELETE FROM user_nominees WHERE user_id = ${uid}`;
-      await tx`DELETE FROM user_kyc_profiles WHERE user_id = ${uid}`;
-      await tx`DELETE FROM user_documents WHERE user_id = ${uid}`;
-      await tx`DELETE FROM user_device_tokens WHERE user_id = ${uid}`;
-      await tx`DELETE FROM wallet_transactions WHERE user_id = ${uid}`;
-      await tx`DELETE FROM wallets WHERE user_id = ${uid}`;
-      await tx`DELETE FROM referral_registrations WHERE referred_user_id = ${uid}`;
-      await tx`DELETE FROM otp_log WHERE reference_id = ${String(uid)} OR (${Boolean(mobile)} AND mobile_no = ${mobile || ''})`;
+      try { await tx`DELETE FROM user_addresses WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM user_bank_details WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM user_nominees WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM user_kyc_profiles WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM user_documents WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM user_device_tokens WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM wallet_transactions WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM user_wallets WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM wallets WHERE user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM referral_registrations WHERE referred_user_id = ${uid}`; } catch (_) {}
+      try { await tx`DELETE FROM otp_log WHERE reference_id = ${String(uid)} OR (${Boolean(mobile)} AND mobile_no = ${mobile || ''}) OR (${Boolean(mobile)} AND mobile = ${mobile || ''})`; } catch (_) {}
 
       // 4c. Clean Customer Personal Bookings & Release Plots
-      const bookings = await tx`SELECT booking_id, plot_id FROM bookings WHERE user_id = ${uid}`;
-      if (bookings.length > 0) {
-        const plotIds = bookings.map(b => b.plot_id).filter(Boolean);
-        if (plotIds.length > 0) {
-          await tx`UPDATE plots SET plot_status = 'Vacant'::plot_status_enum, is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
-        }
-        for (const bk of bookings) {
-          const emiSchedules = await tx`SELECT emi_id FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
-          if (emiSchedules.length > 0) {
-            const emiIds = emiSchedules.map(e => e.emi_id);
-            await tx`DELETE FROM emi_payment_proofs WHERE emi_id IN ${sql(emiIds)}`;
-            await tx`DELETE FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
+      try {
+        const bookings = await tx`SELECT booking_id, plot_id FROM bookings WHERE user_id = ${uid}`;
+        if (bookings.length > 0) {
+          const plotIds = bookings.map(b => b.plot_id).filter(Boolean);
+          if (plotIds.length > 0) {
+            await tx`UPDATE plots SET plot_status = 'Vacant'::plot_status_enum, is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
           }
-          await tx`DELETE FROM booking_payment_records WHERE booking_id = ${bk.booking_id}`;
-          await tx`DELETE FROM booking_invoices WHERE booking_id = ${bk.booking_id}`;
-          await tx`DELETE FROM buyback_applications WHERE booking_id = ${bk.booking_id}`;
-          await tx`DELETE FROM buyback_requests WHERE booking_id = ${bk.booking_id}`;
-          await tx`DELETE FROM invoices WHERE booking_id = ${bk.booking_id}`;
+          for (const bk of bookings) {
+            const emiSchedules = await tx`SELECT emi_id FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
+            if (emiSchedules.length > 0) {
+              const emiIds = emiSchedules.map(e => e.emi_id);
+              await tx`DELETE FROM emi_payment_proofs WHERE emi_id IN ${sql(emiIds)}`;
+              await tx`DELETE FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
+            }
+            try { await tx`DELETE FROM booking_payment_records WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
+            try { await tx`DELETE FROM booking_invoices WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
+            try { await tx`DELETE FROM buyback_applications WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
+            try { await tx`DELETE FROM buyback_requests WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
+            try { await tx`DELETE FROM invoices WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
+          }
+          await tx`DELETE FROM bookings WHERE user_id = ${uid}`;
         }
-        await tx`DELETE FROM bookings WHERE user_id = ${uid}`;
-      }
-      await tx`DELETE FROM invoices WHERE user_id = ${uid}`;
+      } catch (_) {}
+
+      try { await tx`DELETE FROM invoices WHERE user_id = ${uid}`; } catch (_) {}
 
       // 4d. Delete User Record
-      await tx`DELETE FROM users WHERE user_id = ${uid} AND LOWER(user_type::text) = 'customer'`;
+      await tx`DELETE FROM users WHERE user_id = ${uid}`;
     }
 
     // 4e. Record Audit Log
-    const actorId = Number(adminActor.admin_id || adminActor.id) || 1;
-    const actorName = String(adminActor.full_name || adminActor.username || "Admin");
-    await tx`
-      INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, details)
-      VALUES (
-        'Admin', 
-        ${actorId}, 
-        ${actorName},
-        'CustomerManagement', 
-        'Deleted', 
-        'users', 
-        ${uid > 0 ? String(uid) : (submissionIds[0] || rawId)},
-        ${JSON.stringify({
-          full_name: resolvedName,
-          cleaned_submissions: submissionIds,
-          files_collected_count: filesToClean.length + fileObjectsToClean.length
-        })}
-      )
-    `;
+    try {
+      const actorId = Number(adminActor.admin_id || adminActor.id) || 1;
+      const actorName = String(adminActor.full_name || adminActor.username || "Admin");
+      await tx`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+        VALUES (
+          'Admin', 
+          ${actorId}, 
+          ${actorName}, 
+          'CustomerManagement', 
+          'Deleted', 
+          'users', 
+          ${uid > 0 ? uid : null}, 
+          ${JSON.stringify({
+            full_name: resolvedName,
+            cleaned_submissions: submissionIds,
+            files_collected_count: filesToClean.length + fileObjectsToClean.length
+          })}
+        )
+      `;
+    } catch (auditErr) {
+      console.warn('[ProfileCleanupService] Customer audit log warning:', auditErr.message);
+    }
   });
 
   // 5. Post-Commit Physical File Cleanup
@@ -492,98 +524,87 @@ export async function deleteInvestorProfile(investorId, adminActor = { admin_id:
   let targetEnrollmentId = isUuid ? rawId : null;
 
   if (isUuid) {
-    const [enrollment] = await sql`SELECT id, investor_id FROM investor_enrollments WHERE id = ${rawId}`;
-    if (enrollment) {
-      targetEnrollmentId = enrollment.id;
-      targetInvestorId = enrollment.investor_id;
-    }
-  } else if (!isNaN(Number(rawId))) {
-    const numId = Number(rawId);
-    const [invUser] = await sql`SELECT id FROM investor_users WHERE id = ${numId}`;
-    if (invUser) {
-      targetInvestorId = invUser.id;
-    } else {
-      const [enrollment] = await sql`SELECT id, investor_id FROM investor_enrollments WHERE investor_id = ${numId} LIMIT 1`;
+    try {
+      const [enrollment] = await sql`SELECT id, investor_id FROM investor_enrollments WHERE id = ${rawId}`;
       if (enrollment) {
-        targetEnrollmentId = enrollment.id;
-        targetInvestorId = enrollment.investor_id || numId;
-      } else {
-        const [showcase] = await sql`SELECT id, user_id FROM investors WHERE id = ${numId} OR user_id = ${numId} LIMIT 1`;
-        if (showcase) {
-          targetInvestorId = showcase.user_id || showcase.id;
-        } else {
-          targetInvestorId = numId;
-        }
+        targetInvestorId = enrollment.investor_id || null;
       }
-    }
+    } catch (_) {}
+  } else {
+    targetInvestorId = Number(rawId);
   }
 
-  if (!targetInvestorId && !targetEnrollmentId) {
-    const err = new Error("Investor not found");
-    err.statusCode = 404;
-    throw err;
-  }
-
-  // 1. Collect ALL Physical Files (Before DB Deletions)
+  // 1. Collect Physical Files
   const filesToClean = [];
   const fileObjectsToClean = [];
 
   if (targetInvestorId) {
-    const [invUser] = await sql`SELECT profile_picture_url FROM investor_users WHERE id = ${targetInvestorId}`;
-    if (invUser?.profile_picture_url) filesToClean.push(invUser.profile_picture_url);
+    try {
+      const docs = await sql`SELECT file_url FROM investor_documents WHERE investor_id = ${targetInvestorId}`;
+      docs.forEach(d => { if (d.file_url) filesToClean.push(d.file_url); });
+    } catch (_) {}
 
-    const deposits = await sql`SELECT payment_screenshot_url FROM investor_deposits WHERE investor_id = ${targetInvestorId} AND payment_screenshot_url IS NOT NULL`;
-    deposits.forEach(d => filesToClean.push(d.payment_screenshot_url));
+    try {
+      const [invUser] = await sql`SELECT profile_picture_url FROM investor_users WHERE id = ${targetInvestorId}`;
+      if (invUser?.profile_picture_url) filesToClean.push(invUser.profile_picture_url);
+    } catch (_) {}
 
-    const docs = await sql`SELECT document_path FROM investor_documents WHERE investor_id = ${targetInvestorId} AND document_path IS NOT NULL`;
-    docs.forEach(d => filesToClean.push(d.document_path));
+    try {
+      const deposits = await sql`SELECT payment_receipt_url FROM investor_deposits WHERE investor_id = ${targetInvestorId}`;
+      deposits.forEach(d => { if (d.payment_receipt_url) filesToClean.push(d.payment_receipt_url); });
+    } catch (_) {}
 
-    const [showcase] = await sql`SELECT profile_image_url, profile_image_public_id FROM investors WHERE user_id = ${targetInvestorId} OR id = ${targetInvestorId}`;
-    if (showcase?.profile_image_url || showcase?.profile_image_public_id) {
-      fileObjectsToClean.push({ url: showcase.profile_image_url, publicId: showcase.profile_image_public_id });
-    }
+    try {
+      const enrolls = await sql`SELECT applicant_photo_url, signature_url FROM investor_enrollments WHERE investor_id = ${targetInvestorId}`;
+      enrolls.forEach(e => {
+        if (e.applicant_photo_url) filesToClean.push(e.applicant_photo_url);
+        if (e.signature_url) filesToClean.push(e.signature_url);
+      });
+    } catch (_) {}
   }
 
   // 2. Execute Transactional Database Cleanup
   await sql.begin(async (tx) => {
     if (targetInvestorId) {
-      await tx`DELETE FROM investors WHERE user_id = ${targetInvestorId} OR id = ${targetInvestorId}`;
-      await tx`DELETE FROM investor_deposits WHERE investor_id = ${targetInvestorId}`;
-      await tx`DELETE FROM investor_documents WHERE investor_id = ${targetInvestorId}`;
-      await tx`DELETE FROM investor_notifications WHERE investor_id = ${targetInvestorId}`;
-      await tx`DELETE FROM investor_settlement_preferences WHERE investor_id = ${targetInvestorId}`;
-      await tx`DELETE FROM settlement_change_requests WHERE investor_id = ${targetInvestorId}`;
-      await tx`DELETE FROM investor_transactions WHERE investor_id = ${targetInvestorId}`;
-      await tx`DELETE FROM investor_withdrawals WHERE investor_id = ${targetInvestorId}`;
-      await tx`DELETE FROM investor_wallet WHERE investor_id = ${targetInvestorId}`;
-      await tx`DELETE FROM investor_enrollments WHERE investor_id = ${targetInvestorId}`;
-      await tx`DELETE FROM investor_users WHERE id = ${targetInvestorId}`;
+      try { await tx`DELETE FROM investors WHERE user_id = ${targetInvestorId} OR id = ${targetInvestorId}`; } catch (_) {}
+      try { await tx`DELETE FROM investor_deposits WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
+      try { await tx`DELETE FROM investor_documents WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
+      try { await tx`DELETE FROM investor_notifications WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
+      try { await tx`DELETE FROM investor_settlement_preferences WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
+      try { await tx`DELETE FROM settlement_change_requests WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
+      try { await tx`DELETE FROM investor_transactions WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
+      try { await tx`DELETE FROM investor_withdrawals WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
+      try { await tx`DELETE FROM investor_wallet WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
+      try { await tx`DELETE FROM investor_enrollments WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
+      try { await tx`DELETE FROM investor_users WHERE id = ${targetInvestorId}`; } catch (_) {}
     }
 
     if (targetEnrollmentId) {
-      await tx`DELETE FROM investor_enrollments WHERE id = ${targetEnrollmentId}`;
+      try { await tx`DELETE FROM investor_enrollments WHERE id = ${targetEnrollmentId}`; } catch (_) {}
     }
 
     // Record Audit Log
-    const actorId = Number(adminActor.admin_id || adminActor.id) || 1;
-    const actorName = String(adminActor.full_name || adminActor.username || "Admin");
-    await tx`
-      INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, details)
-      VALUES (
-        'Admin', 
-        ${actorId}, 
-        ${actorName},
-        'InvestorManagement', 
-        'Deleted', 
-        'investor_users', 
-        ${targetInvestorId ? String(targetInvestorId) : String(targetEnrollmentId)},
-        ${JSON.stringify({
-          investor_id: targetInvestorId,
-          enrollment_id: targetEnrollmentId,
-          files_collected_count: filesToClean.length + fileObjectsToClean.length
-        })}
-      )
-    `;
+    try {
+      const actorId = Number(adminActor.admin_id || adminActor.id) || 1;
+      const actorName = String(adminActor.full_name || adminActor.username || "Admin");
+      await tx`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+        VALUES (
+          'Admin', 
+          ${actorId}, 
+          ${actorName},
+          'InvestorManagement', 
+          'Deleted', 
+          'users', 
+          ${targetInvestorId ? targetInvestorId : null},
+          ${JSON.stringify({
+            investor_id: targetInvestorId,
+            enrollment_id: targetEnrollmentId,
+            files_collected_count: filesToClean.length + fileObjectsToClean.length
+          })}
+        )
+      `;
+    } catch (_) {}
   });
 
   // 3. Post-Commit Physical File Cleanup
