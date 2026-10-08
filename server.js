@@ -2906,6 +2906,7 @@ const genMemberID = async (userType) => {
 // Generate invite code for Associates
 const genInviteCode = () =>
   "MMR" + Math.random().toString(36).substring(2, 8).toUpperCase();
+const genInvitationCode = genInviteCode;
 
 /* ==========================
    SIMPLE API KEY AUTH  (existing)
@@ -9647,7 +9648,7 @@ app.post("/api/admin/associates",
 
       const passwordHash = await bcrypt.hash(password, 12);
       const memberId = await genMemberID("Associate");
-      const invitationCode = genInvitationCode();
+      const invitationCode = genInviteCode();
 
       const [associate] = await sql`
         INSERT INTO users (
