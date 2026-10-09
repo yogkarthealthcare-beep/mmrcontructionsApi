@@ -13381,7 +13381,7 @@ app.get("/api/admin/team-members",
               u.profile_image AS photo_url,
               NULL::varchar AS applicant_signature_url,
               NULL::varchar AS associate_signature_url,
-              COALESCE(u.registered_at, u.created_at, NOW()) AS created_at,
+              COALESCE(u.registered_at, NOW()) AS created_at,
               COALESCE(u.updated_at, NOW()) AS updated_at,
               COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS sponsor_name,
               COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id,
@@ -13392,10 +13392,7 @@ app.get("/api/admin/team-members",
             FROM users u
             LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
             WHERE (
-              u.member_id ILIKE 'MMR-TM-%'
-              OR u.member_id ILIKE 'TM-%'
-              OR LOWER(u.user_type::TEXT) = 'teammember'
-              OR LOWER(u.user_type::TEXT) = 'team member'
+              u.user_type::text = 'Team Member'
             )
             AND NOT EXISTS (
               SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id OR tm.team_member_uid = u.member_id
@@ -13421,7 +13418,7 @@ app.get("/api/admin/team-members",
           LEFT JOIN LATERAL (
             SELECT COUNT(c.user_id)::int AS customers_count
             FROM users c
-            WHERE c.sponsor_user_id = tm.user_id AND LOWER(c.user_type::text) = 'customer'
+            WHERE c.sponsor_user_id = tm.user_id AND c.user_type::text = 'Customer'
           ) cust_stats ON true
           LEFT JOIN LATERAL (
             SELECT COUNT(e.schedule_id)::int AS pending_emi_count,
@@ -13483,7 +13480,7 @@ app.get("/api/admin/team-members",
                    COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id, 
                    COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile, 
                    COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
-                   COALESCE(u.account_status, tm.status, 'Active') AS account_status,
+                   COALESCE(u.account_status::text, tm.status::text, 'Active') AS account_status,
                    COALESCE(u.is_active, true) AS is_user_active
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
@@ -13515,25 +13512,22 @@ app.get("/api/admin/team-members",
               NULL::varchar AS branch_name,
               NULL::varchar AS account_no,
               NULL::varchar AS ifsc_code,
-              CASE WHEN LOWER(COALESCE(u.account_status, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
+              CASE WHEN LOWER(COALESCE(u.account_status::text, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
               u.profile_image AS photo_url,
               NULL::varchar AS applicant_signature_url,
               NULL::varchar AS associate_signature_url,
-              COALESCE(u.registered_at, u.created_at, NOW()) AS created_at,
+              COALESCE(u.registered_at, NOW()) AS created_at,
               COALESCE(u.updated_at, NOW()) AS updated_at,
               COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS sponsor_name,
               COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id,
               COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile,
               COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
-              COALESCE(u.account_status, 'Active') AS account_status,
+              COALESCE(u.account_status::text, 'Active') AS account_status,
               COALESCE(u.is_active, true) AS is_user_active
             FROM users u
             LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
             WHERE (
-              u.member_id ILIKE 'MMR-TM-%'
-              OR u.member_id ILIKE 'TM-%'
-              OR LOWER(u.user_type::TEXT) = 'teammember'
-              OR LOWER(u.user_type::TEXT) = 'team member'
+              u.user_type::text = 'Team Member'
             )
             AND NOT EXISTS (
               SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id OR tm.team_member_uid = u.member_id
