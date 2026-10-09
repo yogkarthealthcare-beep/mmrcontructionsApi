@@ -61,7 +61,16 @@ export async function verifyEmailTransport() {
   };
 }
 
-export async function sendEmail(to, subject, html) {
+export async function sendEmail(toOrOptions, maybeSubject, maybeHtml) {
+  let to, subject, html;
+  if (typeof toOrOptions === 'object' && toOrOptions !== null) {
+    ({ to, subject, html } = toOrOptions);
+  } else {
+    to = toOrOptions;
+    subject = maybeSubject;
+    html = maybeHtml;
+  }
+
   const config = await getSmtpConfig();
 
   if (!['smtp', 'brevo-smtp', 'gmail'].includes(String(config.provider).toLowerCase())) {
