@@ -420,7 +420,9 @@ export async function getAdminAssociateEnrollments(req: Request, res: Response):
         LEFT JOIN associate_address pa ON e.id = pa.associate_id AND pa.address_type = 'permanent'
         LEFT JOIN associate_sponsor asp ON e.id = asp.associate_id
         LEFT JOIN associate_nominee nom ON e.id = nom.associate_id
-        WHERE u.user_type = 'Associate'
+        WHERE LOWER(u.user_type::TEXT) = 'associate'
+          AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+          AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')
           AND (
             u.full_name ILIKE ${s}
             OR u.mobile_no ILIKE ${s}
@@ -488,7 +490,9 @@ export async function getAdminAssociateEnrollments(req: Request, res: Response):
         LEFT JOIN associate_address pa ON e.id = pa.associate_id AND pa.address_type = 'permanent'
         LEFT JOIN associate_sponsor asp ON e.id = asp.associate_id
         LEFT JOIN associate_nominee nom ON e.id = nom.associate_id
-        WHERE u.user_type = 'Associate'
+        WHERE LOWER(u.user_type::TEXT) = 'associate'
+          AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+          AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')
         ORDER BY COALESCE(e.created_at, u.registered_at) DESC
       `;
     }

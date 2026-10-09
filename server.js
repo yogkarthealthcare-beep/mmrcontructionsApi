@@ -1643,10 +1643,10 @@ const createDashboardViews = async () => {
       CREATE VIEW vw_admin_dashboard_stats AS
       SELECT
         COALESCE((SELECT COUNT(DISTINCT user_id) FROM users WHERE user_type = 'Customer' AND account_status = 'Active'), 0) AS total_customers,
-        COALESCE((SELECT COUNT(DISTINCT user_id) FROM users WHERE user_type = 'Associate' AND account_status = 'Active'), 0) AS total_associates,
+        COALESCE((SELECT COUNT(DISTINCT user_id) FROM users WHERE LOWER(user_type::TEXT) = 'associate' AND account_status = 'Active' AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id) AND (member_id IS NULL OR member_id NOT ILIKE 'MMR-TM-%')), 0) AS total_associates,
         COALESCE((SELECT COUNT(DISTINCT plot_id) FROM bookings WHERE booking_status = 'Confirmed'), 0) AS total_plots_sold,
         0 AS monthly_emi_due,
-        COALESCE((SELECT COUNT(*) FROM users WHERE user_type = 'Associate' AND account_status = 'Pending'), 0) AS pending_approvals,
+        COALESCE((SELECT COUNT(*) FROM users WHERE LOWER(user_type::TEXT) = 'associate' AND account_status = 'Pending' AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id) AND (member_id IS NULL OR member_id NOT ILIKE 'MMR-TM-%')), 0) AS pending_approvals,
         0 AS open_enquiries,
         COALESCE((SELECT SUM(net_amount) FROM commission_transactions WHERE commission_status = 'Pending'), 0)::BIGINT AS commission_due,
         0::BIGINT AS total_revenue
@@ -12845,14 +12845,18 @@ app.get("/api/admin/associates/:id",
             LIMIT 1
           ) t ON true
           LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
-          WHERE u.user_id = ${uid} AND LOWER(u.user_type::TEXT) = 'associate'`;
+          WHERE u.user_id = ${uid} AND LOWER(u.user_type::TEXT) = 'associate'
+            AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+            AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')`;
         profile = p;
       } catch (errProfile) {
         const [p] = await sql`
           SELECT u.*, sp.full_name AS sponsor_name, sp.member_id AS sponsor_member_id
           FROM users u
           LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
-          WHERE u.user_id = ${uid} AND LOWER(u.user_type::TEXT) = 'associate'`;
+          WHERE u.user_id = ${uid} AND LOWER(u.user_type::TEXT) = 'associate'
+            AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+            AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')`;
         profile = p;
       }
       if (!profile) return err(res, "Associate not found", 404);
@@ -12925,7 +12929,13 @@ app.post("/api/admin/impersonate/:user_id", verifyAdminToken, role("SuperAdmin",
 
 app.post("/api/admin/fix-sequence", verifyAdminToken, role("SuperAdmin", "Admin"), async (req, res) => {
   try {
-    const users = await sql`SELECT user_id, member_id, invitation_code FROM users WHERE LOWER(user_type::TEXT) = 'associate' ORDER BY registered_at ASC`;
+    const users = await sql`
+      SELECT user_id, member_id, invitation_code 
+      FROM users 
+      WHERE LOWER(user_type::TEXT) = 'associate' 
+        AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id)
+        AND (member_id IS NULL OR member_id NOT ILIKE 'MMR-TM-%')
+      ORDER BY registered_at ASC`;
     let seq = 1;
     let changed = 0;
     
@@ -13024,6 +13034,8 @@ app.get("/api/admin/associates",
           ) t ON true
           LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
           WHERE LOWER(u.user_type::TEXT) = 'associate'
+            AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+            AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')
             AND (${searchTerm} = '%%' 
                  OR u.full_name ILIKE ${searchTerm} 
                  OR u.member_id ILIKE ${searchTerm} 
@@ -13055,6 +13067,8 @@ app.get("/api/admin/associates",
           FROM users u
           LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
           WHERE LOWER(u.user_type::TEXT) = 'associate'
+            AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+            AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')
             AND (${searchTerm} = '%%' 
                  OR u.full_name ILIKE ${searchTerm} 
                  OR u.member_id ILIKE ${searchTerm} 
@@ -13184,7 +13198,13 @@ const changeAssociateStatus = async (req, res, newStatus) => {
   try {
     await requireMlmSchema().catch(() => {});
     const { reason = null, duration_days = null } = req.body || {};
-    const [old] = await sql`SELECT account_status FROM users WHERE user_id = ${req.params.id} AND LOWER(user_type::TEXT) = 'associate'`;
+    const [old] = await sql`
+      SELECT account_status 
+      FROM users 
+      WHERE user_id = ${req.params.id} 
+        AND LOWER(user_type::TEXT) = 'associate'
+        AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id)
+        AND (member_id IS NULL OR member_id NOT ILIKE 'MMR-TM-%')`;
     if (!old) return err(res, "Associate not found", 404);
     await sql`UPDATE users SET account_status = ${newStatus}, updated_at = NOW() WHERE user_id = ${req.params.id}`;
     try {
@@ -13804,7 +13824,9 @@ app.post("/api/admin/associates/recalculate-ranks", verifyAdminToken, role("Supe
         LEFT JOIN associate_sales_tracker t2 ON t2.associate_user_id = c.descendant_user_id
         WHERE c.ancestor_user_id = u.user_id AND c.depth > 0
       ) net ON TRUE
-      WHERE u.user_type = 'Associate'`;
+      WHERE LOWER(u.user_type::TEXT) = 'associate'
+        AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+        AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')`;
     const ranks = await sql`
       SELECT * FROM associate_ranks WHERE is_active = TRUE
       ORDER BY min_total_network_sales_gaj DESC, min_direct_sales_gaj DESC`;
@@ -13839,7 +13861,9 @@ app.get("/api/admin/mlm/reports", verifyAdminToken, role("SuperAdmin", "FinanceM
         SELECT u.user_id, u.member_id, u.full_name, COALESCE(t.total_gaj_sold,0) AS total_gaj_sold,
                COALESCE(t.total_commission_earned,0) AS total_commission_earned
         FROM users u LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
-        WHERE u.user_type = 'Associate'
+        WHERE LOWER(u.user_type::TEXT) = 'associate'
+          AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+          AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')
         ORDER BY COALESCE(t.total_gaj_sold,0) DESC LIMIT 10`,
       sql`SELECT commission_status, COALESCE(SUM(net_amount),0) AS amount, COUNT(*) AS count FROM commission_transactions GROUP BY commission_status`,
       sql`SELECT status, COALESCE(SUM(requested_amount),0) AS amount, COUNT(*) AS count FROM associate_payout_requests GROUP BY status`,
@@ -13862,7 +13886,9 @@ app.get("/api/admin/mlm/network/export", verifyAdminToken, role("SuperAdmin", "F
       FROM users u
       LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
       LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
-      WHERE u.user_type = 'Associate'
+      WHERE LOWER(u.user_type::TEXT) = 'associate'
+        AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+        AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')
       ORDER BY sp.member_id NULLS FIRST, u.member_id`;
     const header = ["Member ID", "Name", "Type", "Status", "Sponsor ID", "Sponsor Name", "Gaj Sold", "Commission Earned"];
     const csv = [header.join(","), ...rows.map(r => [
@@ -14089,7 +14115,7 @@ app.get("/api/admin/dashboard",
         const statsRows = await sql`
           SELECT
             COALESCE((SELECT COUNT(*) FROM users WHERE LOWER(user_type::text) = 'customer'), 0)::int AS total_customers,
-            COALESCE((SELECT COUNT(*) FROM users WHERE LOWER(user_type::text) = 'associate'), 0)::int AS total_associates,
+            COALESCE((SELECT COUNT(*) FROM users WHERE LOWER(user_type::text) = 'associate' AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id) AND (member_id IS NULL OR member_id NOT ILIKE 'MMR-TM-%')), 0)::int AS total_associates,
             COALESCE((SELECT COUNT(*) FROM team_members), (SELECT COUNT(*) FROM users WHERE LOWER(user_type::text) = 'teammember'), 0)::int AS total_team_members,
             COALESCE((SELECT COUNT(*) FROM team_members WHERE LOWER(status) = 'active'), 0)::int AS team_members_active,
             COALESCE((SELECT COUNT(*) FROM team_members WHERE LOWER(status) = 'pending'), 0)::int AS team_members_pending,
@@ -14222,6 +14248,8 @@ app.get("/api/admin/dashboard",
           LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
           LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
           WHERE LOWER(u.user_type::text) = 'associate'
+            AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+            AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')
           ORDER BY u.registered_at DESC
           LIMIT 6`;
       } catch (errAssoc) {
@@ -14257,11 +14285,13 @@ app.get("/api/admin/dashboard",
                  COALESCE(r.rank_name, 'Associate') AS rank,
                  COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
                  (SELECT COUNT(*)::int FROM team_members tm WHERE tm.associate_id = u.user_id) AS team_count,
-                 (SELECT COUNT(*)::int FROM users d WHERE d.sponsor_user_id = u.user_id AND LOWER(d.user_type::text) = 'associate') AS direct_associates_count
+                 (SELECT COUNT(*)::int FROM users d WHERE d.sponsor_user_id = u.user_id AND LOWER(d.user_type::text) = 'associate' AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = d.user_id) AND (d.member_id IS NULL OR d.member_id NOT ILIKE 'MMR-TM-%')) AS direct_associates_count
           FROM users u
           LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
           LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
           WHERE LOWER(u.user_type::text) = 'associate'
+            AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+            AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')
           ORDER BY u.registered_at ASC
           LIMIT 6`;
 
