@@ -670,12 +670,12 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
             catch (_) { }
             // User Bank
             try {
-                const [existingBank] = await tx `SELECT bank_id FROM user_bank_details WHERE user_id = ${userId} LIMIT 1`;
+                const [existingBank] = await tx `SELECT bank_detail_id FROM user_bank_details WHERE user_id = ${userId} LIMIT 1`;
                 if (existingBank) {
-                    await tx `UPDATE user_bank_details SET bank_name = ${data.bankName.trim()}, branch_name = ${data.branchName.trim()}, account_number = ${data.accountNo.trim()}, ifsc_code = ${data.ifscCode.trim().toUpperCase()}, updated_at = NOW() WHERE bank_id = ${existingBank.bank_id}`;
+                    await tx `UPDATE user_bank_details SET bank_name = ${data.bankName.trim()}, branch_name = ${data.branchName.trim()}, account_number = ${data.accountNo.trim()}, ifsc_code = ${data.ifscCode.trim().toUpperCase()}, updated_at = NOW() WHERE bank_detail_id = ${existingBank.bank_detail_id}`;
                 }
                 else {
-                    await tx `INSERT INTO user_bank_details (user_id, bank_name, branch_name, account_number, ifsc_code, is_primary) VALUES (${userId}, ${data.bankName.trim()}, ${data.branchName.trim()}, ${data.accountNo.trim()}, ${data.ifscCode.trim().toUpperCase()}, true)`;
+                    await tx `INSERT INTO user_bank_details (user_id, bank_name, branch_name, account_number, ifsc_code) VALUES (${userId}, ${data.bankName.trim()}, ${data.branchName.trim()}, ${data.accountNo.trim()}, ${data.ifscCode.trim().toUpperCase()})`;
                 }
             }
             catch (_) { }
@@ -684,10 +684,10 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
                 try {
                     const [existingNom] = await tx `SELECT nominee_id FROM user_nominees WHERE user_id = ${userId} LIMIT 1`;
                     if (existingNom) {
-                        await tx `UPDATE user_nominees SET nominee_name = ${data.nomineeName}, relationship = ${data.nomineeRelation || 'Nominee'}, nominee_age = ${data.nomineeAgeDob ? String(data.nomineeAgeDob) : null}, nominee_phone = ${data.nomineeContactNo || null}, updated_at = NOW() WHERE nominee_id = ${existingNom.nominee_id}`;
+                        await tx `UPDATE user_nominees SET nominee_name = ${data.nomineeName}, relationship = ${data.nomineeRelation || 'Nominee'}, updated_at = NOW() WHERE nominee_id = ${existingNom.nominee_id}`;
                     }
                     else {
-                        await tx `INSERT INTO user_nominees (user_id, nominee_name, relationship, nominee_age, nominee_phone) VALUES (${userId}, ${data.nomineeName}, ${data.nomineeRelation || 'Nominee'}, ${data.nomineeAgeDob ? String(data.nomineeAgeDob) : null}, ${data.nomineeContactNo || null})`;
+                        await tx `INSERT INTO user_nominees (user_id, nominee_name, relationship) VALUES (${userId}, ${data.nomineeName}, ${data.nomineeRelation || 'Nominee'})`;
                     }
                 }
                 catch (_) { }
