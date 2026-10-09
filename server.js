@@ -9363,10 +9363,10 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
                WHEN u.member_id ILIKE 'MMR-INV-%' OR u.member_id ILIKE 'INV-%' OR LOWER(u.user_type::TEXT) = 'investor' THEN 'Investor'
                WHEN u.member_id ILIKE 'MMR-CUS-%' OR u.member_id ILIKE 'CUS-%' OR LOWER(u.user_type::TEXT) = 'customer' THEN 'Customer'
                WHEN u.member_id ILIKE 'MMR-ASC-%' OR u.member_id ILIKE 'ASC-%' OR u.member_id ILIKE 'MMR0%' OR LOWER(u.user_type::TEXT) = 'associate' THEN 'Associate'
-               ELSE COALESCE(u.user_type, 'Customer')
+               ELSE COALESCE(u.user_type::text, 'Customer')
              END AS user_type,
              u.full_name, u.mobile_no,
-             u.email, u.account_status, u.registered_at, u.updated_at,
+             u.email, u.account_status::text AS account_status, u.registered_at, u.updated_at,
              COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
              CASE WHEN LOWER(COALESCE(ces.application_status, u.enrollment_status, '')) IN ('completed', 'approved') THEN TRUE ELSE FALSE END AS is_verified,
              COALESCE(pa.address_line1, ces.permanent_address, ces.present_address) AS address,
@@ -9414,10 +9414,10 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
                WHEN u.member_id ILIKE 'MMR-INV-%' OR u.member_id ILIKE 'INV-%' OR LOWER(u.user_type::TEXT) = 'investor' THEN 'Investor'
                WHEN u.member_id ILIKE 'MMR-CUS-%' OR u.member_id ILIKE 'CUS-%' OR LOWER(u.user_type::TEXT) = 'customer' THEN 'Customer'
                WHEN u.member_id ILIKE 'MMR-ASC-%' OR u.member_id ILIKE 'ASC-%' OR u.member_id ILIKE 'MMR0%' OR LOWER(u.user_type::TEXT) = 'associate' THEN 'Associate'
-               ELSE COALESCE(u.user_type, 'Customer')
+               ELSE COALESCE(u.user_type::text, 'Customer')
              END AS user_type,
              u.full_name, u.mobile_no,
-             u.email, u.account_status, u.registered_at, u.updated_at,
+             u.email, u.account_status::text AS account_status, u.registered_at, u.updated_at,
              COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
              COALESCE(u.is_verified, FALSE) AS is_verified,
              u.invitation_code, sp.full_name AS sponsor_name,
@@ -13387,6 +13387,89 @@ app.get("/api/admin/diagnose-db-detail", verifyAdminToken, async (_req, res) => 
   }
 });
 
+app.post("/api/admin/run-user-type-migration", verifyAdminToken, role("SuperAdmin"), async (_req, res) => {
+  try {
+    const results = await sql.begin(async (tx) => {
+      // 1. Extend enums
+      await tx.unsafe(`
+        DO $$ BEGIN
+          ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'Investor';
+        EXCEPTION WHEN duplicate_object THEN null; END $$;
+        DO $$ BEGIN
+          ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'Team Member';
+        EXCEPTION WHEN duplicate_object THEN null; END $$;
+        DO $$ BEGIN
+          ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'CUSTOMER';
+        EXCEPTION WHEN duplicate_object THEN null; END $$;
+        DO $$ BEGIN
+          ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'ASSOCIATE';
+        EXCEPTION WHEN duplicate_object THEN null; END $$;
+        DO $$ BEGIN
+          ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'INVESTOR';
+        EXCEPTION WHEN duplicate_object THEN null; END $$;
+        DO $$ BEGIN
+          ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'TEAM_MEMBER';
+        EXCEPTION WHEN duplicate_object THEN null; END $$;
+      `);
+
+      // 2. Backup SELECT before UPDATE
+      const backupBefore = await tx`
+        SELECT user_id, member_id, full_name, user_type::text AS user_type, account_status::text AS account_status
+        FROM users
+        ORDER BY user_id ASC
+      `;
+
+      // 3. Safe targeted UPDATE
+      const updatedTeamMembers = await tx`
+        UPDATE users
+        SET user_type = 'Team Member'
+        WHERE member_id ILIKE 'MMR-TM-%'
+           OR member_id ILIKE 'TM-%'
+           OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id)
+        RETURNING user_id, member_id, full_name, user_type::text AS user_type
+      `;
+
+      const updatedCustomers = await tx`
+        UPDATE users
+        SET user_type = 'Customer'
+        WHERE (member_id ILIKE 'MMR-CUS-%' OR member_id ILIKE 'CUS-%')
+          AND (member_id NOT ILIKE 'MMR-TM-%')
+          AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id)
+        RETURNING user_id, member_id, full_name, user_type::text AS user_type
+      `;
+
+      const updatedAssociates = await tx`
+        UPDATE users
+        SET user_type = 'Associate'
+        WHERE (member_id ILIKE 'MMR-ASC-%' OR member_id ILIKE 'ASC-%' OR member_id = 'MMR00001' OR member_id = 'MMR0001')
+          AND (member_id NOT ILIKE 'MMR-TM-%')
+          AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id)
+        RETURNING user_id, member_id, full_name, user_type::text AS user_type
+      `;
+
+      // 4. Verification count after UPDATE
+      const countsAfter = await tx`
+        SELECT user_type::text AS user_type, COUNT(*)::int AS count
+        FROM users
+        GROUP BY user_type
+        ORDER BY user_type
+      `;
+
+      return {
+        backupBefore,
+        updatedTeamMembers,
+        updatedCustomers,
+        updatedAssociates,
+        countsAfter
+      };
+    });
+
+    return ok(res, results, "Migration executed successfully inside transaction.");
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
 app.get("/api/admin/team-members",
   verifyAdminToken,
   role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"),
@@ -13419,7 +13502,7 @@ app.get("/api/admin/team-members",
                    COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id, 
                    COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile, 
                    COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
-                   COALESCE(u.account_status, tm.status, 'Active') AS account_status,
+                   COALESCE(u.account_status::text, tm.status::text, 'Active') AS account_status,
                    COALESCE(u.is_active, true) AS is_user_active
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
@@ -13451,7 +13534,7 @@ app.get("/api/admin/team-members",
               NULL::varchar AS branch_name,
               NULL::varchar AS account_no,
               NULL::varchar AS ifsc_code,
-              CASE WHEN LOWER(COALESCE(u.account_status, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
+              CASE WHEN LOWER(COALESCE(u.account_status::text, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
               u.profile_image AS photo_url,
               NULL::varchar AS applicant_signature_url,
               NULL::varchar AS associate_signature_url,
@@ -13461,7 +13544,7 @@ app.get("/api/admin/team-members",
               COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id,
               COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile,
               COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
-              COALESCE(u.account_status, 'Active') AS account_status,
+              COALESCE(u.account_status::text, 'Active') AS account_status,
               COALESCE(u.is_active, true) AS is_user_active
             FROM users u
             LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
@@ -15924,6 +16007,27 @@ if (shouldStartServer) {
         sql`ALTER TABLE user_documents ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`.catch(() => {}),
         (async () => {
           try {
+            await sql.unsafe(`
+              DO $$ BEGIN
+                ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'Investor';
+              EXCEPTION WHEN duplicate_object THEN null; END $$;
+              DO $$ BEGIN
+                ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'Team Member';
+              EXCEPTION WHEN duplicate_object THEN null; END $$;
+              DO $$ BEGIN
+                ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'CUSTOMER';
+              EXCEPTION WHEN duplicate_object THEN null; END $$;
+              DO $$ BEGIN
+                ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'ASSOCIATE';
+              EXCEPTION WHEN duplicate_object THEN null; END $$;
+              DO $$ BEGIN
+                ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'INVESTOR';
+              EXCEPTION WHEN duplicate_object THEN null; END $$;
+              DO $$ BEGIN
+                ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'TEAM_MEMBER';
+              EXCEPTION WHEN duplicate_object THEN null; END $$;
+            `).catch(() => {});
+
             await sql`
               UPDATE users
               SET user_type = 'Team Member'
