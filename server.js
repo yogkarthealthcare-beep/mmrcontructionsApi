@@ -5915,7 +5915,7 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
                aa.local_address AS perm_address, aa.city AS perm_city, aa.state AS perm_state, aa.pin_code AS perm_pin,
                ab.bank_name, ab.branch_name, ab.account_holder_name, ab.account_no, ab.ifsc_code,
                an.nominee_name, an.relationship AS nom_rel,
-               asp.sponsor_id AS assoc_sponsor_id, asp.sponsor_name AS assoc_sponsor_name, asp.sponsor_mobile AS assoc_sponsor_mobile
+               asp.sponsor_code AS assoc_sponsor_id, asp.sponsor_name AS assoc_sponsor_name, asp.sponsor_contact AS assoc_sponsor_mobile
         FROM associate_enrollment ae
         LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
         LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
