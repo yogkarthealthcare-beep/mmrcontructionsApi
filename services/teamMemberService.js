@@ -664,7 +664,7 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
                     await tx `UPDATE user_addresses SET address_line1 = ${data.fullAddress.trim()}, updated_at = NOW() WHERE address_id = ${existingAddr.address_id}`;
                 }
                 else {
-                    await tx `INSERT INTO user_addresses (user_id, address_line1, city, state, pincode, address_type, is_primary) VALUES (${userId}, ${data.fullAddress.trim()}, 'Lucknow', 'Uttar Pradesh', '226001', 'Permanent', true)`;
+                    await tx `INSERT INTO user_addresses (user_id, address_line1, city, state, pin_code, address_type) VALUES (${userId}, ${data.fullAddress.trim()}, 'Lucknow', 'Uttar Pradesh', '226001', 'Permanent')`;
                 }
             }
             catch (_) { }
