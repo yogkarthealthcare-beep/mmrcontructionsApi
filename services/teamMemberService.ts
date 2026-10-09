@@ -510,30 +510,35 @@ export async function createTeamMemberRecord(
     // 5. Sync user secondary tables for profile consistency
     if (userId) {
       // User Address
-      await tx`
-        INSERT INTO user_addresses (user_id, address_line1, city, state, pincode, address_type, is_primary)
-        VALUES (${userId}, ${data.fullAddress.trim()}, 'Lucknow', 'Uttar Pradesh', '226001', 'Permanent', true)
-        ON CONFLICT (user_id) DO UPDATE
-        SET address_line1 = EXCLUDED.address_line1, updated_at = NOW()
-      `.catch(() => {});
+      try {
+        const [existingAddr] = await tx`SELECT address_id FROM user_addresses WHERE user_id = ${userId} LIMIT 1`;
+        if (existingAddr) {
+          await tx`UPDATE user_addresses SET address_line1 = ${data.fullAddress.trim()}, updated_at = NOW() WHERE address_id = ${existingAddr.address_id}`;
+        } else {
+          await tx`INSERT INTO user_addresses (user_id, address_line1, city, state, pincode, address_type, is_primary) VALUES (${userId}, ${data.fullAddress.trim()}, 'Lucknow', 'Uttar Pradesh', '226001', 'Permanent', true)`;
+        }
+      } catch (_) {}
 
       // User Bank
-      await tx`
-        INSERT INTO user_bank_details (user_id, bank_name, branch_name, account_number, ifsc_code, is_primary)
-        VALUES (${userId}, ${data.bankName.trim()}, ${data.branchName.trim()}, ${data.accountNo.trim()}, ${data.ifscCode.trim().toUpperCase()}, true)
-        ON CONFLICT (user_id) DO UPDATE
-        SET bank_name = EXCLUDED.bank_name, branch_name = EXCLUDED.branch_name,
-            account_number = EXCLUDED.account_number, ifsc_code = EXCLUDED.ifsc_code, updated_at = NOW()
-      `.catch(() => {});
+      try {
+        const [existingBank] = await tx`SELECT bank_id FROM user_bank_details WHERE user_id = ${userId} LIMIT 1`;
+        if (existingBank) {
+          await tx`UPDATE user_bank_details SET bank_name = ${data.bankName.trim()}, branch_name = ${data.branchName.trim()}, account_number = ${data.accountNo.trim()}, ifsc_code = ${data.ifscCode.trim().toUpperCase()}, updated_at = NOW() WHERE bank_id = ${existingBank.bank_id}`;
+        } else {
+          await tx`INSERT INTO user_bank_details (user_id, bank_name, branch_name, account_number, ifsc_code, is_primary) VALUES (${userId}, ${data.bankName.trim()}, ${data.branchName.trim()}, ${data.accountNo.trim()}, ${data.ifscCode.trim().toUpperCase()}, true)`;
+        }
+      } catch (_) {}
 
       // User Nominee
       if (data.nomineeName) {
-        await tx`
-          INSERT INTO user_nominees (user_id, nominee_name, relationship, nominee_age, nominee_phone)
-          VALUES (${userId}, ${data.nomineeName}, ${data.nomineeRelation || 'Nominee'}, ${data.nomineeAgeDob ? String(data.nomineeAgeDob) : null}, ${data.nomineeContactNo || null})
-          ON CONFLICT (user_id) DO UPDATE
-          SET nominee_name = EXCLUDED.nominee_name, relationship = EXCLUDED.relationship, updated_at = NOW()
-        `.catch(() => {});
+        try {
+          const [existingNom] = await tx`SELECT nominee_id FROM user_nominees WHERE user_id = ${userId} LIMIT 1`;
+          if (existingNom) {
+            await tx`UPDATE user_nominees SET nominee_name = ${data.nomineeName}, relationship = ${data.nomineeRelation || 'Nominee'}, nominee_age = ${data.nomineeAgeDob ? String(data.nomineeAgeDob) : null}, nominee_phone = ${data.nomineeContactNo || null}, updated_at = NOW() WHERE nominee_id = ${existingNom.nominee_id}`;
+          } else {
+            await tx`INSERT INTO user_nominees (user_id, nominee_name, relationship, nominee_age, nominee_phone) VALUES (${userId}, ${data.nomineeName}, ${data.nomineeRelation || 'Nominee'}, ${data.nomineeAgeDob ? String(data.nomineeAgeDob) : null}, ${data.nomineeContactNo || null})`;
+          }
+        } catch (_) {}
       }
     }
 
@@ -962,23 +967,32 @@ export async function registerTeamMemberQuick(associateId: number, data: any) {
     }
 
     // 3. Duplicate checks
+    const cleanMobile10 = cleanMobile.length >= 10 ? cleanMobile.slice(-10) : cleanMobile;
     const [dupMobile] = await tx`
       SELECT user_id FROM users 
-      WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile.slice(-10)}
+      WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile10}
+      LIMIT 1
     `;
     const [dupInvestorMobile] = await tx`
       SELECT id FROM investor_users 
-      WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile.slice(-10)} 
+      WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile10} 
         AND (deleted_at IS NULL) LIMIT 1
     `;
-    if (dupMobile || dupInvestorMobile) {
-      throw new Error("Mobile number is already registered in the system.");
+    const [dupTmMobile] = await tx`
+      SELECT id FROM team_members
+      WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile10}
+        AND status <> 'rejected'
+      LIMIT 1
+    `;
+    if (dupMobile || dupInvestorMobile || dupTmMobile) {
+      throw new Error("यह मोबाइल नंबर पहले से पंजीकृत है / This mobile number is already registered.");
     }
 
-    const [dupEmail] = await tx`SELECT user_id FROM users WHERE LOWER(email) = ${cleanEmail}`;
-    const [dupInvestorEmail] = await tx`SELECT id FROM investor_users WHERE LOWER(email) = ${cleanEmail} AND (deleted_at IS NULL) LIMIT 1`;
-    if (dupEmail || dupInvestorEmail) {
-      throw new Error("Email address is already registered in the system.");
+    const [dupEmail] = await tx`SELECT user_id FROM users WHERE LOWER(TRIM(email)) = ${cleanEmail} LIMIT 1`;
+    const [dupInvestorEmail] = await tx`SELECT id FROM investor_users WHERE LOWER(TRIM(email)) = ${cleanEmail} AND (deleted_at IS NULL) LIMIT 1`;
+    const [dupTmEmail] = await tx`SELECT id FROM team_members WHERE LOWER(TRIM(email_id)) = ${cleanEmail} AND status <> 'rejected' LIMIT 1`;
+    if (dupEmail || dupInvestorEmail || dupTmEmail) {
+      throw new Error("यह ईमेल आईडी पहले से पंजीकृत है / This email address is already registered.");
     }
 
     // 4. Generate unique Team Member ID
@@ -1012,21 +1026,23 @@ export async function registerTeamMemberQuick(associateId: number, data: any) {
       RETURNING id, team_member_uid, associate_id, associate_name, user_id, slot_number, full_name, mobile_no, email_id, status, created_at
     `;
 
-    try {
+    // 7. Initialize User Wallet
+    const [existingWallet] = await tx`SELECT id FROM user_wallets WHERE user_id = ${createdUser.user_id} LIMIT 1`;
+    if (!existingWallet) {
       await tx`
         INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
         VALUES (${createdUser.user_id}, 'Associate', 0, 0, 0, 0, 0)
-        ON CONFLICT (user_id) DO NOTHING
       `;
-    } catch (_) {}
+    }
 
-    try {
+    // 8. Initialize Referral Registration
+    const [existingRef] = await tx`SELECT id FROM referral_registrations WHERE referred_user_id = ${createdUser.user_id} LIMIT 1`;
+    if (!existingRef) {
       await tx`
         INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
         VALUES (${associateId}, ${createdUser.user_id}, 'Pending', NULL)
-        ON CONFLICT (referred_user_id) DO NOTHING
       `;
-    } catch (_) {}
+    }
 
     createdResult = {
       user_id: createdUser.user_id,

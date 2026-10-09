@@ -8576,8 +8576,29 @@ app.post(["/api/associate/team-members", "/api/associate/team-member-add"], veri
     return ok(res, result, "Team Member account created successfully and assigned to your team slot.", 201);
   } catch (e) {
     console.error("[Associate Add Team Member Error]:", e);
-    const status = String(e.message).includes("already registered") ? 409 : (String(e.message).includes("maximum limit") ? 400 : 400);
-    return err(res, e.message, status);
+    let msg = e.message || "Failed to register team member.";
+    let status = 400;
+
+    const errMsg = String(e.message || "");
+    const errDetail = String(e.detail || "");
+    const errConstraint = String(e.constraint || "");
+
+    if (e.code === "23505" || errMsg.includes("users_mobile_no_key") || errDetail.includes("mobile_no") || errConstraint.includes("mobile_no")) {
+      msg = "यह मोबाइल नंबर पहले से पंजीकृत है / This mobile number is already registered.";
+      status = 409;
+    } else if (errMsg.includes("users_email_key") || errDetail.includes("email") || errConstraint.includes("email")) {
+      msg = "यह ईमेल आईडी पहले से पंजीकृत है / This email address is already registered.";
+      status = 409;
+    } else if (errMsg.includes("uq_team_members_assoc_slot") || errConstraint.includes("slot")) {
+      msg = "यह स्लॉट पहले से भरा हुआ है / This slot number is already occupied.";
+      status = 400;
+    } else if (errMsg.includes("already registered") || errMsg.includes("पहले से पंजीकृत")) {
+      status = 409;
+    } else if (errMsg.includes("maximum limit") || errMsg.includes("10 direct Team Members")) {
+      status = 400;
+    }
+
+    return err(res, msg, status);
   }
 });
 
