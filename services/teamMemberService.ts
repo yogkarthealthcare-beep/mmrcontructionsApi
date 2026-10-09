@@ -236,8 +236,10 @@ export async function syncExistingTeamMembersFromUsers(): Promise<void> {
     // 5. Sync any orphaned enrollments
     const orphanedEnrollments = await sql`
       SELECT e.id, e.associate_id, e.user_id, e.member_id, e.full_name, e.contact_1, e.contact_no_1, e.mobile_no,
-             e.email, e.sponsor_id, e.sponsor_name, e.status, e.app_status, e.created_at
+             e.email, e.status, e.app_status, e.created_at,
+             sp.sponsor_name, sp.sponsor_id
       FROM associate_enrollment e
+      LEFT JOIN associate_sponsor sp ON sp.associate_id = e.id
       WHERE (
         e.member_id ILIKE 'MMR-TM-%'
         OR e.member_id ILIKE 'TM-%'
