@@ -27,7 +27,7 @@ import invoiceModuleRoutes from './routes/invoice-module.routes.js';
 import customerEnrollmentRoutes from './routes/customer-enrollment.routes.js';
 import associateEnrollmentRoutes from './routes/associateEnrollmentRoutes.js';
 import teamMemberRoutes from './routes/teamMemberRoutes.js';
-import { registerTeamMemberQuick, approveTeamMemberByAssociate } from './services/teamMemberService.js';
+import { ensureTeamMembersTable, registerTeamMemberQuick, approveTeamMemberByAssociate } from './services/teamMemberService.js';
 import receiptRoutes, { ensureReceiptsTable } from './routes/receipt.routes.js';
 import siteGalleryRoutes, { ensureSiteGalleryTable } from './routes/site-gallery.routes.js';
 import twoFactorRoutes from './routes/twoFactor.routes.js';
@@ -259,6 +259,7 @@ app.use('/api', invoiceModuleRoutes);
 app.use('/api', customerEnrollmentRoutes);
 app.use('/api', associateEnrollmentRoutes);
 app.use('/api', teamMemberRoutes);
+ensureTeamMembersTable().catch(e => console.error("[TeamMembersTable] Init error:", e));
 app.use('/api', receiptRoutes);
 ensureReceiptsTable();
 app.use('/api', siteGalleryRoutes);
@@ -13273,89 +13274,160 @@ app.get("/api/admin/team-members",
       const actualLimit = Math.min(Math.max(Number(limit) || Number(pageSize) || 20, 1), 10000);
       const searchTerm = `%${String(search || "").trim()}%`;
       const statusFilter = String(status || "").trim().toLowerCase();
+      const assocId = Number(associate_id) || 0;
 
-      const rows = await sql`
-        SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id, tm.associate_name,
-               tm.slot_number, tm.full_name, tm.father_husband_name, tm.date_of_birth, tm.gender,
-               tm.aadhar_no, tm.pan_no, tm.mobile_no, tm.email_id, tm.full_address,
-               tm.nominee_name, tm.nominee_relation, tm.nominee_age_dob, tm.nominee_contact_no,
-               tm.bank_name, tm.branch_name, tm.account_no, tm.ifsc_code, tm.status,
-               tm.photo_url, tm.applicant_signature_url, tm.associate_signature_url,
-               tm.created_at, tm.updated_at,
-               assoc.full_name AS sponsor_name, assoc.member_id AS sponsor_member_id, 
-               assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
-               COALESCE(u.account_status, tm.status, 'Active') AS account_status,
-               COALESCE(u.is_active, true) AS is_user_active,
-               COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
-               COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
-               COALESCE(b_stats.plots_sold_count, 0) AS plots_sold_count,
-               COALESCE(cust_stats.customers_count, 0) AS customers_count,
-               COALESCE(emi_stats.pending_emi_count, 0) AS pending_emi_count,
-               COALESCE(emi_stats.pending_emi_amount, 0) AS pending_emi_amount,
-               COALESCE(m_sales.monthly_sales_gaj, 0) AS monthly_sales_gaj,
-               COALESCE(y_sales.yearly_sales_gaj, 0) AS yearly_sales_gaj,
-               COUNT(*) OVER() AS total_count
-        FROM team_members tm
-        LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
-        LEFT JOIN users u ON u.user_id = tm.user_id
-        LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
-        LEFT JOIN LATERAL (
-          SELECT COUNT(b.booking_id)::int AS plots_sold_count
-          FROM bookings b
-          WHERE b.sponsor_user_id = tm.user_id AND b.booking_status::text <> 'Cancelled'
-        ) b_stats ON true
-        LEFT JOIN LATERAL (
-          SELECT COUNT(c.user_id)::int AS customers_count
-          FROM users c
-          WHERE c.sponsor_user_id = tm.user_id AND LOWER(c.user_type::text) = 'customer'
-        ) cust_stats ON true
-        LEFT JOIN LATERAL (
-          SELECT COUNT(e.schedule_id)::int AS pending_emi_count,
-                 COALESCE(SUM(COALESCE(e.total_due, e.emi_amount, 0)), 0)::numeric AS pending_emi_amount
-          FROM emi_schedules e
-          JOIN bookings b_e ON b_e.booking_id = e.booking_id
-          WHERE b_e.sponsor_user_id = tm.user_id 
-            AND e.emi_status::text IN ('Pending', 'Overdue', 'ProofSubmitted')
-        ) emi_stats ON true
-        LEFT JOIN LATERAL (
-          SELECT COALESCE(SUM(b_m.plot_size_gaj), 0)::numeric AS monthly_sales_gaj
-          FROM bookings b_m
-          WHERE b_m.sponsor_user_id = tm.user_id 
-            AND b_m.booking_status::text <> 'Cancelled'
-            AND date_trunc('month', b_m.booking_date) = date_trunc('month', CURRENT_DATE)
-        ) m_sales ON true
-        LEFT JOIN LATERAL (
-          SELECT COALESCE(SUM(b_y.plot_size_gaj), 0)::numeric AS yearly_sales_gaj
-          FROM bookings b_y
-          WHERE b_y.sponsor_user_id = tm.user_id 
-            AND b_y.booking_status::text <> 'Cancelled'
-            AND date_trunc('year', b_y.booking_date) = date_trunc('year', CURRENT_DATE)
-        ) y_sales ON true
-        WHERE (${statusFilter} = '' OR ${statusFilter} = 'all' OR LOWER(tm.status) = ${statusFilter} OR LOWER(COALESCE(u.account_status, '')) = ${statusFilter})
-          AND (${Number(associate_id) || 0} = 0 OR tm.associate_id = ${Number(associate_id) || 0})
-          AND (${searchTerm} = '%%'
-               OR tm.full_name ILIKE ${searchTerm}
-               OR tm.team_member_uid ILIKE ${searchTerm}
-               OR tm.mobile_no ILIKE ${searchTerm}
-               OR tm.email_id ILIKE ${searchTerm}
-               OR assoc.full_name ILIKE ${searchTerm}
-               OR assoc.member_id ILIKE ${searchTerm})
-        ORDER BY tm.created_at DESC
-        LIMIT ${actualLimit} OFFSET ${(pageNumber - 1) * actualLimit}`;
+      let rows = [];
+      try {
+        rows = await sql`
+          SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id, tm.associate_name,
+                 tm.slot_number, tm.full_name, tm.father_husband_name, tm.date_of_birth, tm.gender,
+                 tm.aadhar_no, tm.pan_no, tm.mobile_no, tm.email_id, tm.full_address,
+                 tm.nominee_name, tm.nominee_relation, tm.nominee_age_dob, tm.nominee_contact_no,
+                 tm.bank_name, tm.branch_name, tm.account_no, tm.ifsc_code, tm.status,
+                 tm.photo_url, tm.applicant_signature_url, tm.associate_signature_url,
+                 tm.created_at, tm.updated_at,
+                 assoc.full_name AS sponsor_name, assoc.member_id AS sponsor_member_id, 
+                 assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
+                 COALESCE(u.account_status, tm.status, 'Active') AS account_status,
+                 COALESCE(u.is_active, true) AS is_user_active,
+                 COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
+                 COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
+                 COALESCE(b_stats.plots_sold_count, 0) AS plots_sold_count,
+                 COALESCE(cust_stats.customers_count, 0) AS customers_count,
+                 COALESCE(emi_stats.pending_emi_count, 0) AS pending_emi_count,
+                 COALESCE(emi_stats.pending_emi_amount, 0) AS pending_emi_amount,
+                 COALESCE(m_sales.monthly_sales_gaj, 0) AS monthly_sales_gaj,
+                 COALESCE(y_sales.yearly_sales_gaj, 0) AS yearly_sales_gaj,
+                 COUNT(*) OVER() AS total_count
+          FROM team_members tm
+          LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
+          LEFT JOIN users u ON u.user_id = tm.user_id
+          LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
+          LEFT JOIN LATERAL (
+            SELECT COUNT(b.booking_id)::int AS plots_sold_count
+            FROM bookings b
+            WHERE b.sponsor_user_id = tm.user_id AND b.booking_status::text <> 'Cancelled'
+          ) b_stats ON true
+          LEFT JOIN LATERAL (
+            SELECT COUNT(c.user_id)::int AS customers_count
+            FROM users c
+            WHERE c.sponsor_user_id = tm.user_id AND LOWER(c.user_type::text) = 'customer'
+          ) cust_stats ON true
+          LEFT JOIN LATERAL (
+            SELECT COUNT(e.schedule_id)::int AS pending_emi_count,
+                   COALESCE(SUM(COALESCE(e.total_due, e.emi_amount, 0)), 0)::numeric AS pending_emi_amount
+            FROM emi_schedules e
+            JOIN bookings b_e ON b_e.booking_id = e.booking_id
+            WHERE b_e.sponsor_user_id = tm.user_id 
+              AND e.emi_status::text IN ('Pending', 'Overdue', 'ProofSubmitted')
+          ) emi_stats ON true
+          LEFT JOIN LATERAL (
+            SELECT COALESCE(SUM(b_m.plot_size_gaj), 0)::numeric AS monthly_sales_gaj
+            FROM bookings b_m
+            WHERE b_m.sponsor_user_id = tm.user_id 
+              AND b_m.booking_status::text <> 'Cancelled'
+              AND TO_CHAR(COALESCE(b_m.created_at, NOW()), 'YYYY-MM') = TO_CHAR(CURRENT_DATE, 'YYYY-MM')
+          ) m_sales ON true
+          LEFT JOIN LATERAL (
+            SELECT COALESCE(SUM(b_y.plot_size_gaj), 0)::numeric AS yearly_sales_gaj
+            FROM bookings b_y
+            WHERE b_y.sponsor_user_id = tm.user_id 
+              AND b_y.booking_status::text <> 'Cancelled'
+              AND TO_CHAR(COALESCE(b_y.created_at, NOW()), 'YYYY') = TO_CHAR(CURRENT_DATE, 'YYYY')
+          ) y_sales ON true
+          WHERE (
+            ${statusFilter} = '' OR ${statusFilter} = 'all'
+            OR (${statusFilter} = 'active' AND (LOWER(tm.status) IN ('active', 'approved') OR LOWER(COALESCE(u.account_status, '')) = 'active'))
+            OR (${statusFilter} = 'pending' AND (LOWER(tm.status) IN ('pending', 'submitted') OR LOWER(COALESCE(u.account_status, '')) = 'pending'))
+            OR (${statusFilter} = 'suspended' AND (LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked') OR LOWER(COALESCE(u.account_status, '')) IN ('suspended', 'inactive', 'rejected', 'blocked')))
+            OR LOWER(tm.status) = ${statusFilter}
+            OR LOWER(COALESCE(u.account_status, '')) = ${statusFilter}
+          )
+          AND (${assocId} = 0 OR tm.associate_id = ${assocId})
+          AND (
+            ${searchTerm} = '%%'
+            OR tm.full_name ILIKE ${searchTerm}
+            OR tm.team_member_uid ILIKE ${searchTerm}
+            OR tm.mobile_no ILIKE ${searchTerm}
+            OR tm.email_id ILIKE ${searchTerm}
+            OR assoc.full_name ILIKE ${searchTerm}
+            OR assoc.member_id ILIKE ${searchTerm}
+          )
+          ORDER BY tm.created_at DESC
+          LIMIT ${actualLimit} OFFSET ${(pageNumber - 1) * actualLimit}`;
+      } catch (richErr) {
+        console.warn("[Admin Team Members Rich Query Warning, using safe base query]:", richErr.message);
+        rows = await sql`
+          SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id, tm.associate_name,
+                 tm.slot_number, tm.full_name, tm.father_husband_name, tm.date_of_birth, tm.gender,
+                 tm.aadhar_no, tm.pan_no, tm.mobile_no, tm.email_id, tm.full_address,
+                 tm.nominee_name, tm.nominee_relation, tm.nominee_age_dob, tm.nominee_contact_no,
+                 tm.bank_name, tm.branch_name, tm.account_no, tm.ifsc_code, tm.status,
+                 tm.photo_url, tm.applicant_signature_url, tm.associate_signature_url,
+                 tm.created_at, tm.updated_at,
+                 assoc.full_name AS sponsor_name, assoc.member_id AS sponsor_member_id, 
+                 assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
+                 COALESCE(u.account_status, tm.status, 'Active') AS account_status,
+                 COALESCE(u.is_active, true) AS is_user_active,
+                 0 AS total_gaj_sold,
+                 0 AS total_commission_earned,
+                 0 AS plots_sold_count,
+                 0 AS customers_count,
+                 0 AS pending_emi_count,
+                 0 AS pending_emi_amount,
+                 0 AS monthly_sales_gaj,
+                 0 AS yearly_sales_gaj,
+                 COUNT(*) OVER() AS total_count
+          FROM team_members tm
+          LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
+          LEFT JOIN users u ON u.user_id = tm.user_id
+          WHERE (
+            ${statusFilter} = '' OR ${statusFilter} = 'all'
+            OR (${statusFilter} = 'active' AND (LOWER(tm.status) IN ('active', 'approved') OR LOWER(COALESCE(u.account_status, '')) = 'active'))
+            OR (${statusFilter} = 'pending' AND (LOWER(tm.status) IN ('pending', 'submitted') OR LOWER(COALESCE(u.account_status, '')) = 'pending'))
+            OR (${statusFilter} = 'suspended' AND (LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked') OR LOWER(COALESCE(u.account_status, '')) IN ('suspended', 'inactive', 'rejected', 'blocked')))
+            OR LOWER(tm.status) = ${statusFilter}
+            OR LOWER(COALESCE(u.account_status, '')) = ${statusFilter}
+          )
+          AND (${assocId} = 0 OR tm.associate_id = ${assocId})
+          AND (
+            ${searchTerm} = '%%'
+            OR tm.full_name ILIKE ${searchTerm}
+            OR tm.team_member_uid ILIKE ${searchTerm}
+            OR tm.mobile_no ILIKE ${searchTerm}
+            OR tm.email_id ILIKE ${searchTerm}
+            OR assoc.full_name ILIKE ${searchTerm}
+            OR assoc.member_id ILIKE ${searchTerm}
+          )
+          ORDER BY tm.created_at DESC
+          LIMIT ${actualLimit} OFFSET ${(pageNumber - 1) * actualLimit}`;
+      }
 
       const total = Number(rows[0]?.total_count || 0);
       const items = rows.map(({ total_count, ...r }) => r);
 
-      // Summary counts for header cards
-      const [summary] = await sql`
-        SELECT
-          COALESCE(COUNT(*), 0)::int AS total_team_members,
-          COALESCE(COUNT(CASE WHEN LOWER(tm.status) IN ('approved', 'active') THEN 1 END), 0)::int AS active_count,
-          COALESCE(COUNT(CASE WHEN LOWER(tm.status) IN ('pending', 'submitted') THEN 1 END), 0)::int AS pending_count,
-          COALESCE(COUNT(CASE WHEN LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked') THEN 1 END), 0)::int AS suspended_count,
-          COALESCE(SUM(t.total_gaj_sold), 0)::numeric AS total_gaj_sold
-        FROM team_members tm
-        LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id`;
+      let summary = {
+        total_team_members: total,
+        active_count: 0,
+        pending_count: 0,
+        suspended_count: 0,
+        total_gaj_sold: 0
+      };
+
+      try {
+        const [sumRow] = await sql`
+          SELECT
+            COALESCE(COUNT(*), 0)::int AS total_team_members,
+            COALESCE(COUNT(CASE WHEN LOWER(tm.status) IN ('approved', 'active') THEN 1 END), 0)::int AS active_count,
+            COALESCE(COUNT(CASE WHEN LOWER(tm.status) IN ('pending', 'submitted') THEN 1 END), 0)::int AS pending_count,
+            COALESCE(COUNT(CASE WHEN LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked') THEN 1 END), 0)::int AS suspended_count
+          FROM team_members tm`;
+        if (sumRow) {
+          summary = { ...summary, ...sumRow };
+        }
+      } catch (sumErr) {
+        console.warn("[Admin Team Members Summary Warning]:", sumErr.message);
+      }
 
       return ok(res, {
         items,
@@ -13365,7 +13437,7 @@ app.get("/api/admin/team-members",
         page: pageNumber,
         pageSize: actualLimit,
         limit: actualLimit,
-        summary: summary || {}
+        summary
       });
     } catch (e) {
       console.error("[Admin Team Members GET Error]:", e);
