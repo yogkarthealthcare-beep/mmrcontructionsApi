@@ -324,7 +324,8 @@ router.post('/auth/login', async (req, res) => {
           full_name: investor.full_name,
         };
 
-        const secret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+        const secret = process.env.JWT_SECRET;
+        if (!secret) throw new Error("JWT_SECRET is not configured");
         const refreshSecret = process.env.JWT_REFRESH_SECRET || secret;
         const token = jwt.sign(payload, secret, { expiresIn: process.env.JWT_EXPIRES_IN || "30d" });
         const refreshToken = jwt.sign(payload, refreshSecret, { expiresIn: "60d" });

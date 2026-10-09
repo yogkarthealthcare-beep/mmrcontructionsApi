@@ -1,7 +1,16 @@
 import jwt from "jsonwebtoken";
 
-const getAdminSecret = () => process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
-const getUserSecret = () => process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+const getAdminSecret = () => {
+  const secret = process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
+  if (!secret) throw new Error("JWT_SECRET environment variable is missing.");
+  return secret;
+};
+
+const getUserSecret = () => {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error("JWT_SECRET environment variable is missing.");
+  return secret;
+};
 
 export const userAuth = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
@@ -34,15 +43,8 @@ export const adminAuth = (req, res, next) => {
     req.user = decoded;
     next();
   } catch (_) {
-    try {
-      const fallbackSecret = "mmr_constructions_jwt_secret_2026_key";
-      const decoded = jwt.verify(token, fallbackSecret);
-      req.admin = decoded;
-      req.user = decoded;
-      next();
-    } catch {
-      return res.status(401).json({ success: false, message: "Invalid or expired admin token" });
-    }
+    return res.status(401).json({ success: false, message: "Invalid or expired admin token" });
   }
 };
+
 

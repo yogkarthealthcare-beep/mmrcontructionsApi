@@ -3,7 +3,7 @@ import jwt from "jsonwebtoken";
 import sql from "../db.js";
 
 async function runTest() {
-  const secret = "mmr_constructions_jwt_secret_2026_key";
+  const secret = process.env.JWT_SECRET;
   const token = jwt.sign({ admin_id: 1, email: "admin@mmrconstructions.in", full_name: "MMR Admin", role: "SuperAdmin" }, secret);
 
   const res = await fetch("http://localhost:5000/api/admin/login-as-user", {

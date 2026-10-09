@@ -13,6 +13,7 @@ import fs from "fs/promises";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import xlsx from "xlsx";
+import { USER_TYPES, codeToDbUserType, normalizeUserType, formatDisplayUserType } from "./constants/userTypes.js";
 import { v2 as cloudinary } from "cloudinary";
 import { Readable } from "stream";
 import newRoutes from './routes/newRoutes.js';
@@ -540,7 +541,11 @@ const publicErrorMessage = (msg, status = 400) => {
 const err = (res, msg = "Request failed", status = 400) =>
   res.status(status).json({ success: false, message: publicErrorMessage(msg, status) });
 
-const adminJwtSecret = () => process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+if (!process.env.JWT_SECRET) {
+  console.error("FATAL: JWT_SECRET environment variable is missing in environment.");
+  process.exit(1);
+}
+const adminJwtSecret = () => process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
 const parseBool = (value, fallback = false) => {
   if (value === undefined || value === null || value === "") return fallback;
   if (typeof value === "boolean") return value;
@@ -2962,13 +2967,8 @@ const verifyUserToken = async (req, res, next) => {
     return err(res, "No token provided", 401);
   const token = auth.split(" ")[1];
   try {
-    const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
-    let decoded;
-    try {
-      decoded = jwt.verify(token, jwtSecret);
-    } catch (e1) {
-      decoded = jwt.verify(token, "mmr_constructions_jwt_secret_2026_key");
-    }
+    const jwtSecret = process.env.JWT_SECRET;
+    const decoded = jwt.verify(token, jwtSecret);
     const [user] = await sql`
       SELECT user_id, member_id, user_type, account_status, is_active
       FROM users
@@ -3025,18 +3025,7 @@ const verifyAdminToken = (req, res, next) => {
     req.admin = jwt.verify(token, adminJwtSecret());
     return next();
   } catch (e1) {
-    try {
-      const fallbackSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
-      req.admin = jwt.verify(token, fallbackSecret);
-      return next();
-    } catch (e2) {
-      try {
-        req.admin = jwt.verify(token, "mmr_constructions_jwt_secret_2026_key");
-        return next();
-      } catch (e3) {
-        return err(res, "Invalid or expired admin token", 401);
-      }
-    }
+    return err(res, "Invalid or expired admin token", 401);
   }
 };
 
@@ -4862,7 +4851,8 @@ app.post("/api/auth/register-quick", async (req, res) => {
           email: createdInvestor.email,
           full_name: createdInvestor.full_name
         };
-        const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+        const jwtSecret = process.env.JWT_SECRET;
+        if (!jwtSecret) throw new Error("JWT_SECRET is not configured");
         const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
         const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || "30d" });
         const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "60d" });
@@ -4916,7 +4906,7 @@ app.post("/api/auth/register-quick", async (req, res) => {
           mobile_no: createdUser.mobile_no,
           email: createdUser.email
         };
-        const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+        const jwtSecret = process.env.JWT_SECRET;
         const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
         const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || "30d" });
         const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "60d" });
@@ -5170,7 +5160,8 @@ app.post("/api/auth/login", async (req, res) => {
           full_name: investor.full_name,
         };
 
-        const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+        const jwtSecret = process.env.JWT_SECRET;
+        if (!jwtSecret) throw new Error("JWT_SECRET is not configured");
         const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
         const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || "30d" });
         const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "60d" });
@@ -5256,7 +5247,7 @@ app.post("/api/auth/login", async (req, res) => {
       email: user.email,
     };
 
-    const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+    const jwtSecret = process.env.JWT_SECRET;
     const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
     const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || "30d" });
     const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "60d" });
@@ -5783,7 +5774,8 @@ app.post(["/api/admin/login-as-user", "/api/admin/auth/impersonate", "/api/admin
       return err(res, "Invalid user_type. Expected 'Customer', 'Associate', or 'Investor'.", 400);
     }
 
-    const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) throw new Error("JWT_SECRET is not configured");
     const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
     const token = jwt.sign(payload, jwtSecret, { expiresIn: "30d" });
     const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "60d" });
@@ -9285,32 +9277,8 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
 
   if (query.status) add("u.account_status::text = ?", query.status);
   if (query.user_type) {
-    const ut = String(query.user_type).toLowerCase().trim();
-    if (ut === "associate") {
-      where.push(`(
-        (LOWER(u.user_type::text) = 'associate' OR u.member_id ILIKE 'MMR-ASC-%' OR u.member_id ILIKE 'ASC-%' OR u.member_id = 'MMR00001' OR u.member_id = 'MMR0001')
-        AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')
-        AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
-      )`);
-    } else if (ut === "team member" || ut === "teammember" || ut === "team_member") {
-      where.push(`(
-        LOWER(u.user_type::text) IN ('team member', 'teammember', 'team_member')
-        OR u.member_id ILIKE 'MMR-TM-%'
-        OR u.member_id ILIKE 'TM-%'
-        OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
-      )`);
-    } else if (ut === "customer") {
-      where.push(`(
-        LOWER(u.user_type::text) = 'customer' 
-        OR u.member_id ILIKE 'MMR-CUS-%' 
-        OR u.member_id ILIKE 'CUS-%'
-        OR EXISTS (SELECT 1 FROM customer_enrollment_submissions ces WHERE ces.user_id = u.user_id OR (u.mobile_no IS NOT NULL AND ces.mobile_1 = u.mobile_no))
-      )`);
-    } else if (ut === "investor") {
-      where.push(`(LOWER(u.user_type::text) = 'investor' OR u.member_id ILIKE 'MMR-INV-%' OR u.member_id ILIKE 'INV-%')`);
-    } else {
-      add("LOWER(u.user_type::text) = LOWER(?)", query.user_type);
-    }
+    const dbType = codeToDbUserType(query.user_type);
+    add("u.user_type::text = ?", dbType);
   }
   if (query.verification_status) add("COALESCE(u.email_verified, u.is_otp_verified, FALSE) = ?", query.verification_status === "verified");
   if (query.date_from) add("u.registered_at::date >= ?::date", query.date_from);
@@ -9351,20 +9319,8 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
   try {
     const rows = await sql.unsafe(`
       SELECT u.user_id,
-             CASE 
-               WHEN u.member_id IS NOT NULL AND u.member_id != '' THEN u.member_id
-               WHEN tm.id IS NOT NULL OR LOWER(u.user_type::TEXT) IN ('team member', 'teammember', 'team_member') THEN CONCAT('MMR-TM-', LPAD(u.user_id::text, 5, '0'))
-               WHEN LOWER(u.user_type::TEXT) = 'associate' THEN CONCAT('MMR-ASC-', LPAD(u.user_id::text, 5, '0'))
-               WHEN LOWER(u.user_type::TEXT) = 'investor' THEN CONCAT('MMR-INV-', LPAD(u.user_id::text, 5, '0'))
-               ELSE CONCAT('MMR-CUS-', LPAD(u.user_id::text, 5, '0'))
-             END AS member_id,
-             CASE
-               WHEN u.member_id ILIKE 'MMR-TM-%' OR u.member_id ILIKE 'TM-%' OR tm.id IS NOT NULL OR LOWER(u.user_type::TEXT) IN ('team member', 'teammember', 'team_member') THEN 'Team Member'
-               WHEN u.member_id ILIKE 'MMR-INV-%' OR u.member_id ILIKE 'INV-%' OR LOWER(u.user_type::TEXT) = 'investor' THEN 'Investor'
-               WHEN u.member_id ILIKE 'MMR-CUS-%' OR u.member_id ILIKE 'CUS-%' OR LOWER(u.user_type::TEXT) = 'customer' THEN 'Customer'
-               WHEN u.member_id ILIKE 'MMR-ASC-%' OR u.member_id ILIKE 'ASC-%' OR u.member_id ILIKE 'MMR0%' OR LOWER(u.user_type::TEXT) = 'associate' THEN 'Associate'
-               ELSE COALESCE(u.user_type::text, 'Customer')
-             END AS user_type,
+             COALESCE(u.member_id, CONCAT('MMR-', u.user_type, '-', LPAD(u.user_id::text, 5, '0'))) AS member_id,
+             u.user_type::text AS user_type,
              u.full_name, u.mobile_no,
              u.email, u.account_status::text AS account_status, u.registered_at, u.updated_at,
              COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
@@ -9377,9 +9333,6 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
              COALESCE(doc.doc_count, 0)::int AS doc_count
       FROM users u
       LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
-      LEFT JOIN LATERAL (
-        SELECT id FROM team_members WHERE user_id = u.user_id LIMIT 1
-      ) tm ON TRUE
       LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
       LEFT JOIN (
         SELECT DISTINCT ON (user_id) user_id, permanent_address, present_address, permanent_city, present_city, permanent_state_pin, present_state_pin
@@ -9409,13 +9362,7 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
     const fallbackRows = await sql.unsafe(`
       SELECT u.user_id,
              COALESCE(u.member_id, CONCAT('MMR-', u.user_type, '-', LPAD(u.user_id::text, 5, '0'))) AS member_id,
-             CASE
-               WHEN u.member_id ILIKE 'MMR-TM-%' OR u.member_id ILIKE 'TM-%' OR LOWER(u.user_type::TEXT) IN ('team member', 'teammember', 'team_member') THEN 'Team Member'
-               WHEN u.member_id ILIKE 'MMR-INV-%' OR u.member_id ILIKE 'INV-%' OR LOWER(u.user_type::TEXT) = 'investor' THEN 'Investor'
-               WHEN u.member_id ILIKE 'MMR-CUS-%' OR u.member_id ILIKE 'CUS-%' OR LOWER(u.user_type::TEXT) = 'customer' THEN 'Customer'
-               WHEN u.member_id ILIKE 'MMR-ASC-%' OR u.member_id ILIKE 'ASC-%' OR u.member_id ILIKE 'MMR0%' OR LOWER(u.user_type::TEXT) = 'associate' THEN 'Associate'
-               ELSE COALESCE(u.user_type::text, 'Customer')
-             END AS user_type,
+             u.user_type::text AS user_type,
              u.full_name, u.mobile_no,
              u.email, u.account_status::text AS account_status, u.registered_at, u.updated_at,
              COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
@@ -9519,7 +9466,7 @@ const getAdminInquiriesPage = async (query) => {
   return { rows, totalRecords: Number(total?.count || 0), page, pageSize, counts };
 };
 
-const captchaSecret = () => process.env.CAPTCHA_SECRET || process.env.JWT_SECRET || "local-captcha-secret";
+const captchaSecret = () => process.env.CAPTCHA_SECRET || process.env.JWT_SECRET;
 const captchaMaxAgeMs = 5 * 60 * 1000;
 
 function signCaptcha(payload) {
@@ -13010,7 +12957,8 @@ app.post("/api/admin/impersonate/:user_id", verifyAdminToken, role("SuperAdmin",
     const [user] = await sql`SELECT user_id, full_name, email, user_type, member_id, account_status FROM users WHERE user_id = ${user_id}`;
     if (!user) return err(res, "User not found", 404);
     
-    const jwtSecret = process.env.JWT_SECRET || 'secret';
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) return err(res, "JWT_SECRET is not configured", 500);
     const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
     
     const payload = {
@@ -13364,111 +13312,6 @@ app.get("/api/admin/commissions",
     }
   }
 );
-
-app.get("/api/admin/diagnose-db-detail", verifyAdminToken, async (_req, res) => {
-  try {
-    const enums = await sql`SELECT t.typname, e.enumlabel, e.enumsortorder FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid WHERE t.typname IN ('user_type_enum', 'account_status_enum') ORDER BY t.typname, e.enumsortorder`;
-    const users = await sql`SELECT user_id, member_id, full_name, email, mobile_no, user_type::text AS user_type, account_status::text AS account_status, sponsor_user_id, registered_at FROM users ORDER BY user_id ASC`;
-    const assocEnroll = await sql`SELECT * FROM associate_enrollment ORDER BY created_at DESC LIMIT 5`.catch(e => ({ error: e.message }));
-    const custEnroll = await sql`SELECT * FROM customer_enrollment_submissions ORDER BY created_at DESC LIMIT 5`.catch(e => ({ error: e.message }));
-    const teamMembers = await sql`SELECT * FROM team_members ORDER BY id ASC`.catch(e => ({ error: e.message }));
-    const investors = await sql`SELECT * FROM investors ORDER BY id ASC LIMIT 5`.catch(e => ({ error: e.message }));
-
-    return ok(res, {
-      enums,
-      users,
-      assocEnroll,
-      custEnroll,
-      teamMembers,
-      investors
-    });
-  } catch (e) {
-    return err(res, e.message);
-  }
-});
-
-app.post("/api/admin/run-user-type-migration", verifyAdminToken, role("SuperAdmin"), async (_req, res) => {
-  try {
-    const results = await sql.begin(async (tx) => {
-      // 1. Extend enums
-      await tx.unsafe(`
-        DO $$ BEGIN
-          ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'Investor';
-        EXCEPTION WHEN duplicate_object THEN null; END $$;
-        DO $$ BEGIN
-          ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'Team Member';
-        EXCEPTION WHEN duplicate_object THEN null; END $$;
-        DO $$ BEGIN
-          ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'CUSTOMER';
-        EXCEPTION WHEN duplicate_object THEN null; END $$;
-        DO $$ BEGIN
-          ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'ASSOCIATE';
-        EXCEPTION WHEN duplicate_object THEN null; END $$;
-        DO $$ BEGIN
-          ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'INVESTOR';
-        EXCEPTION WHEN duplicate_object THEN null; END $$;
-        DO $$ BEGIN
-          ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'TEAM_MEMBER';
-        EXCEPTION WHEN duplicate_object THEN null; END $$;
-      `);
-
-      // 2. Backup SELECT before UPDATE
-      const backupBefore = await tx`
-        SELECT user_id, member_id, full_name, user_type::text AS user_type, account_status::text AS account_status
-        FROM users
-        ORDER BY user_id ASC
-      `;
-
-      // 3. Safe targeted UPDATE
-      const updatedTeamMembers = await tx`
-        UPDATE users
-        SET user_type = 'Team Member'
-        WHERE member_id ILIKE 'MMR-TM-%'
-           OR member_id ILIKE 'TM-%'
-           OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id)
-        RETURNING user_id, member_id, full_name, user_type::text AS user_type
-      `;
-
-      const updatedCustomers = await tx`
-        UPDATE users
-        SET user_type = 'Customer'
-        WHERE (member_id ILIKE 'MMR-CUS-%' OR member_id ILIKE 'CUS-%')
-          AND (member_id NOT ILIKE 'MMR-TM-%')
-          AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id)
-        RETURNING user_id, member_id, full_name, user_type::text AS user_type
-      `;
-
-      const updatedAssociates = await tx`
-        UPDATE users
-        SET user_type = 'Associate'
-        WHERE (member_id ILIKE 'MMR-ASC-%' OR member_id ILIKE 'ASC-%' OR member_id = 'MMR00001' OR member_id = 'MMR0001')
-          AND (member_id NOT ILIKE 'MMR-TM-%')
-          AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id)
-        RETURNING user_id, member_id, full_name, user_type::text AS user_type
-      `;
-
-      // 4. Verification count after UPDATE
-      const countsAfter = await tx`
-        SELECT user_type::text AS user_type, COUNT(*)::int AS count
-        FROM users
-        GROUP BY user_type
-        ORDER BY user_type
-      `;
-
-      return {
-        backupBefore,
-        updatedTeamMembers,
-        updatedCustomers,
-        updatedAssociates,
-        countsAfter
-      };
-    });
-
-    return ok(res, results, "Migration executed successfully inside transaction.");
-  } catch (e) {
-    return err(res, e.message);
-  }
-});
 
 app.get("/api/admin/team-members",
   verifyAdminToken,

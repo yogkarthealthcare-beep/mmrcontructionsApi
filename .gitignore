@@ -17,3 +17,7 @@ scratch.*
 temp_*
 scratch/
 scratch/.*
+test_query.*
+test_count.*
+dump_schema.*
+test-db.*

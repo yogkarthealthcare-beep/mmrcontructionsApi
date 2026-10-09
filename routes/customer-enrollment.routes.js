@@ -25,7 +25,10 @@ function authAdmin(req, res, next) {
     return res.status(401).json({ success: false, message: "No admin token provided." });
   }
   const token = authHeader.split(" ")[1];
-  const adminSecret = process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+  const adminSecret = process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
+  if (!adminSecret) {
+    return res.status(500).json({ success: false, message: "Server configuration error: JWT_SECRET missing." });
+  }
   try {
     req.admin = jwt.verify(token, adminSecret);
     if (!isAdminPrincipal(req.admin)) {
@@ -33,15 +36,7 @@ function authAdmin(req, res, next) {
     }
     next();
   } catch (e) {
-    try {
-      req.admin = jwt.verify(token, "mmr_constructions_jwt_secret_2026_key");
-      if (!isAdminPrincipal(req.admin)) {
-        return res.status(403).json({ success: false, message: "Access restricted to Admins only." });
-      }
-      next();
-    } catch {
-      return res.status(401).json({ success: false, message: "Invalid admin session." });
-    }
+    return res.status(401).json({ success: false, message: "Invalid admin session." });
   }
 }
 

@@ -131,7 +131,7 @@ async function runVerification() {
       email: createdInvestor.email,
       full_name: createdInvestor.full_name,
     };
-    const secret = process.env.JWT_SECRET || "fallback_secret";
+    const secret = process.env.JWT_SECRET;
     const token = jwt.sign(jwtPayload, secret, { expiresIn: "7d" });
     const decoded = jwt.verify(token, secret);
     if (decoded.user_type !== "Investor" || decoded.id !== createdInvestor.id) {

@@ -519,7 +519,8 @@ router.post('/register-quick', async (req, res) => {
           email: createdInvestor.email,
           full_name: createdInvestor.full_name,
         };
-        const jwtSecret = process.env.JWT_SECRET || 'mmr_constructions_jwt_secret_2026_key';
+        const jwtSecret = process.env.JWT_SECRET;
+        if (!jwtSecret) throw new Error("JWT_SECRET is not configured");
         const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
         const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '30d' });
         const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: '60d' });
@@ -742,7 +743,8 @@ router.post('/register-quick', async (req, res) => {
         email: newUser.email,
         mobile_no: newUser.mobile_no,
       };
-      const jwtSecret = process.env.JWT_SECRET || 'mmr_constructions_jwt_secret_2026_key';
+      const jwtSecret = process.env.JWT_SECRET;
+      if (!jwtSecret) throw new Error("JWT_SECRET is not configured");
       const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
       const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '30d' });
       const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: '60d' });
@@ -947,7 +949,8 @@ router.post('/verify-email-otp', async (req, res) => {
         email: createdInvestor.email,
         full_name: createdInvestor.full_name,
       };
-      const jwtSecret = process.env.JWT_SECRET || 'mmr_constructions_jwt_secret_2026_key';
+      const jwtSecret = process.env.JWT_SECRET;
+      if (!jwtSecret) throw new Error("JWT_SECRET is not configured");
       const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
       const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '30d' });
       const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: '60d' });
@@ -1155,7 +1158,8 @@ router.post('/verify-email-otp', async (req, res) => {
       member_id: newUser.member_id,
       email: newUser.email,
     };
-    const jwtSecret = process.env.JWT_SECRET || 'mmr_constructions_jwt_secret_2026_key';
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) throw new Error("JWT_SECRET is not configured");
     const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
     const token = jwt.sign(payload, jwtSecret, {
       expiresIn: process.env.JWT_EXPIRES_IN || '30d',

@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken';
 import '../config/loadEnv.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'mmrcontruction123';
+const JWT_SECRET = process.env.JWT_SECRET;
 const adminToken = jwt.sign(
   { admin_id: 1, email: 'admin@mmrconstructions.in', full_name: 'Super Admin', role: 'SuperAdmin' },
   JWT_SECRET,

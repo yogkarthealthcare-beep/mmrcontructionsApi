@@ -11,6 +11,7 @@ export async function ensureTeamMembersTable() {
     if (tableInitialized)
         return;
     try {
+        await sql.unsafe("ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'Team Member'").catch(() => { });
         await sql `
       CREATE TABLE IF NOT EXISTS team_members (
         id BIGSERIAL PRIMARY KEY,
@@ -83,8 +84,7 @@ export async function syncExistingTeamMembersFromUsers() {
       LIMIT 1
     `.catch(() => []);
         const surajId = suraj ? Number(suraj.user_id) : 1;
-        const surajName = (suraj === null || suraj === void 0 ? void 0 : suraj.full_name) || 'Suraj Kumar Verma';
-
+        const surajName = suraj?.full_name || 'Suraj Kumar Verma';
         // 2. Guarantee Suraj Kumar Verma's 2 Team Members (Kapil Sharma & Kiran Singh)
         const defaultTeamMembers = [
             {
@@ -116,7 +116,6 @@ export async function syncExistingTeamMembersFromUsers() {
                 ifsc: 'PUNB0123400'
             }
         ];
-
         for (const d of defaultTeamMembers) {
             let [uRow] = await sql `
         SELECT user_id, member_id, full_name, mobile_no, email, user_type, account_status
@@ -127,9 +126,7 @@ export async function syncExistingTeamMembersFromUsers() {
         ORDER BY user_id ASC
         LIMIT 1
       `.catch(() => []);
-
             let uId = uRow ? Number(uRow.user_id) : null;
-
             if (uRow) {
                 await sql `
           UPDATE users SET
@@ -158,7 +155,6 @@ export async function syncExistingTeamMembersFromUsers() {
                 if (newU)
                     uId = Number(newU.user_id);
             }
-
             await sql `
         INSERT INTO team_members (
           team_member_uid, associate_id, associate_name, user_id, slot_number,
@@ -179,7 +175,6 @@ export async function syncExistingTeamMembersFromUsers() {
             updated_at = NOW()
       `.catch(() => { });
         }
-
         // 3. Normalize team_members associate names and IDs
         await sql `
       UPDATE team_members tm
@@ -187,7 +182,6 @@ export async function syncExistingTeamMembersFromUsers() {
           associate_name = ${surajName}
       WHERE tm.associate_id = 0 OR tm.associate_name IS NULL OR tm.associate_name = 'Direct / Head Office'
     `.catch(() => { });
-
         // 4. Sync any additional orphaned users with TM prefix or Team Member type
         const orphanedUsers = await sql `
       SELECT u.user_id, u.member_id, u.full_name, u.mobile_no, u.email,
@@ -206,7 +200,6 @@ export async function syncExistingTeamMembersFromUsers() {
         SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id OR tm.team_member_uid = u.member_id
       )
     `.catch(() => []);
-
         for (const u of orphanedUsers) {
             const uid = u.member_id || `MMR-TM-${String(u.user_id).padStart(5, '0')}`;
             const assocId = Number(u.sponsor_user_id) || surajId;
@@ -228,7 +221,6 @@ export async function syncExistingTeamMembersFromUsers() {
             associate_name = CASE WHEN team_members.associate_name = 'Direct / Head Office' THEN EXCLUDED.associate_name ELSE team_members.associate_name END
       `.catch(() => { });
         }
-
         // 5. Sync any orphaned enrollments
         const orphanedEnrollments = await sql `
       SELECT e.id, e.associate_id, e.user_id, e.member_id, e.full_name, e.contact_1, e.contact_no_1, e.mobile_no,

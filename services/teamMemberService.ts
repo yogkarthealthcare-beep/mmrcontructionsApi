@@ -12,6 +12,7 @@ let tableInitialized = false;
 export async function ensureTeamMembersTable(): Promise<void> {
   if (tableInitialized) return;
   try {
+    await sql.unsafe("ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'Team Member'").catch(() => {});
     await sql`
       CREATE TABLE IF NOT EXISTS team_members (
         id BIGSERIAL PRIMARY KEY,

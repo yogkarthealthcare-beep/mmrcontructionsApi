@@ -19,7 +19,7 @@ async function testImpersonation() {
     }
     console.log(`1. Found Active Admin: ${admin.full_name} (${admin.email}, Role: ${admin.role})`);
 
-    const secret = process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+    const secret = process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
     const adminToken = jwt.sign({
       admin_id: admin.admin_id,
       email: admin.email,

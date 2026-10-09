@@ -283,7 +283,7 @@ export function authInvestor(req, res, next) {
     return res.status(401).json({ success: false, message: "No authentication token provided." });
   }
   const token = authHeader.split(" ")[1];
-  const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+  const jwtSecret = process.env.JWT_SECRET;
   try {
     const decoded = jwt.verify(token, jwtSecret);
     if (decoded.role !== "Investor" && decoded.user_type !== "Investor") {
@@ -292,16 +292,7 @@ export function authInvestor(req, res, next) {
     req.investor = decoded;
     next();
   } catch (e) {
-    try {
-      const decoded = jwt.verify(token, process.env.JWT_ADMIN_SECRET || jwtSecret);
-      if (decoded.role !== "Investor" && decoded.user_type !== "Investor") {
-        return res.status(403).json({ success: false, message: "Access restricted to Investors only." });
-      }
-      req.investor = decoded;
-      next();
-    } catch {
-      return res.status(401).json({ success: false, message: "Invalid or expired session token." });
-    }
+    return res.status(401).json({ success: false, message: "Invalid or expired session token." });
   }
 }
 
@@ -311,7 +302,7 @@ function authAdmin(req, res, next) {
     return res.status(401).json({ success: false, message: "No admin token provided." });
   }
   const token = authHeader.split(" ")[1];
-  const adminSecret = process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+  const adminSecret = process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
   try {
     req.admin = jwt.verify(token, adminSecret);
     if (!isAdminPrincipal(req.admin)) {
@@ -319,15 +310,7 @@ function authAdmin(req, res, next) {
     }
     next();
   } catch (e) {
-    try {
-      req.admin = jwt.verify(token, process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key");
-      if (!isAdminPrincipal(req.admin)) {
-        return res.status(403).json({ success: false, message: "Admin access required." });
-      }
-      next();
-    } catch {
-      return res.status(401).json({ success: false, message: "Invalid admin token." });
-    }
+    return res.status(401).json({ success: false, message: "Invalid admin token." });
   }
 }
 
@@ -547,7 +530,8 @@ router.post(["/investor/login", "/investor/auth/login"], async (req, res) => {
       user_type: "Investor"
     };
 
-    const secret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+    const secret = process.env.JWT_SECRET;
+    if (!secret) throw new Error("JWT_SECRET is not configured");
     const refreshSecret = process.env.JWT_REFRESH_SECRET || secret;
     const token = jwt.sign(payload, secret, {
       expiresIn: process.env.JWT_EXPIRES_IN || "30d"

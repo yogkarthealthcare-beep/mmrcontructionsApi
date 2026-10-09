@@ -1,11 +1,12 @@
+require('dotenv').config();
 const postgres = require('postgres');
 
-const sql = postgres({
-  host: '66.116.248.35',
-  port: 5432,
-  database: 'mmrconstructions',
-  username: 'mmruser',
-  password: 'Admin@333baeb00dA1',
+const sql = postgres(process.env.DATABASE_URL || {
+  host: process.env.DATABASE_HOST || process.env.DB_HOST,
+  port: parseInt(process.env.DATABASE_PORT || process.env.DB_PORT || '5432', 10),
+  database: process.env.DATABASE_NAME || process.env.DB_NAME,
+  username: process.env.DATABASE_USER || process.env.DB_USER,
+  password: process.env.DATABASE_PASSWORD || process.env.DB_PASSWORD,
   max: 1
 });
 

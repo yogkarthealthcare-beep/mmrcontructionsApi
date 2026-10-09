@@ -8,7 +8,7 @@ app.use(express.json());
 const ok = (res, data, msg = "Success", status = 200) => res.status(status).json({ success: true, message: msg, data });
 const err = (res, msg = "Server error", status = 500) => res.status(status).json({ success: false, message: msg });
 
-const adminJwtSecret = () => process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+const adminJwtSecret = () => process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
 
 const verifyAdminToken = (req, res, next) => {
   const auth = req.headers.authorization;
@@ -103,7 +103,7 @@ app.post("/api/admin/login-as-user", verifyAdminToken, async (req, res) => {
       return err(res, "Invalid user_type. Expected 'Customer', 'Associate', or 'Investor'.", 400);
     }
 
-    const jwtSecret = process.env.JWT_SECRET || "mmr_constructions_jwt_secret_2026_key";
+    const jwtSecret = process.env.JWT_SECRET;
     const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
     const token = jwt.sign(payload, jwtSecret, { expiresIn: "2h" });
     const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "7d" });
