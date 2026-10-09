@@ -5897,9 +5897,21 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
         LIMIT 1
       ) tm ON TRUE
       LEFT JOIN LATERAL (
-        SELECT ae.id, ae.user_id, ae.application_no, ae.full_name, ae.father_husband_name, ae.date_of_birth, ae.gender,
-               ae.pan_number, ae.aadhar_number, ae.contact_no_1, ae.contact_no_2, ae.email, ae.app_status, ae.is_verified,
-               ae.photo_path, ae.signature_path,
+        SELECT ae.id, ae.user_id, 
+               COALESCE(ae.member_id, ae.id) AS application_no, 
+               ae.full_name, 
+               ae.father_name AS father_husband_name, 
+               ae.dob AS date_of_birth, 
+               ae.gender,
+               ae.pan_no AS pan_number, 
+               ae.aadhar_no AS aadhar_number, 
+               ae.contact_no_1, 
+               ae.contact_no_2, 
+               ae.email, 
+               ae.status AS app_status, 
+               (CASE WHEN LOWER(COALESCE(ae.status, '')) IN ('approved', 'completed') THEN TRUE ELSE FALSE END) AS is_verified,
+               ae.applicant_photo_path AS photo_path, 
+               ae.signature_path,
                aa.local_address AS perm_address, aa.city AS perm_city, aa.state AS perm_state, aa.pin_code AS perm_pin,
                ab.bank_name, ab.branch_name, ab.account_holder_name, ab.account_no, ab.ifsc_code,
                an.nominee_name, an.relationship AS nom_rel,
@@ -6176,13 +6188,13 @@ app.put("/api/profile", verifyUserToken, async (req, res) => {
         UPDATE associate_enrollment SET
           user_id              = COALESCE(user_id, ${uid}),
           full_name            = COALESCE(${cleanFullName}, full_name),
-          father_husband_name  = COALESCE(${cleanFather}, father_husband_name),
+          father_name          = COALESCE(${cleanFather}, father_name),
           gender               = COALESCE(${cleanGender}, gender),
-          date_of_birth        = COALESCE(${cleanDob ? new Date(cleanDob) : null}, date_of_birth),
+          dob                  = COALESCE(${cleanDob ? new Date(cleanDob) : null}, dob),
           contact_no_2         = COALESCE(${cleanAltMobile}, contact_no_2),
           email                = COALESCE(${cleanEmail}, email),
-          pan_number           = COALESCE(${cleanPan}, pan_number),
-          aadhar_number        = COALESCE(${cleanAadhar}, aadhar_number),
+          pan_no               = COALESCE(${cleanPan}, pan_no),
+          aadhar_no            = COALESCE(${cleanAadhar}, aadhar_no),
           updated_at           = NOW()
         WHERE id = ${aeRec.id}`;
 
