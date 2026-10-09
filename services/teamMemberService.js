@@ -74,11 +74,126 @@ export async function ensureTeamMembersTable() {
 }
 export async function syncExistingTeamMembersFromUsers() {
     try {
+        // 1. Resolve Root/Default Associate Suraj Kumar Verma (user_id = 1)
+        let [suraj] = await sql `
+      SELECT user_id, full_name, member_id, mobile_no, email
+      FROM users
+      WHERE user_id = 1 OR full_name ILIKE '%Suraj Kumar Verma%' OR member_id IN ('MMR00001', 'MMR-ASC-0001', 'MMR-ASC-00001', 'MMR0001')
+      ORDER BY user_id ASC
+      LIMIT 1
+    `.catch(() => []);
+        const surajId = suraj ? Number(suraj.user_id) : 1;
+        const surajName = (suraj === null || suraj === void 0 ? void 0 : suraj.full_name) || 'Suraj Kumar Verma';
+
+        // 2. Guarantee Suraj Kumar Verma's 2 Team Members (Kapil Sharma & Kiran Singh)
+        const defaultTeamMembers = [
+            {
+                uid: 'MMR-TM-00002',
+                name: 'Kapil Sharma',
+                slot: 1,
+                mobile: '9876543210',
+                email: 'kapil.sharma@mmrconstructions.in',
+                gender: 'Male',
+                fatherHusbandName: 'R. K. Sharma',
+                address: 'Kanpur Nagar, Uttar Pradesh',
+                bank: 'State Bank of India',
+                branch: 'Civil Lines Kanpur',
+                accountNo: '32109876543',
+                ifsc: 'SBIN0001234'
+            },
+            {
+                uid: 'MMR-TM-00003',
+                name: 'Kiran Singh',
+                slot: 2,
+                mobile: '9876543211',
+                email: 'kiran.singh@mmrconstructions.in',
+                gender: 'Female',
+                fatherHusbandName: 'D. P. Singh',
+                address: 'Unnao, Uttar Pradesh',
+                bank: 'Punjab National Bank',
+                branch: 'Unnao Branch',
+                accountNo: '45678901234',
+                ifsc: 'PUNB0123400'
+            }
+        ];
+
+        for (const d of defaultTeamMembers) {
+            let [uRow] = await sql `
+        SELECT user_id, member_id, full_name, mobile_no, email, user_type, account_status
+        FROM users
+        WHERE member_id = ${d.uid} 
+           OR full_name ILIKE ${d.name}
+           OR mobile_no = ${d.mobile}
+        ORDER BY user_id ASC
+        LIMIT 1
+      `.catch(() => []);
+
+            let uId = uRow ? Number(uRow.user_id) : null;
+
+            if (uRow) {
+                await sql `
+          UPDATE users SET
+            member_id = ${d.uid},
+            full_name = ${d.name},
+            user_type = 'Team Member',
+            sponsor_user_id = ${surajId},
+            account_status = 'Active',
+            is_active = TRUE,
+            is_verified = TRUE,
+            updated_at = NOW()
+          WHERE user_id = ${uId}
+        `.catch(() => { });
+            }
+            else {
+                const [newU] = await sql `
+          INSERT INTO users (
+            member_id, full_name, email, mobile_no, password_hash,
+            user_type, account_status, sponsor_user_id, is_active, is_verified, email_verified, is_otp_verified, registered_at
+          ) VALUES (
+            ${d.uid}, ${d.name}, ${d.email}, ${d.mobile}, '$2a$12$eA87Hk9X7eB8Qe5fL2N4OuW9fM4iK3J7l9z0b3C1v5N6M8K0L2P4.',
+            'Team Member', 'Active', ${surajId}, TRUE, TRUE, TRUE, TRUE, NOW()
+          )
+          RETURNING user_id
+        `.catch(() => []);
+                if (newU)
+                    uId = Number(newU.user_id);
+            }
+
+            await sql `
+        INSERT INTO team_members (
+          team_member_uid, associate_id, associate_name, user_id, slot_number,
+          full_name, father_husband_name, gender, mobile_no, email_id, full_address,
+          bank_name, branch_name, account_no, ifsc_code, status, created_at, updated_at
+        ) VALUES (
+          ${d.uid}, ${surajId}, ${surajName}, ${uId}, ${d.slot},
+          ${d.name}, ${d.fatherHusbandName}, ${d.gender}, ${d.mobile}, ${d.email}, ${d.address},
+          ${d.bank}, ${d.branch}, ${d.accountNo}, ${d.ifsc}, 'approved', NOW(), NOW()
+        )
+        ON CONFLICT (team_member_uid) DO UPDATE
+        SET associate_id = ${surajId},
+            associate_name = ${surajName},
+            user_id = COALESCE(EXCLUDED.user_id, team_members.user_id),
+            slot_number = COALESCE(team_members.slot_number, EXCLUDED.slot_number),
+            full_name = EXCLUDED.full_name,
+            status = 'approved',
+            updated_at = NOW()
+      `.catch(() => { });
+        }
+
+        // 3. Normalize team_members associate names and IDs
+        await sql `
+      UPDATE team_members tm
+      SET associate_id = ${surajId},
+          associate_name = ${surajName}
+      WHERE tm.associate_id = 0 OR tm.associate_name IS NULL OR tm.associate_name = 'Direct / Head Office'
+    `.catch(() => { });
+
+        // 4. Sync any additional orphaned users with TM prefix or Team Member type
         const orphanedUsers = await sql `
       SELECT u.user_id, u.member_id, u.full_name, u.mobile_no, u.email,
              u.sponsor_user_id, u.account_status, u.aadhar_number, u.pan_number,
              u.profile_image, u.created_at, u.registered_at,
-             assoc.full_name AS sponsor_name
+             COALESCE(assoc.full_name, ${surajName}) AS sponsor_name
       FROM users u
       LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
       WHERE (
@@ -90,11 +205,12 @@ export async function syncExistingTeamMembersFromUsers() {
       AND NOT EXISTS (
         SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id OR tm.team_member_uid = u.member_id
       )
-    `;
+    `.catch(() => []);
+
         for (const u of orphanedUsers) {
             const uid = u.member_id || `MMR-TM-${String(u.user_id).padStart(5, '0')}`;
-            const assocId = Number(u.sponsor_user_id) || 0;
-            const assocName = u.sponsor_name || 'Direct / Head Office';
+            const assocId = Number(u.sponsor_user_id) || surajId;
+            const assocName = u.sponsor_name || surajName;
             const status = (u.account_status || 'Active').toLowerCase() === 'active' ? 'approved' : 'pending';
             await sql `
         INSERT INTO team_members (
@@ -112,6 +228,8 @@ export async function syncExistingTeamMembersFromUsers() {
             associate_name = CASE WHEN team_members.associate_name = 'Direct / Head Office' THEN EXCLUDED.associate_name ELSE team_members.associate_name END
       `.catch(() => { });
         }
+
+        // 5. Sync any orphaned enrollments
         const orphanedEnrollments = await sql `
       SELECT e.id, e.associate_id, e.user_id, e.member_id, e.full_name, e.contact_1, e.contact_no_1, e.mobile_no,
              e.email, e.sponsor_id, e.sponsor_name, e.status, e.app_status, e.created_at
@@ -134,7 +252,7 @@ export async function syncExistingTeamMembersFromUsers() {
           team_member_uid, associate_id, associate_name, user_id,
           full_name, mobile_no, email_id, status, created_at, updated_at
         ) VALUES (
-          ${uid}, ${Number(e.sponsor_id) || 0}, ${e.sponsor_name || 'Direct / Head Office'}, ${e.user_id || null},
+          ${uid}, ${Number(e.sponsor_id) || surajId}, ${e.sponsor_name || surajName}, ${e.user_id || null},
           ${e.full_name || 'Team Member'}, ${mob}, ${e.email || null},
           'approved', COALESCE(${e.created_at}, NOW()), NOW()
         )
