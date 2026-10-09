@@ -13267,28 +13267,71 @@ app.get("/api/admin/team-members",
   role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"),
   async (req, res) => {
     try {
-      const { status = "", associate_id = "", search = "", page = 1, limit = 20 } = req.query;
+      await ensureTeamMembersTable().catch(() => {});
+      const { status = "", associate_id = "", search = "", page = 1, limit = 20, pageSize = 20 } = req.query;
       const pageNumber = Math.max(Number(page) || 1, 1);
-      const pageSize = Math.min(Math.max(Number(limit) || 20, 1), 100);
+      const actualLimit = Math.min(Math.max(Number(limit) || Number(pageSize) || 20, 1), 10000);
       const searchTerm = `%${String(search || "").trim()}%`;
       const statusFilter = String(status || "").trim().toLowerCase();
 
       const rows = await sql`
         SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id, tm.associate_name,
-               tm.slot_number, tm.full_name, tm.mobile_no, tm.email_id, tm.status,
+               tm.slot_number, tm.full_name, tm.father_husband_name, tm.date_of_birth, tm.gender,
+               tm.aadhar_no, tm.pan_no, tm.mobile_no, tm.email_id, tm.full_address,
+               tm.nominee_name, tm.nominee_relation, tm.nominee_age_dob, tm.nominee_contact_no,
+               tm.bank_name, tm.branch_name, tm.account_no, tm.ifsc_code, tm.status,
                tm.photo_url, tm.applicant_signature_url, tm.associate_signature_url,
-               tm.created_at, tm.updated_at, tm.bank_name, tm.account_no, tm.ifsc_code,
-               assoc.full_name AS assoc_full_name, assoc.member_id AS assoc_member_id, assoc.mobile_no AS assoc_mobile,
-               COALESCE(u.account_status, tm.status) AS account_status,
+               tm.created_at, tm.updated_at,
+               assoc.full_name AS sponsor_name, assoc.member_id AS sponsor_member_id, 
+               assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
+               COALESCE(u.account_status, tm.status, 'Active') AS account_status,
                COALESCE(u.is_active, true) AS is_user_active,
                COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
                COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
+               COALESCE(b_stats.plots_sold_count, 0) AS plots_sold_count,
+               COALESCE(cust_stats.customers_count, 0) AS customers_count,
+               COALESCE(emi_stats.pending_emi_count, 0) AS pending_emi_count,
+               COALESCE(emi_stats.pending_emi_amount, 0) AS pending_emi_amount,
+               COALESCE(m_sales.monthly_sales_gaj, 0) AS monthly_sales_gaj,
+               COALESCE(y_sales.yearly_sales_gaj, 0) AS yearly_sales_gaj,
                COUNT(*) OVER() AS total_count
         FROM team_members tm
         LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
         LEFT JOIN users u ON u.user_id = tm.user_id
         LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
-        WHERE (${statusFilter} = '' OR ${statusFilter} = 'all' OR LOWER(tm.status) = ${statusFilter})
+        LEFT JOIN LATERAL (
+          SELECT COUNT(b.booking_id)::int AS plots_sold_count
+          FROM bookings b
+          WHERE b.sponsor_user_id = tm.user_id AND b.booking_status::text <> 'Cancelled'
+        ) b_stats ON true
+        LEFT JOIN LATERAL (
+          SELECT COUNT(c.user_id)::int AS customers_count
+          FROM users c
+          WHERE c.sponsor_user_id = tm.user_id AND LOWER(c.user_type::text) = 'customer'
+        ) cust_stats ON true
+        LEFT JOIN LATERAL (
+          SELECT COUNT(e.schedule_id)::int AS pending_emi_count,
+                 COALESCE(SUM(COALESCE(e.total_due, e.emi_amount, 0)), 0)::numeric AS pending_emi_amount
+          FROM emi_schedules e
+          JOIN bookings b_e ON b_e.booking_id = e.booking_id
+          WHERE b_e.sponsor_user_id = tm.user_id 
+            AND e.emi_status::text IN ('Pending', 'Overdue', 'ProofSubmitted')
+        ) emi_stats ON true
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(b_m.plot_size_gaj), 0)::numeric AS monthly_sales_gaj
+          FROM bookings b_m
+          WHERE b_m.sponsor_user_id = tm.user_id 
+            AND b_m.booking_status::text <> 'Cancelled'
+            AND date_trunc('month', b_m.booking_date) = date_trunc('month', CURRENT_DATE)
+        ) m_sales ON true
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(b_y.plot_size_gaj), 0)::numeric AS yearly_sales_gaj
+          FROM bookings b_y
+          WHERE b_y.sponsor_user_id = tm.user_id 
+            AND b_y.booking_status::text <> 'Cancelled'
+            AND date_trunc('year', b_y.booking_date) = date_trunc('year', CURRENT_DATE)
+        ) y_sales ON true
+        WHERE (${statusFilter} = '' OR ${statusFilter} = 'all' OR LOWER(tm.status) = ${statusFilter} OR LOWER(COALESCE(u.account_status, '')) = ${statusFilter})
           AND (${Number(associate_id) || 0} = 0 OR tm.associate_id = ${Number(associate_id) || 0})
           AND (${searchTerm} = '%%'
                OR tm.full_name ILIKE ${searchTerm}
@@ -13298,16 +13341,252 @@ app.get("/api/admin/team-members",
                OR assoc.full_name ILIKE ${searchTerm}
                OR assoc.member_id ILIKE ${searchTerm})
         ORDER BY tm.created_at DESC
-        LIMIT ${pageSize} OFFSET ${(pageNumber - 1) * pageSize}`;
+        LIMIT ${actualLimit} OFFSET ${(pageNumber - 1) * actualLimit}`;
 
       const total = Number(rows[0]?.total_count || 0);
+      const items = rows.map(({ total_count, ...r }) => r);
+
+      // Summary counts for header cards
+      const [summary] = await sql`
+        SELECT
+          COALESCE(COUNT(*), 0)::int AS total_team_members,
+          COALESCE(COUNT(CASE WHEN LOWER(tm.status) IN ('approved', 'active') THEN 1 END), 0)::int AS active_count,
+          COALESCE(COUNT(CASE WHEN LOWER(tm.status) IN ('pending', 'submitted') THEN 1 END), 0)::int AS pending_count,
+          COALESCE(COUNT(CASE WHEN LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked') THEN 1 END), 0)::int AS suspended_count,
+          COALESCE(SUM(t.total_gaj_sold), 0)::numeric AS total_gaj_sold
+        FROM team_members tm
+        LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id`;
+
       return ok(res, {
-        items: rows.map(({ total_count, ...r }) => r),
+        items,
+        team_members: items,
         total,
+        totalRecords: total,
         page: pageNumber,
-        limit: pageSize
+        pageSize: actualLimit,
+        limit: actualLimit,
+        summary: summary || {}
       });
     } catch (e) {
+      console.error("[Admin Team Members GET Error]:", e);
+      return err(res, e.message);
+    }
+  }
+);
+
+app.get("/api/admin/team-members/:id",
+  verifyAdminToken,
+  role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const numId = Number(id);
+
+      const rows = isNaN(numId)
+        ? await sql`
+            SELECT tm.*,
+                   assoc.full_name AS sponsor_name, assoc.member_id AS sponsor_member_id, 
+                   assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
+                   COALESCE(u.account_status, tm.status, 'Active') AS account_status,
+                   COALESCE(u.is_active, true) AS is_user_active,
+                   COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
+                   COALESCE(t.total_commission_earned, 0) AS total_commission_earned
+            FROM team_members tm
+            LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
+            LEFT JOIN users u ON u.user_id = tm.user_id
+            LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
+            WHERE tm.team_member_uid = ${String(id)}
+            LIMIT 1`
+        : await sql`
+            SELECT tm.*,
+                   assoc.full_name AS sponsor_name, assoc.member_id AS sponsor_member_id, 
+                   assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
+                   COALESCE(u.account_status, tm.status, 'Active') AS account_status,
+                   COALESCE(u.is_active, true) AS is_user_active,
+                   COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
+                   COALESCE(t.total_commission_earned, 0) AS total_commission_earned
+            FROM team_members tm
+            LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
+            LEFT JOIN users u ON u.user_id = tm.user_id
+            LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
+            WHERE tm.id = ${numId} OR tm.team_member_uid = ${String(id)} OR tm.user_id = ${numId}
+            LIMIT 1`;
+
+      if (!rows || rows.length === 0) return err(res, "Team member not found", 404);
+      const member = rows[0];
+
+      const userId = member.user_id;
+      let bookings = [];
+      let customers = [];
+      let pendingEmis = [];
+
+      if (userId) {
+        [bookings, customers, pendingEmis] = await Promise.all([
+          sql`SELECT b.booking_id, b.booking_serial, b.booking_status, b.plot_size_gaj, b.total_plot_price, b.booking_date, p.plot_number, s.site_name, u_cust.full_name AS customer_name, u_cust.mobile_no AS customer_mobile FROM bookings b LEFT JOIN plots p ON p.plot_id = b.plot_id LEFT JOIN sites s ON s.site_id = p.site_id LEFT JOIN users u_cust ON u_cust.user_id = b.user_id WHERE b.sponsor_user_id = ${userId} ORDER BY b.created_at DESC LIMIT 20`.catch(() => []),
+          sql`SELECT c.user_id, c.member_id, c.full_name, c.mobile_no, c.email, c.account_status, c.registered_at FROM users c WHERE c.sponsor_user_id = ${userId} AND LOWER(c.user_type::TEXT) = 'customer' ORDER BY c.registered_at DESC LIMIT 20`.catch(() => []),
+          sql`SELECT e.schedule_id, e.installment_number, e.due_date, e.emi_amount, e.total_due, e.emi_status, b.booking_serial, p.plot_number, u_cust.full_name AS customer_name FROM emi_schedules e JOIN bookings b ON b.booking_id = e.booking_id LEFT JOIN plots p ON p.plot_id = b.plot_id LEFT JOIN users u_cust ON u_cust.user_id = b.user_id WHERE b.sponsor_user_id = ${userId} AND e.emi_status IN ('Pending', 'Overdue', 'ProofSubmitted') ORDER BY e.due_date ASC LIMIT 20`.catch(() => [])
+        ]);
+      }
+
+      return ok(res, {
+        member,
+        profile: member,
+        bookings,
+        customers,
+        pending_emis: pendingEmis
+      });
+    } catch (e) {
+      console.error("[Admin Team Member Detail Error]:", e);
+      return err(res, e.message);
+    }
+  }
+);
+
+app.put("/api/admin/team-members/:id",
+  verifyAdminToken,
+  role("SuperAdmin", "Admin", "FinanceManager"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const numId = Number(id);
+      const b = req.body || {};
+
+      const [existing] = isNaN(numId)
+        ? await sql`SELECT * FROM team_members WHERE team_member_uid = ${String(id)} LIMIT 1`
+        : await sql`SELECT * FROM team_members WHERE id = ${numId} OR team_member_uid = ${String(id)} LIMIT 1`;
+
+      if (!existing) return err(res, "Team member not found", 404);
+
+      const fullName = (b.full_name || b.fullName || existing.full_name || "").trim();
+      const fatherHusbandName = (b.father_husband_name || b.fatherHusbandName || existing.father_husband_name || "").trim();
+      const dob = b.date_of_birth || b.dateOfBirth || existing.date_of_birth;
+      const gender = b.gender || existing.gender;
+      const aadharNo = (b.aadhar_no || b.aadharNo || existing.aadhar_no || "").trim();
+      const panNo = (b.pan_no || b.panNo || existing.pan_no || "").trim().toUpperCase();
+      const mobileNo = (b.mobile_no || b.mobileNo || existing.mobile_no || "").trim();
+      const emailId = (b.email_id || b.emailId || b.email || existing.email_id || "").trim().toLowerCase();
+      const fullAddress = (b.full_address || b.fullAddress || b.address || existing.full_address || "").trim();
+      
+      const nomineeName = (b.nominee_name || b.nomineeName || existing.nominee_name || "").trim();
+      const nomineeRelation = (b.nominee_relation || b.nomineeRelation || existing.nominee_relation || "").trim();
+      const nomineeAgeDob = (b.nominee_age_dob || b.nomineeAgeDob || existing.nominee_age_dob || "").trim();
+      const nomineeContactNo = (b.nominee_contact_no || b.nomineeContactNo || existing.nominee_contact_no || "").trim();
+
+      const bankName = (b.bank_name || b.bankName || existing.bank_name || "").trim();
+      const branchName = (b.branch_name || b.branchName || existing.branch_name || "").trim();
+      const accountNo = (b.account_no || b.accountNo || existing.account_no || "").trim();
+      const ifscCode = (b.ifsc_code || b.ifscCode || existing.ifsc_code || "").trim().toUpperCase();
+
+      const photoUrl = b.photo_url || b.applicant_photo_url || existing.photo_url;
+      const applicantSig = b.applicant_signature_url || b.applicantSignature || existing.applicant_signature_url;
+      const associateSig = b.associate_signature_url || b.associateSignature || existing.associate_signature_url;
+      const status = (b.status || existing.status || "approved").toLowerCase();
+
+      const [updated] = await sql`
+        UPDATE team_members
+        SET full_name = ${fullName},
+            father_husband_name = ${fatherHusbandName || null},
+            date_of_birth = ${dob || null},
+            gender = ${gender || null},
+            aadhar_no = ${aadharNo || null},
+            pan_no = ${panNo || null},
+            mobile_no = ${mobileNo},
+            email_id = ${emailId || null},
+            full_address = ${fullAddress || null},
+            nominee_name = ${nomineeName || null},
+            nominee_relation = ${nomineeRelation || null},
+            nominee_age_dob = ${nomineeAgeDob || null},
+            nominee_contact_no = ${nomineeContactNo || null},
+            bank_name = ${bankName || null},
+            branch_name = ${branchName || null},
+            account_no = ${accountNo || null},
+            ifsc_code = ${ifscCode || null},
+            photo_url = ${photoUrl || null},
+            applicant_signature_url = ${applicantSig || null},
+            associate_signature_url = ${associateSig || null},
+            status = ${status},
+            updated_at = NOW()
+        WHERE id = ${existing.id}
+        RETURNING *`;
+
+      if (existing.user_id) {
+        await sql`
+          UPDATE users
+          SET full_name = ${fullName},
+              mobile_no = ${mobileNo},
+              email = ${emailId || null},
+              pan_number = ${panNo || null},
+              aadhar_number = ${aadharNo || null},
+              profile_image = COALESCE(${photoUrl || null}, profile_image),
+              updated_at = NOW()
+          WHERE user_id = ${existing.user_id}`;
+      }
+
+      await logAdminAudit(req, "MLM", "UpdateTeamMember", "team_members", existing.id, sql.json({ updated_fields: Object.keys(b) }));
+      return ok(res, updated, "Team member profile updated successfully");
+    } catch (e) {
+      console.error("[Admin Team Member Update Error]:", e);
+      return err(res, e.message);
+    }
+  }
+);
+
+app.post("/api/admin/team-members/:id/toggle-status",
+  verifyAdminToken,
+  role("SuperAdmin", "Admin", "FinanceManager"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const numId = Number(id);
+
+      const [existing] = isNaN(numId)
+        ? await sql`SELECT * FROM team_members WHERE team_member_uid = ${String(id)} LIMIT 1`
+        : await sql`SELECT * FROM team_members WHERE id = ${numId} OR team_member_uid = ${String(id)} LIMIT 1`;
+
+      if (!existing) return err(res, "Team member not found", 404);
+
+      const currentStatus = String(existing.status || "").toLowerCase();
+      const nextStatus = (currentStatus === 'active' || currentStatus === 'approved') ? 'suspended' : 'active';
+      const nextAccountStatus = nextStatus === 'active' ? 'Active' : 'Suspended';
+
+      await sql`UPDATE team_members SET status = ${nextStatus}, updated_at = NOW() WHERE id = ${existing.id}`;
+
+      if (existing.user_id) {
+        await sql`UPDATE users SET account_status = ${nextAccountStatus}, is_active = ${nextStatus === 'active'}, updated_at = NOW() WHERE user_id = ${existing.user_id}`;
+      }
+
+      await logAdminAudit(req, "MLM", "ToggleTeamMemberStatus", "team_members", existing.id, sql.json({ old_status: currentStatus, new_status: nextStatus }));
+      return ok(res, { status: nextStatus, account_status: nextAccountStatus }, `Team member is now ${nextStatus}`);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.delete("/api/admin/team-members/:id",
+  verifyAdminToken,
+  role("SuperAdmin", "Admin"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const numId = Number(id);
+
+      const [existing] = isNaN(numId)
+        ? await sql`SELECT * FROM team_members WHERE team_member_uid = ${String(id)} LIMIT 1`
+        : await sql`SELECT * FROM team_members WHERE id = ${numId} OR team_member_uid = ${String(id)} LIMIT 1`;
+
+      if (!existing) return err(res, "Team member not found", 404);
+
+      await sql`DELETE FROM team_members WHERE id = ${existing.id}`;
+
+      if (existing.user_id) {
+        await sql`UPDATE users SET account_status = 'Inactive', is_active = false WHERE user_id = ${existing.user_id}`.catch(() => {});
+      }
+
+      await logAdminAudit(req, "MLM", "DeleteTeamMember", "team_members", existing.id, sql.json({ team_member_uid: existing.team_member_uid, full_name: existing.full_name }));
+      return ok(res, { success: true }, "Team member deleted successfully");
+    } catch (e) {
+      console.error("[Admin Team Member Delete Error]:", e);
       return err(res, e.message);
     }
   }
@@ -13348,7 +13627,7 @@ app.patch("/api/admin/team-members/:id/status",
         } else if (normalizedStatus === "rejected") {
           targetAccountStatus = "Rejected";
           targetIsActive = false;
-        } else if (normalizedStatus === "inactive" || normalizedStatus === "blocked") {
+        } else if (normalizedStatus === "inactive" || normalizedStatus === "blocked" || normalizedStatus === "suspended") {
           targetAccountStatus = "Inactive";
           targetIsActive = false;
         }
