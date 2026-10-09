@@ -28,6 +28,7 @@ import invoiceModuleRoutes from './routes/invoice-module.routes.js';
 import customerEnrollmentRoutes from './routes/customer-enrollment.routes.js';
 import associateEnrollmentRoutes from './routes/associateEnrollmentRoutes.js';
 import teamMemberRoutes from './routes/teamMemberRoutes.js';
+import adminNetworkTreeRoutes from './routes/admin-network-tree.routes.js';
 import { ensureTeamMembersTable, registerTeamMemberQuick, approveTeamMemberByAssociate, syncExistingTeamMembersFromUsers } from './services/teamMemberService.js';
 import receiptRoutes, { ensureReceiptsTable } from './routes/receipt.routes.js';
 import siteGalleryRoutes, { ensureSiteGalleryTable } from './routes/site-gallery.routes.js';
@@ -3039,6 +3040,12 @@ const role = (...allowed) => (req, res, next) => {
   }
   return err(res, "Forbidden — insufficient role", 403);
 };
+
+/* ==========================
+   ADMIN NETWORK TREE ROUTES
+========================== */
+app.use('/api/admin/network-tree', verifyAdminToken, role("SuperAdmin", "FinanceManager", "SiteManager"), adminNetworkTreeRoutes);
+
 
 /* ==========================
    COMPANY SETTINGS
