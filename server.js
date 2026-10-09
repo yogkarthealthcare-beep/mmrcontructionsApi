@@ -13365,6 +13365,36 @@ app.get("/api/admin/commissions",
   }
 );
 
+app.get("/api/admin/diagnose-db", verifyAdminToken, async (_req, res) => {
+  try {
+    const [enums, colTypes, usersGroup, usersStatusGroup, sampleUsers, sampleTeamMembers, sampleAssocEnrollments, sampleCustEnrollments, sampleInvestors] = await Promise.all([
+      sql`SELECT t.typname, e.enumlabel, e.enumsortorder FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid ORDER BY t.typname, e.enumsortorder`.catch(err => ({ error: err.message })),
+      sql`SELECT table_name, column_name, data_type, udt_name FROM information_schema.columns WHERE table_schema = 'public' AND column_name IN ('user_type', 'role', 'type', 'member_id', 'status', 'account_status', 'application_status', 'enrollment_status') ORDER BY table_name, column_name`.catch(err => ({ error: err.message })),
+      sql`SELECT user_type::text AS user_type, COUNT(*)::int AS count FROM users GROUP BY user_type`.catch(err => ({ error: err.message })),
+      sql`SELECT account_status::text AS account_status, COUNT(*)::int AS count FROM users GROUP BY account_status`.catch(err => ({ error: err.message })),
+      sql`SELECT user_id, member_id, full_name, email, mobile_no, user_type::text AS user_type, account_status::text AS account_status, sponsor_user_id, registered_at, created_at FROM users ORDER BY user_id DESC LIMIT 5`.catch(err => ({ error: err.message })),
+      sql`SELECT id, team_member_uid, user_id, associate_id, associate_name, full_name, mobile_no, status, slot_number, created_at FROM team_members ORDER BY id DESC LIMIT 5`.catch(err => ({ error: err.message })),
+      sql`SELECT id, user_id, member_id, full_name, contact_no_1, status, sponsor_id, sponsor_name, created_at FROM associate_enrollment ORDER BY created_at DESC LIMIT 5`.catch(err => ({ error: err.message })),
+      sql`SELECT id, user_id, application_no, applicant_name, mobile_1, application_status, associate_id, associate_name, created_at FROM customer_enrollment_submissions ORDER BY created_at DESC LIMIT 5`.catch(err => ({ error: err.message })),
+      sql`SELECT id, user_id, name, email, mobile_number, is_active, created_at FROM investors ORDER BY id DESC LIMIT 5`.catch(err => ({ error: err.message })),
+    ]);
+
+    return ok(res, {
+      enums,
+      colTypes,
+      usersGroup,
+      usersStatusGroup,
+      sampleUsers,
+      sampleTeamMembers,
+      sampleAssocEnrollments,
+      sampleCustEnrollments,
+      sampleInvestors
+    });
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
 app.get("/api/admin/team-members",
   verifyAdminToken,
   role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"),
