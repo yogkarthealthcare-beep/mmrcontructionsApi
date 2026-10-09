@@ -9280,7 +9280,29 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
   }
 
   if (query.status) add("u.account_status::text = ?", query.status);
-  if (query.user_type) add("LOWER(u.user_type::text) = LOWER(?)", query.user_type);
+  if (query.user_type) {
+    const ut = String(query.user_type).toLowerCase().trim();
+    if (ut === "associate") {
+      where.push(`(
+        (LOWER(u.user_type::text) = 'associate' OR u.member_id ILIKE 'MMR-ASC-%' OR u.member_id ILIKE 'ASC-%' OR u.member_id = 'MMR00001' OR u.member_id = 'MMR0001')
+        AND (u.member_id IS NULL OR u.member_id NOT ILIKE 'MMR-TM-%')
+        AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+      )`);
+    } else if (ut === "team member" || ut === "teammember" || ut === "team_member") {
+      where.push(`(
+        LOWER(u.user_type::text) IN ('team member', 'teammember', 'team_member')
+        OR u.member_id ILIKE 'MMR-TM-%'
+        OR u.member_id ILIKE 'TM-%'
+        OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
+      )`);
+    } else if (ut === "customer") {
+      where.push(`(LOWER(u.user_type::text) = 'customer' OR u.member_id ILIKE 'MMR-CUS-%' OR u.member_id ILIKE 'CUS-%')`);
+    } else if (ut === "investor") {
+      where.push(`(LOWER(u.user_type::text) = 'investor' OR u.member_id ILIKE 'MMR-INV-%' OR u.member_id ILIKE 'INV-%')`);
+    } else {
+      add("LOWER(u.user_type::text) = LOWER(?)", query.user_type);
+    }
+  }
   if (query.verification_status) add("COALESCE(u.email_verified, u.is_otp_verified, FALSE) = ?", query.verification_status === "verified");
   if (query.date_from) add("u.registered_at::date >= ?::date", query.date_from);
   if (query.date_to) add("u.registered_at::date <= ?::date", query.date_to);
@@ -9322,11 +9344,19 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
       SELECT u.user_id,
              CASE 
                WHEN u.member_id IS NOT NULL AND u.member_id != '' THEN u.member_id
+               WHEN tm.id IS NOT NULL OR LOWER(u.user_type::TEXT) IN ('team member', 'teammember', 'team_member') THEN CONCAT('MMR-TM-', LPAD(u.user_id::text, 5, '0'))
                WHEN LOWER(u.user_type::TEXT) = 'associate' THEN CONCAT('MMR-ASC-', LPAD(u.user_id::text, 5, '0'))
-               WHEN LOWER(u.user_type::TEXT) = 'team member' THEN CONCAT('MMR-TM-', LPAD(u.user_id::text, 5, '0'))
+               WHEN LOWER(u.user_type::TEXT) = 'investor' THEN CONCAT('MMR-INV-', LPAD(u.user_id::text, 5, '0'))
                ELSE CONCAT('MMR-CUS-', LPAD(u.user_id::text, 5, '0'))
              END AS member_id,
-             u.user_type, u.full_name, u.mobile_no,
+             CASE
+               WHEN u.member_id ILIKE 'MMR-TM-%' OR u.member_id ILIKE 'TM-%' OR tm.id IS NOT NULL OR LOWER(u.user_type::TEXT) IN ('team member', 'teammember', 'team_member') THEN 'Team Member'
+               WHEN u.member_id ILIKE 'MMR-INV-%' OR u.member_id ILIKE 'INV-%' OR LOWER(u.user_type::TEXT) = 'investor' THEN 'Investor'
+               WHEN u.member_id ILIKE 'MMR-CUS-%' OR u.member_id ILIKE 'CUS-%' OR LOWER(u.user_type::TEXT) = 'customer' THEN 'Customer'
+               WHEN u.member_id ILIKE 'MMR-ASC-%' OR u.member_id ILIKE 'ASC-%' OR u.member_id ILIKE 'MMR0%' OR LOWER(u.user_type::TEXT) = 'associate' THEN 'Associate'
+               ELSE COALESCE(u.user_type, 'Customer')
+             END AS user_type,
+             u.full_name, u.mobile_no,
              u.email, u.account_status, u.registered_at, u.updated_at,
              COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
              CASE WHEN LOWER(COALESCE(ces.application_status, u.enrollment_status, '')) IN ('completed', 'approved') THEN TRUE ELSE FALSE END AS is_verified,
@@ -9338,6 +9368,9 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
              COALESCE(doc.doc_count, 0)::int AS doc_count
       FROM users u
       LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
+      LEFT JOIN LATERAL (
+        SELECT id FROM team_members WHERE user_id = u.user_id LIMIT 1
+      ) tm ON TRUE
       LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
       LEFT JOIN (
         SELECT DISTINCT ON (user_id) user_id, permanent_address, present_address, permanent_city, present_city, permanent_state_pin, present_state_pin
@@ -9367,7 +9400,14 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
     const fallbackRows = await sql.unsafe(`
       SELECT u.user_id,
              COALESCE(u.member_id, CONCAT('MMR-', u.user_type, '-', LPAD(u.user_id::text, 5, '0'))) AS member_id,
-             u.user_type, u.full_name, u.mobile_no,
+             CASE
+               WHEN u.member_id ILIKE 'MMR-TM-%' OR u.member_id ILIKE 'TM-%' OR LOWER(u.user_type::TEXT) IN ('team member', 'teammember', 'team_member') THEN 'Team Member'
+               WHEN u.member_id ILIKE 'MMR-INV-%' OR u.member_id ILIKE 'INV-%' OR LOWER(u.user_type::TEXT) = 'investor' THEN 'Investor'
+               WHEN u.member_id ILIKE 'MMR-CUS-%' OR u.member_id ILIKE 'CUS-%' OR LOWER(u.user_type::TEXT) = 'customer' THEN 'Customer'
+               WHEN u.member_id ILIKE 'MMR-ASC-%' OR u.member_id ILIKE 'ASC-%' OR u.member_id ILIKE 'MMR0%' OR LOWER(u.user_type::TEXT) = 'associate' THEN 'Associate'
+               ELSE COALESCE(u.user_type, 'Customer')
+             END AS user_type,
+             u.full_name, u.mobile_no,
              u.email, u.account_status, u.registered_at, u.updated_at,
              COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
              COALESCE(u.is_verified, FALSE) AS is_verified,
@@ -13933,7 +13973,7 @@ app.patch("/api/admin/team-members/:id/status",
         if (userId) {
           await tx`
             UPDATE users
-            SET user_type = COALESCE(user_type, 'Associate'),
+            SET user_type = 'Team Member',
                 sponsor_user_id = COALESCE(sponsor_user_id, ${current.associate_id}),
                 account_status = ${targetAccountStatus},
                 is_active = ${targetIsActive},
@@ -13950,11 +13990,11 @@ app.patch("/api/admin/team-members/:id/status",
               member_id, user_type, full_name, mobile_no, email,
               pan_number, aadhar_number, sponsor_user_id, account_status, is_active, registered_at
             ) VALUES (
-              ${current.team_member_uid}, 'Associate', ${current.full_name}, ${cleanMobile}, ${cleanEmail},
+              ${current.team_member_uid}, 'Team Member', ${current.full_name}, ${cleanMobile}, ${cleanEmail},
               ${current.pan_no || null}, ${cleanAadhar}, ${current.associate_id}, ${targetAccountStatus}, ${targetIsActive}, NOW()
             )
             ON CONFLICT (mobile_no) DO UPDATE
-            SET account_status = ${targetAccountStatus}, is_active = ${targetIsActive}, user_type = 'Associate', sponsor_user_id = ${current.associate_id}
+            SET account_status = ${targetAccountStatus}, is_active = ${targetIsActive}, user_type = 'Team Member', sponsor_user_id = ${current.associate_id}
             RETURNING user_id`;
           if (newUser) {
             userId = newUser.user_id;
@@ -15845,6 +15885,33 @@ if (shouldStartServer) {
         requireCommissionEngineSchema().catch((e) => console.warn("[MMR API] Commission schema warning:", e.message)),
         ensureAdminUserAccount().catch((e) => console.warn("[MMR API] Admin account ensure warning:", e.message)),
         sql`ALTER TABLE user_documents ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`.catch(() => {}),
+        (async () => {
+          try {
+            await sql`
+              UPDATE users
+              SET user_type = 'Team Member'
+              WHERE member_id ILIKE 'MMR-TM-%'
+                 OR member_id ILIKE 'TM-%'
+                 OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id)
+            `;
+            await sql`
+              UPDATE users
+              SET user_type = 'Customer'
+              WHERE (member_id ILIKE 'MMR-CUS-%' OR member_id ILIKE 'CUS-%')
+                AND (member_id NOT ILIKE 'MMR-TM-%')
+                AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id)
+            `;
+            await sql`
+              UPDATE users
+              SET user_type = 'Associate'
+              WHERE (member_id ILIKE 'MMR-ASC-%' OR member_id ILIKE 'ASC-%' OR member_id = 'MMR00001' OR member_id = 'MMR0001')
+                AND (member_id NOT ILIKE 'MMR-TM-%')
+                AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = users.user_id)
+            `;
+          } catch (syncErr) {
+            console.warn("[MMR API] User types sync warning:", syncErr.message);
+          }
+        })().catch(() => {}),
         ensureHomeExperienceSchema().catch(() => { }),
         ensureHomeSlidersSchema().catch(() => { }),
         ensureSiteHtmlMapSchema().catch(() => { }),
