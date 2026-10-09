@@ -113,7 +113,11 @@ export const teamMemberSchema = z.object({
     z.boolean().refine(val => val === true, "You must accept the Declaration before submitting")
   ),
   applicantSignature: z.string().optional().nullable(),
-  associateSignature: z.string().optional().nullable()
+  associateSignature: z.string().optional().nullable(),
+  userId: z.coerce.number().optional().nullable(),
+  user_id: z.coerce.number().optional().nullable(),
+  slotNumber: z.coerce.number().optional().nullable(),
+  slot_number: z.coerce.number().optional().nullable()
 });
 
 export type TeamMemberInput = z.infer<typeof teamMemberSchema>;

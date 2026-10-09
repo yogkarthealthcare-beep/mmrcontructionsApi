@@ -102,7 +102,11 @@ export const teamMemberSchema = z.object({
     ifscCode: z.string().transform(v => (v ? v.trim().toUpperCase() : "")).pipe(z.string().regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "Invalid IFSC Code format (e.g. SBIN0001234)")),
     declarationAccepted: z.preprocess((val) => val === true || val === "true" || val === 1 || val === "1", z.boolean().refine(val => val === true, "You must accept the Declaration before submitting")),
     applicantSignature: z.string().optional().nullable(),
-    associateSignature: z.string().optional().nullable()
+    associateSignature: z.string().optional().nullable(),
+    userId: z.coerce.number().optional().nullable(),
+    user_id: z.coerce.number().optional().nullable(),
+    slotNumber: z.coerce.number().optional().nullable(),
+    slot_number: z.coerce.number().optional().nullable()
 });
 /**
  * Masking utilities for PII data protection
