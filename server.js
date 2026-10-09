@@ -27,6 +27,7 @@ import invoiceModuleRoutes from './routes/invoice-module.routes.js';
 import customerEnrollmentRoutes from './routes/customer-enrollment.routes.js';
 import associateEnrollmentRoutes from './routes/associateEnrollmentRoutes.js';
 import teamMemberRoutes from './routes/teamMemberRoutes.js';
+import { registerTeamMemberQuick } from './services/teamMemberService.js';
 import receiptRoutes, { ensureReceiptsTable } from './routes/receipt.routes.js';
 import siteGalleryRoutes, { ensureSiteGalleryTable } from './routes/site-gallery.routes.js';
 import twoFactorRoutes from './routes/twoFactor.routes.js';
@@ -2906,7 +2907,7 @@ const genMemberID = async (userType) => {
           ELSE 0 END
       ), 0) + 1 AS seq
       FROM users`;
-    return `MMR-ASC-${String(row?.seq || 1).padStart(5, "0")}`;
+    return `MMR-ASC-${String(row?.seq || 1).padStart(4, "0")}`;
   } else if (normType.includes("team")) {
     const [row] = await sql`
       SELECT COALESCE(MAX(
@@ -5820,6 +5821,7 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
                NULLIF(TRIM(u.member_id), ''),
                NULLIF(TRIM(u.invitation_code), ''),
                NULLIF(TRIM(tm.team_member_uid), ''),
+               NULLIF(TRIM(aen.application_no), ''),
                NULLIF(TRIM(ces.application_no), ''),
                CASE 
                  WHEN LOWER(u.user_type::TEXT) = 'associate' THEN ('MMR-ASC-' || LPAD(u.user_id::text, 5, '0'))
@@ -5828,47 +5830,47 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
                END
              ) AS member_id,
              COALESCE(NULLIF(TRIM(u.user_type::text), ''), 'Customer') AS user_type,
-             COALESCE(NULLIF(TRIM(u.full_name), ''), NULLIF(TRIM(tm.full_name), ''), NULLIF(TRIM(ces.applicant_name), '')) AS full_name,
-             COALESCE(u.date_of_birth, tm.date_of_birth, ces.date_of_birth) AS date_of_birth,
-             COALESCE(NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(ces.gender), '')) AS gender,
-             COALESCE(NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(ces.fh_name), '')) AS father_name,
+             COALESCE(NULLIF(TRIM(u.full_name), ''), NULLIF(TRIM(aen.full_name), ''), NULLIF(TRIM(tm.full_name), ''), NULLIF(TRIM(ces.applicant_name), '')) AS full_name,
+             COALESCE(u.date_of_birth, aen.date_of_birth, tm.date_of_birth, ces.date_of_birth) AS date_of_birth,
+             COALESCE(NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(aen.gender), ''), NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(ces.gender), '')) AS gender,
+             COALESCE(NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(ces.fh_name), '')) AS father_name,
              u.mother_name,
              COALESCE(NULLIF(TRIM(u.spouse_name), ''), NULLIF(TRIM(ces.co_applicant_name), '')) AS spouse_name,
-             COALESCE(NULLIF(TRIM(u.mobile_no), ''), NULLIF(TRIM(tm.mobile_no), ''), NULLIF(TRIM(ces.mobile_1), '')) AS mobile_no,
-             COALESCE(NULLIF(TRIM(u.alternate_mobile), ''), NULLIF(TRIM(ces.mobile_2), ''), NULLIF(TRIM(ces.co_mobile), '')) AS alternate_mobile,
-             COALESCE(NULLIF(TRIM(u.email), ''), NULLIF(TRIM(tm.email_id), ''), NULLIF(TRIM(ces.email_1), ''), NULLIF(TRIM(ces.co_email), '')) AS email,
-             COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(tm.pan_no), ''), NULLIF(TRIM(ces.pan_no), '')) AS pan_number,
-             COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(ces.aadhar_no), '')) AS aadhar_number,
+             COALESCE(NULLIF(TRIM(u.mobile_no), ''), NULLIF(TRIM(aen.contact_no_1), ''), NULLIF(TRIM(tm.mobile_no), ''), NULLIF(TRIM(ces.mobile_1), '')) AS mobile_no,
+             COALESCE(NULLIF(TRIM(u.alternate_mobile), ''), NULLIF(TRIM(aen.contact_no_2), ''), NULLIF(TRIM(ces.mobile_2), ''), NULLIF(TRIM(ces.co_mobile), '')) AS alternate_mobile,
+             COALESCE(NULLIF(TRIM(u.email), ''), NULLIF(TRIM(aen.email), ''), NULLIF(TRIM(tm.email_id), ''), NULLIF(TRIM(ces.email_1), ''), NULLIF(TRIM(ces.co_email), '')) AS email,
+             COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_number), ''), NULLIF(TRIM(tm.pan_no), ''), NULLIF(TRIM(ces.pan_no), '')) AS pan_number,
+             COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_number), ''), NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(ces.aadhar_no), '')) AS aadhar_number,
              COALESCE(u.account_status, 'Active') AS account_status,
              u.email_verified, u.is_otp_verified,
-             COALESCE(u.enrollment_status, CASE WHEN tm.id IS NOT NULL THEN 'Completed' WHEN ces.application_status = 'Approved' THEN 'Completed' WHEN ces.id IS NOT NULL THEN 'Submitted' ELSE 'Pending' END) AS enrollment_status,
-             CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'verified', 'approved') OR tm.id IS NOT NULL OR ces.application_status = 'Approved' THEN TRUE ELSE FALSE END AS is_verified,
-             COALESCE(k.status, CASE WHEN tm.id IS NOT NULL THEN 'Approved' WHEN ces.application_status = 'Approved' THEN 'Approved' WHEN ces.id IS NOT NULL THEN 'Submitted' ELSE 'Not Submitted' END) AS kyc_status,
+             COALESCE(u.enrollment_status, aen.app_status, CASE WHEN tm.id IS NOT NULL THEN 'Completed' WHEN ces.application_status = 'Approved' THEN 'Completed' WHEN ces.id IS NOT NULL THEN 'Submitted' ELSE 'Pending' END) AS enrollment_status,
+             CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'verified', 'approved') OR aen.is_verified = TRUE OR LOWER(COALESCE(aen.app_status, '')) = 'approved' OR tm.id IS NOT NULL OR ces.application_status = 'Approved' THEN TRUE ELSE FALSE END AS is_verified,
+             COALESCE(k.status, CASE WHEN aen.is_verified = TRUE OR LOWER(COALESCE(aen.app_status, '')) = 'approved' THEN 'Approved' WHEN tm.id IS NOT NULL THEN 'Approved' WHEN ces.application_status = 'Approved' THEN 'Approved' WHEN aen.id IS NOT NULL THEN 'Submitted' WHEN ces.id IS NOT NULL THEN 'Submitted' ELSE 'Not Submitted' END) AS kyc_status,
              k.admin_remarks AS kyc_remarks,
              u.invitation_code, u.registered_at,
              COALESCE(u.sponsor_user_id, tm.associate_id) AS sponsor_user_id,
-             COALESCE(NULLIF(TRIM(tm.associate_name), ''), sp.full_name, 'Suraj Kumar Verma') AS sponsor_name,
-             COALESCE(sp.invitation_code, sp.member_id, ('MMR' || LPAD(COALESCE(tm.associate_id, 1)::text, 4, '0')), 'MMR0001') AS sponsor_id,
-             COALESCE(sp.mobile_no, '7071951011') AS sponsor_contact,
-             COALESCE(pa.address_line1, tm.full_address, ces.permanent_address, ces.present_address) AS address,
-             COALESCE(pa.address_line1, tm.full_address, ces.permanent_address, ces.present_address) AS address_line1,
-             COALESCE(pa.city, ces.permanent_city, ces.present_city) AS city,
-             COALESCE(pa.state, ces.permanent_state_pin, ces.present_state_pin) AS state,
-             COALESCE(pa.pin_code, ces.permanent_state_pin, ces.present_state_pin) AS pin_code,
+             COALESCE(NULLIF(TRIM(aen.assoc_sponsor_name), ''), NULLIF(TRIM(tm.associate_name), ''), sp.full_name, 'Suraj Kumar Verma') AS sponsor_name,
+             COALESCE(NULLIF(TRIM(aen.assoc_sponsor_id), ''), sp.invitation_code, sp.member_id, ('MMR' || LPAD(COALESCE(tm.associate_id, 1)::text, 4, '0')), 'MMR0001') AS sponsor_id,
+             COALESCE(NULLIF(TRIM(aen.assoc_sponsor_mobile), ''), sp.mobile_no, '7071951011') AS sponsor_contact,
+             COALESCE(pa.address_line1, aen.perm_address, tm.full_address, ces.permanent_address, ces.present_address) AS address,
+             COALESCE(pa.address_line1, aen.perm_address, tm.full_address, ces.permanent_address, ces.present_address) AS address_line1,
+             COALESCE(pa.city, aen.perm_city, ces.permanent_city, ces.present_city) AS city,
+             COALESCE(pa.state, aen.perm_state, ces.permanent_state_pin, ces.present_state_pin) AS state,
+             COALESCE(pa.pin_code, aen.perm_pin, ces.permanent_state_pin, ces.present_state_pin) AS pin_code,
              ces.permanent_address,
              ces.present_address,
              ces.application_status,
              ces.application_no,
-             COALESCE(b.bank_name, tm.bank_name, ces.acc_bank_branch, ces.drawn_bank_branch) AS bank_name,
-             COALESCE(b.branch_name, tm.branch_name, ces.drawn_bank_branch, ces.acc_bank_branch) AS branch_name,
-             COALESCE(b.account_holder_name, tm.full_name, ces.acc_holder_name, u.full_name, ces.applicant_name) AS account_holder_name,
-             COALESCE(b.account_number, tm.account_no, ces.acc_number) AS account_number,
-             COALESCE(b.ifsc_code, tm.ifsc_code, ces.ifsc_code) AS ifsc_code,
-             COALESCE(n.nominee_name, tm.nominee_name, cnom.nominee_name, ces.co_applicant_name) AS nominee_name,
-             COALESCE(n.relationship, tm.nominee_relation, cnom.relation, ces.co_relation) AS nominee_relationship,
+             COALESCE(b.bank_name, aen.bank_name, tm.bank_name, ces.acc_bank_branch, ces.drawn_bank_branch) AS bank_name,
+             COALESCE(b.branch_name, aen.branch_name, tm.branch_name, ces.drawn_bank_branch, ces.acc_bank_branch) AS branch_name,
+             COALESCE(b.account_holder_name, aen.account_holder_name, tm.full_name, ces.acc_holder_name, u.full_name, ces.applicant_name) AS account_holder_name,
+             COALESCE(b.account_number, aen.account_no, tm.account_no, ces.acc_number) AS account_number,
+             COALESCE(b.ifsc_code, aen.ifsc_code, tm.ifsc_code, ces.ifsc_code) AS ifsc_code,
+             COALESCE(n.nominee_name, aen.nominee_name, tm.nominee_name, cnom.nominee_name, ces.co_applicant_name) AS nominee_name,
+             COALESCE(n.relationship, aen.nom_rel, tm.nominee_relation, cnom.relation, ces.co_relation) AS nominee_relationship,
              tm.slot_number,
-             tm.photo_url,
-             tm.applicant_signature_url,
+             COALESCE(tm.photo_url, aen.photo_path) AS photo_url,
+             COALESCE(tm.applicant_signature_url, aen.signature_path) AS applicant_signature_url,
              tm.associate_signature_url
       FROM users u
       LEFT JOIN LATERAL (
@@ -5882,6 +5884,25 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
         ORDER BY (user_id = u.user_id) DESC, created_at DESC
         LIMIT 1
       ) tm ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT ae.id, ae.user_id, ae.application_no, ae.full_name, ae.father_husband_name, ae.date_of_birth, ae.gender,
+               ae.pan_number, ae.aadhar_number, ae.contact_no_1, ae.contact_no_2, ae.email, ae.app_status, ae.is_verified,
+               ae.photo_path, ae.signature_path,
+               aa.local_address AS perm_address, aa.city AS perm_city, aa.state AS perm_state, aa.pin_code AS perm_pin,
+               ab.bank_name, ab.branch_name, ab.account_holder_name, ab.account_no, ab.ifsc_code,
+               an.nominee_name, an.relationship AS nom_rel,
+               asp.sponsor_id AS assoc_sponsor_id, asp.sponsor_name AS assoc_sponsor_name, asp.sponsor_mobile AS assoc_sponsor_mobile
+        FROM associate_enrollment ae
+        LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
+        LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
+        LEFT JOIN associate_nominee an ON an.associate_id = ae.id
+        LEFT JOIN associate_sponsor asp ON asp.associate_id = ae.id
+        WHERE ae.user_id = u.user_id
+           OR (u.mobile_no IS NOT NULL AND (ae.contact_no_1 = u.mobile_no OR ae.contact_no_1 = RIGHT(regexp_replace(u.mobile_no, '\\D', '', 'g'), 10)))
+           OR (u.email IS NOT NULL AND LOWER(ae.email) = LOWER(u.email))
+        ORDER BY (ae.user_id = u.user_id) DESC, ae.created_at DESC
+        LIMIT 1
+      ) aen ON TRUE
       LEFT JOIN users sp               ON (u.sponsor_user_id = sp.user_id OR tm.associate_id = sp.user_id)
       LEFT JOIN user_addresses pa      ON u.user_id = pa.user_id AND pa.address_type = 'Permanent'
       LEFT JOIN user_bank_details b    ON u.user_id = b.user_id
@@ -6129,6 +6150,79 @@ app.put("/api/profile", verifyUserToken, async (req, res) => {
           nominee_relation = COALESCE(${cleanNomRel}, nominee_relation),
           updated_at       = NOW()
         WHERE id = ${tmRec.id}`;
+    }
+
+    // 7. Sync Associate Enrollment Records (if user is an Associate)
+    const [aeRec] = await sql`
+      SELECT id FROM associate_enrollment
+      WHERE user_id = ${uid}
+         OR (contact_no_1 IS NOT NULL AND RIGHT(regexp_replace(contact_no_1, '\\D', '', 'g'), 10) = (SELECT RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) FROM users WHERE user_id = ${uid} LIMIT 1))
+      ORDER BY (user_id = ${uid}) DESC, created_at DESC
+      LIMIT 1`;
+    if (aeRec) {
+      await sql`
+        UPDATE associate_enrollment SET
+          user_id              = COALESCE(user_id, ${uid}),
+          full_name            = COALESCE(${cleanFullName}, full_name),
+          father_husband_name  = COALESCE(${cleanFather}, father_husband_name),
+          gender               = COALESCE(${cleanGender}, gender),
+          date_of_birth        = COALESCE(${cleanDob ? new Date(cleanDob) : null}, date_of_birth),
+          contact_no_2         = COALESCE(${cleanAltMobile}, contact_no_2),
+          email                = COALESCE(${cleanEmail}, email),
+          pan_number           = COALESCE(${cleanPan}, pan_number),
+          aadhar_number        = COALESCE(${cleanAadhar}, aadhar_number),
+          updated_at           = NOW()
+        WHERE id = ${aeRec.id}`;
+
+      if (cleanAddr || cleanCity || cleanState || cleanPin) {
+        const [exAa] = await sql`SELECT id FROM associate_address WHERE associate_id = ${aeRec.id} AND address_type = 'permanent' LIMIT 1`;
+        if (exAa) {
+          await sql`
+            UPDATE associate_address SET
+              local_address = COALESCE(${cleanAddr}, local_address),
+              city          = COALESCE(${cleanCity}, city),
+              state         = COALESCE(${cleanState}, state),
+              pin_code      = COALESCE(${cleanPin}, pin_code)
+            WHERE id = ${exAa.id}`;
+        } else {
+          await sql`
+            INSERT INTO associate_address (associate_id, address_type, local_address, city, state, pin_code)
+            VALUES (${aeRec.id}, 'permanent', ${cleanAddr}, ${cleanCity}, ${cleanState}, ${cleanPin})`;
+        }
+      }
+
+      if (cleanBankName || cleanBranchName || cleanAccHolder || cleanAccNum || cleanIfsc) {
+        const [exAb] = await sql`SELECT id FROM associate_bank_details WHERE associate_id = ${aeRec.id} LIMIT 1`;
+        if (exAb) {
+          await sql`
+            UPDATE associate_bank_details SET
+              bank_name           = COALESCE(${cleanBankName}, bank_name),
+              branch_name         = COALESCE(${cleanBranchName}, branch_name),
+              account_holder_name = COALESCE(${cleanAccHolder}, account_holder_name),
+              account_no          = COALESCE(${cleanAccNum}, account_no),
+              ifsc_code           = COALESCE(${cleanIfsc}, ifsc_code)
+            WHERE id = ${exAb.id}`;
+        } else {
+          await sql`
+            INSERT INTO associate_bank_details (associate_id, bank_name, branch_name, account_holder_name, account_no, ifsc_code)
+            VALUES (${aeRec.id}, ${cleanBankName || null}, ${cleanBranchName || null}, ${cleanAccHolder || null}, ${cleanAccNum || null}, ${cleanIfsc || null})`;
+        }
+      }
+
+      if (cleanNomName || cleanNomRel) {
+        const [exAn] = await sql`SELECT id FROM associate_nominee WHERE associate_id = ${aeRec.id} LIMIT 1`;
+        if (exAn) {
+          await sql`
+            UPDATE associate_nominee SET
+              nominee_name = COALESCE(${cleanNomName}, nominee_name),
+              relationship = COALESCE(${cleanNomRel}, relationship)
+            WHERE id = ${exAn.id}`;
+        } else if (cleanNomName) {
+          await sql`
+            INSERT INTO associate_nominee (associate_id, nominee_name, relationship)
+            VALUES (${aeRec.id}, ${cleanNomName}, ${cleanNomRel || null})`;
+        }
+      }
     }
 
     return ok(res, {}, "Profile updated successfully");
@@ -8455,6 +8549,26 @@ app.post("/api/associate/customers", verifyUserToken, requireAssociate, async (r
   }
 });
 
+// 1b. Associate registers new direct Team Member (Max 11 Slots)
+app.post(["/api/associate/team-members", "/api/associate/team-member-add"], verifyUserToken, requireAssociate, async (req, res) => {
+  try {
+    const associateId = req.user.user_id;
+    const { full_name, email, mobile_no, password, slot_number, slotNumber } = req.body || {};
+    const result = await registerTeamMemberQuick(associateId, {
+      fullName: full_name,
+      email,
+      mobileNo: mobile_no,
+      password,
+      slotNumber: slot_number || slotNumber
+    });
+    return ok(res, result, "Team Member account created successfully and assigned to your team slot.", 201);
+  } catch (e) {
+    console.error("[Associate Add Team Member Error]:", e);
+    const status = String(e.message).includes("already registered") ? 409 : (String(e.message).includes("maximum limit") ? 400 : 400);
+    return err(res, e.message, status);
+  }
+});
+
 // 2. Associate lists all authorized team members with plot booking & payment summary
 app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async (req, res) => {
   try {
@@ -9687,7 +9801,7 @@ app.post("/api/admin/associates",
 
       const passwordHash = await bcrypt.hash(password, 12);
       const memberId = await genMemberID("Associate");
-      const invitationCode = genInviteCode();
+      const invitationCode = memberId;
 
       const [associate] = await sql`
         INSERT INTO users (

@@ -13,7 +13,13 @@ const upload = multer({
 // Admin routes
 router.get(["/admin/associate-enrollments", "/admin/associate-enrollment"], adminAuth, getAdminAssociateEnrollments);
 router.get(["/admin/associate-enrollments/:id", "/admin/associate-enrollment/:id"], adminAuth, getAdminAssociateEnrollmentById);
-router.put(["/admin/associate-enrollments/:id", "/admin/associate-enrollment/:id"], adminAuth, updateAdminAssociateEnrollment);
+router.put(["/admin/associate-enrollments/:id", "/admin/associate-enrollment/:id"], adminAuth, upload.fields([
+    { name: "applicantPhoto", maxCount: 1 },
+    { name: "nomineePhoto", maxCount: 1 },
+    { name: "applicantSignature", maxCount: 1 },
+    { name: "signature", maxCount: 1 },
+    { name: "sponsorSignature", maxCount: 1 }
+]), updateAdminAssociateEnrollment);
 router.delete(["/admin/associate-enrollments/:id", "/admin/associate-enrollment/:id"], adminAuth, deleteAdminAssociateEnrollment);
 // GET /api/associate-enrollment/me
 // Returns current authenticated associate's enrollment details if submitted

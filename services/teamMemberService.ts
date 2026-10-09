@@ -1,5 +1,6 @@
 import { z } from "zod";
 import sql from "../db.js";
+import bcrypt from "bcryptjs";
 import { saveFileToVPS } from "./fileStorage.service.js";
 import fs from "fs/promises";
 import path from "path";
@@ -18,25 +19,25 @@ export async function ensureTeamMembersTable(): Promise<void> {
         associate_id BIGINT NOT NULL,
         associate_name VARCHAR(150) NOT NULL,
         user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
-        slot_number SMALLINT CHECK (slot_number BETWEEN 1 AND 10),
+        slot_number SMALLINT CHECK (slot_number BETWEEN 1 AND 11),
         full_name VARCHAR(150) NOT NULL,
-        father_husband_name VARCHAR(150) NOT NULL,
-        date_of_birth DATE NOT NULL,
-        gender VARCHAR(15) NOT NULL,
-        aadhar_no VARCHAR(12) UNIQUE NOT NULL,
+        father_husband_name VARCHAR(150),
+        date_of_birth DATE,
+        gender VARCHAR(15),
+        aadhar_no VARCHAR(12),
         pan_no VARCHAR(10),
         mobile_no VARCHAR(15) NOT NULL,
         email_id VARCHAR(150),
-        full_address TEXT NOT NULL,
+        full_address TEXT,
         photo_url VARCHAR(255),
         nominee_name VARCHAR(150),
         nominee_relation VARCHAR(80),
         nominee_age_dob VARCHAR(30),
         nominee_contact_no VARCHAR(15),
-        bank_name VARCHAR(150) NOT NULL,
-        branch_name VARCHAR(150) NOT NULL,
-        account_no VARCHAR(30) NOT NULL,
-        ifsc_code VARCHAR(15) NOT NULL,
+        bank_name VARCHAR(150),
+        branch_name VARCHAR(150),
+        account_no VARCHAR(30),
+        ifsc_code VARCHAR(15),
         declaration_accepted BOOLEAN NOT NULL DEFAULT false,
         applicant_signature_url VARCHAR(255),
         associate_signature_url VARCHAR(255),
@@ -47,13 +48,25 @@ export async function ensureTeamMembersTable(): Promise<void> {
       )
     `;
 
-    await sql`ALTER TABLE team_members ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL`;
-    await sql`ALTER TABLE team_members ADD COLUMN IF NOT EXISTS slot_number SMALLINT CHECK (slot_number BETWEEN 1 AND 10)`;
-    await sql`CREATE INDEX IF NOT EXISTS idx_team_members_associate_id ON team_members (associate_id)`;
-    await sql`CREATE INDEX IF NOT EXISTS idx_team_members_uid ON team_members (team_member_uid)`;
-    await sql`CREATE INDEX IF NOT EXISTS idx_team_members_status ON team_members (status)`;
-    await sql`CREATE INDEX IF NOT EXISTS idx_team_members_associate_created ON team_members (associate_id, created_at DESC)`;
-    await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_team_members_assoc_slot ON team_members (associate_id, slot_number)`;
+    await sql`ALTER TABLE team_members ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL`.catch(() => {});
+    await sql`ALTER TABLE team_members ADD COLUMN IF NOT EXISTS slot_number SMALLINT`.catch(() => {});
+    await sql`ALTER TABLE team_members DROP CONSTRAINT IF EXISTS team_members_slot_number_check`.catch(() => {});
+    await sql`ALTER TABLE team_members DROP CONSTRAINT IF EXISTS chk_team_members_slot`.catch(() => {});
+    await sql`ALTER TABLE team_members ADD CONSTRAINT team_members_slot_number_check CHECK (slot_number BETWEEN 1 AND 11)`.catch(() => {});
+    await sql`ALTER TABLE team_members ALTER COLUMN father_husband_name DROP NOT NULL`.catch(() => {});
+    await sql`ALTER TABLE team_members ALTER COLUMN date_of_birth DROP NOT NULL`.catch(() => {});
+    await sql`ALTER TABLE team_members ALTER COLUMN gender DROP NOT NULL`.catch(() => {});
+    await sql`ALTER TABLE team_members ALTER COLUMN aadhar_no DROP NOT NULL`.catch(() => {});
+    await sql`ALTER TABLE team_members ALTER COLUMN full_address DROP NOT NULL`.catch(() => {});
+    await sql`ALTER TABLE team_members ALTER COLUMN bank_name DROP NOT NULL`.catch(() => {});
+    await sql`ALTER TABLE team_members ALTER COLUMN branch_name DROP NOT NULL`.catch(() => {});
+    await sql`ALTER TABLE team_members ALTER COLUMN account_no DROP NOT NULL`.catch(() => {});
+    await sql`ALTER TABLE team_members ALTER COLUMN ifsc_code DROP NOT NULL`.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_team_members_associate_id ON team_members (associate_id)`.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_team_members_uid ON team_members (team_member_uid)`.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_team_members_status ON team_members (status)`.catch(() => {});
+    await sql`CREATE INDEX IF NOT EXISTS idx_team_members_associate_created ON team_members (associate_id, created_at DESC)`.catch(() => {});
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_team_members_assoc_slot ON team_members (associate_id, slot_number)`.catch(() => {});
 
     tableInitialized = true;
   } catch (err) {
@@ -282,7 +295,7 @@ export async function createTeamMemberRecord(
 
     // 2. Check occupied slots for this associate (ignore rejected)
     const existingMembers = await tx`
-      SELECT id, slot_number, status
+      SELECT id, slot_number, status, user_id, team_member_uid
       FROM team_members
       WHERE associate_id = ${data.associateId}
         AND status <> 'rejected'
@@ -290,38 +303,47 @@ export async function createTeamMemberRecord(
     `;
     const occupiedSlots = new Set(existingMembers.map((m: any) => Number(m.slot_number)).filter(Boolean));
 
-    // Find lowest available slot between 1 and 10
-    let assignedSlot: number | null = null;
-    for (let s = 1; s <= 10; s++) {
-      if (!occupiedSlots.has(s)) {
-        assignedSlot = s;
-        break;
-      }
-    }
-    if (!assignedSlot || occupiedSlots.size >= 10) {
-      throw new Error("This Associate has reached the maximum limit of 10 direct Team Members. No available slots.");
-    }
-
-    // 3. Generate unique Team Member ID
-    const uid = await generateTeamMemberUid(tx);
-
-    // 4. Sync / link user master record in users table
+    // 3. Match or lookup user master record in users table
     const cleanMobile = String(data.mobileNo || "").replace(/[^0-9]/g, "");
     const cleanAadhar = String(data.aadharNo || "").replace(/[^0-9]/g, "");
     const cleanEmail = data.emailId ? String(data.emailId).trim().toLowerCase() : null;
+    const explicitUserId = data.userId || data.user_id ? Number(data.userId || data.user_id) : null;
 
     let userId: number | null = null;
-    const [existingUser] = await tx`
-      SELECT user_id, user_type, member_id, sponsor_user_id
-      FROM users
-      WHERE mobile_no = ${cleanMobile}
-         OR (aadhar_number = ${cleanAadhar} AND ${Boolean(cleanAadhar)})
-         OR (email = ${cleanEmail} AND ${Boolean(cleanEmail)})
-      LIMIT 1
-    `;
+    let existingUser: any = null;
 
+    if (explicitUserId) {
+      const [u] = await tx`
+        SELECT user_id, user_type, member_id, sponsor_user_id
+        FROM users
+        WHERE user_id = ${explicitUserId}
+        LIMIT 1
+      `;
+      if (u) existingUser = u;
+    }
+
+    if (!existingUser) {
+      const [u] = await tx`
+        SELECT user_id, user_type, member_id, sponsor_user_id
+        FROM users
+        WHERE mobile_no = ${cleanMobile}
+           OR (aadhar_number = ${cleanAadhar} AND ${Boolean(cleanAadhar)})
+           OR (email = ${cleanEmail} AND ${Boolean(cleanEmail)})
+        LIMIT 1
+      `;
+      if (u) existingUser = u;
+    }
+
+    let existingTm: any = null;
     if (existingUser) {
+      if (String(existingUser.user_type || '').toLowerCase() === 'customer') {
+        throw new Error("Customer accounts cannot be converted to Team Members.");
+      }
+      if (existingUser.sponsor_user_id && Number(existingUser.sponsor_user_id) !== Number(data.associateId)) {
+        throw new Error("Unauthorized: This user account is associated with a different sponsor.");
+      }
       userId = existingUser.user_id;
+      existingTm = existingMembers.find((m: any) => Number(m.user_id) === Number(userId));
       if (!existingUser.sponsor_user_id) {
         await tx`
           UPDATE users
@@ -329,7 +351,40 @@ export async function createTeamMemberRecord(
           WHERE user_id = ${userId}
         `;
       }
-    } else {
+      if (data.panNo || cleanAadhar) {
+        await tx`
+          UPDATE users
+          SET
+            pan_number = COALESCE(${data.panNo || null}, pan_number),
+            aadhar_number = COALESCE(${cleanAadhar || null}, aadhar_number),
+            updated_at = NOW()
+          WHERE user_id = ${userId}
+        `;
+      }
+    }
+
+    // Determine assigned slot
+    let assignedSlot: number | null = existingTm ? Number(existingTm.slot_number) : null;
+    if (!assignedSlot && data.slotNumber && Number(data.slotNumber) >= 1 && Number(data.slotNumber) <= 11 && !occupiedSlots.has(Number(data.slotNumber))) {
+      assignedSlot = Number(data.slotNumber);
+    }
+    if (!assignedSlot) {
+      for (let s = 1; s <= 11; s++) {
+        if (!occupiedSlots.has(s)) {
+          assignedSlot = s;
+          break;
+        }
+      }
+    }
+
+    if (!assignedSlot || (occupiedSlots.size >= 11 && !existingTm)) {
+      throw new Error("This Associate has reached the maximum limit of 11 direct Team Members. No available slots.");
+    }
+
+    // Generate unique Team Member ID if not already present
+    const uid = existingTm?.team_member_uid || existingUser?.member_id || await generateTeamMemberUid(tx);
+
+    if (!existingUser) {
       const [newUser] = await tx`
         INSERT INTO users (
           member_id, user_type, full_name, mobile_no, email,
@@ -346,71 +401,137 @@ export async function createTeamMemberRecord(
       }
     }
 
-    // 5. Insert into team_members with slot_number and user_id
-    const [inserted] = await tx`
-      INSERT INTO team_members (
-        team_member_uid,
-        associate_id,
-        associate_name,
-        user_id,
-        slot_number,
-        full_name,
-        father_husband_name,
-        date_of_birth,
-        gender,
-        aadhar_no,
-        pan_no,
-        mobile_no,
-        email_id,
-        full_address,
-        photo_url,
-        nominee_name,
-        nominee_relation,
-        nominee_age_dob,
-        nominee_contact_no,
-        bank_name,
-        branch_name,
-        account_no,
-        ifsc_code,
-        declaration_accepted,
-        applicant_signature_url,
-        associate_signature_url,
-        status,
-        created_at,
-        updated_at
-      ) VALUES (
-        ${uid},
-        ${data.associateId},
-        ${data.associateName || assocUser.full_name},
-        ${userId},
-        ${assignedSlot},
-        ${data.fullName.trim()},
-        ${data.fatherHusbandName.trim()},
-        ${data.dateOfBirth},
-        ${data.gender},
-        ${cleanAadhar},
-        ${data.panNo || null},
-        ${cleanMobile},
-        ${cleanEmail},
-        ${data.fullAddress.trim()},
-        ${photoUrl},
-        ${data.nomineeName || null},
-        ${data.nomineeRelation || null},
-        ${data.nomineeAgeDob || null},
-        ${data.nomineeContactNo || null},
-        ${data.bankName.trim()},
-        ${data.branchName.trim()},
-        ${data.accountNo.trim()},
-        ${data.ifscCode.trim().toUpperCase()},
-        ${data.declarationAccepted},
-        ${applicantSigUrl},
-        ${associateSigUrl},
-        'pending',
-        NOW(),
-        NOW()
-      )
-      RETURNING *
-    `;
+    // 4. Upsert into team_members with slot_number and user_id
+    let inserted: any = null;
+    if (existingTm) {
+      const [updatedTm] = await tx`
+        UPDATE team_members
+        SET
+          slot_number = ${assignedSlot},
+          full_name = ${data.fullName.trim()},
+          father_husband_name = ${data.fatherHusbandName.trim()},
+          date_of_birth = ${data.dateOfBirth},
+          gender = ${data.gender},
+          aadhar_no = ${cleanAadhar},
+          pan_no = ${data.panNo || null},
+          mobile_no = ${cleanMobile},
+          email_id = ${cleanEmail},
+          full_address = ${data.fullAddress.trim()},
+          photo_url = COALESCE(${photoUrl}, photo_url),
+          nominee_name = ${data.nomineeName || null},
+          nominee_relation = ${data.nomineeRelation || null},
+          nominee_age_dob = ${data.nomineeAgeDob || null},
+          nominee_contact_no = ${data.nomineeContactNo || null},
+          bank_name = ${data.bankName.trim()},
+          branch_name = ${data.branchName.trim()},
+          account_no = ${data.accountNo.trim()},
+          ifsc_code = ${data.ifscCode.trim().toUpperCase()},
+          declaration_accepted = ${data.declarationAccepted},
+          applicant_signature_url = COALESCE(${applicantSigUrl}, applicant_signature_url),
+          associate_signature_url = COALESCE(${associateSigUrl}, associate_signature_url),
+          status = 'pending',
+          updated_at = NOW()
+        WHERE id = ${existingTm.id}
+        RETURNING *
+      `;
+      inserted = updatedTm;
+    } else {
+      const [newTm] = await tx`
+        INSERT INTO team_members (
+          team_member_uid,
+          associate_id,
+          associate_name,
+          user_id,
+          slot_number,
+          full_name,
+          father_husband_name,
+          date_of_birth,
+          gender,
+          aadhar_no,
+          pan_no,
+          mobile_no,
+          email_id,
+          full_address,
+          photo_url,
+          nominee_name,
+          nominee_relation,
+          nominee_age_dob,
+          nominee_contact_no,
+          bank_name,
+          branch_name,
+          account_no,
+          ifsc_code,
+          declaration_accepted,
+          applicant_signature_url,
+          associate_signature_url,
+          status,
+          created_at,
+          updated_at
+        ) VALUES (
+          ${uid},
+          ${data.associateId},
+          ${data.associateName || assocUser.full_name},
+          ${userId},
+          ${assignedSlot},
+          ${data.fullName.trim()},
+          ${data.fatherHusbandName.trim()},
+          ${data.dateOfBirth},
+          ${data.gender},
+          ${cleanAadhar},
+          ${data.panNo || null},
+          ${cleanMobile},
+          ${cleanEmail},
+          ${data.fullAddress.trim()},
+          ${photoUrl},
+          ${data.nomineeName || null},
+          ${data.nomineeRelation || null},
+          ${data.nomineeAgeDob || null},
+          ${data.nomineeContactNo || null},
+          ${data.bankName.trim()},
+          ${data.branchName.trim()},
+          ${data.accountNo.trim()},
+          ${data.ifscCode.trim().toUpperCase()},
+          ${data.declarationAccepted},
+          ${applicantSigUrl},
+          ${associateSigUrl},
+          'pending',
+          NOW(),
+          NOW()
+        )
+        RETURNING *
+      `;
+      inserted = newTm;
+    }
+
+    // 5. Sync user secondary tables for profile consistency
+    if (userId) {
+      // User Address
+      await tx`
+        INSERT INTO user_addresses (user_id, address_line1, city, state, pincode, address_type, is_primary)
+        VALUES (${userId}, ${data.fullAddress.trim()}, 'Lucknow', 'Uttar Pradesh', '226001', 'Permanent', true)
+        ON CONFLICT (user_id) DO UPDATE
+        SET address_line1 = EXCLUDED.address_line1, updated_at = NOW()
+      `.catch(() => {});
+
+      // User Bank
+      await tx`
+        INSERT INTO user_bank_details (user_id, bank_name, branch_name, account_number, ifsc_code, is_primary)
+        VALUES (${userId}, ${data.bankName.trim()}, ${data.branchName.trim()}, ${data.accountNo.trim()}, ${data.ifscCode.trim().toUpperCase()}, true)
+        ON CONFLICT (user_id) DO UPDATE
+        SET bank_name = EXCLUDED.bank_name, branch_name = EXCLUDED.branch_name,
+            account_number = EXCLUDED.account_number, ifsc_code = EXCLUDED.ifsc_code, updated_at = NOW()
+      `.catch(() => {});
+
+      // User Nominee
+      if (data.nomineeName) {
+        await tx`
+          INSERT INTO user_nominees (user_id, nominee_name, relationship, nominee_age, nominee_phone)
+          VALUES (${userId}, ${data.nomineeName}, ${data.nomineeRelation || 'Nominee'}, ${data.nomineeAgeDob ? String(data.nomineeAgeDob) : null}, ${data.nomineeContactNo || null})
+          ON CONFLICT (user_id) DO UPDATE
+          SET nominee_name = EXCLUDED.nominee_name, relationship = EXCLUDED.relationship, updated_at = NOW()
+        `.catch(() => {});
+      }
+    }
 
     createdRecord = inserted;
   });
@@ -761,4 +882,166 @@ export async function updateTeamMemberStatus(
     account_no_masked: maskAccountNo(result.account_no)
   };
 }
+
+/**
+ * 7. Fast Team Member Registration (From Associate Dashboard / My Team Popup)
+ */
+export async function registerTeamMemberQuick(associateId: number, data: any) {
+  await ensureTeamMembersTable();
+  const { fullName, email, mobileNo, password } = data || {};
+
+  if (!fullName || !email || !mobileNo || !password) {
+    throw new Error("Full Name, Email, Mobile Number, and Password are all required.");
+  }
+
+  if (!isValidHumanName(fullName)) {
+    throw new Error("Full Name must contain only alphabets and spaces.");
+  }
+
+  const cleanMobile = String(mobileNo).replace(/\D/g, "");
+  if (cleanMobile.length < 10) {
+    throw new Error("Please enter a valid 10-digit mobile number.");
+  }
+
+  const cleanEmail = String(email).trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    throw new Error("Invalid email address format.");
+  }
+
+  if (String(password).length < 6) {
+    throw new Error("Password must be at least 6 characters.");
+  }
+
+  let createdResult: any = null;
+  await sql.begin(async (tx: any) => {
+    // Concurrency lock for slot assignment on this associate
+    await tx`SELECT pg_advisory_xact_lock(hashtext('associate-team-slot-' || ${associateId}))`;
+
+    // 1. Verify associate exists in users table
+    const [assocUser] = await tx`
+      SELECT user_id, full_name, user_type, member_id, invitation_code, account_status
+      FROM users
+      WHERE user_id = ${associateId}
+      LIMIT 1
+    `;
+    if (!assocUser) {
+      throw new Error(`Associate with ID ${associateId} not found`);
+    }
+
+    // 2. Check occupied slots (1 to 11)
+    const existingMembers = await tx`
+      SELECT id, slot_number, status
+      FROM team_members
+      WHERE associate_id = ${associateId}
+        AND status <> 'rejected'
+      ORDER BY slot_number ASC
+    `;
+    const occupiedSlots = new Set(existingMembers.map((m: any) => Number(m.slot_number)).filter(Boolean));
+
+    let assignedSlot: number | null = null;
+    const requestedSlot = Number(data?.slotNumber || data?.slot_number || 0);
+    if (requestedSlot >= 1 && requestedSlot <= 11) {
+      if (occupiedSlots.has(requestedSlot)) {
+        throw new Error(`Slot #${requestedSlot} is already occupied. Please select an available slot.`);
+      }
+      assignedSlot = requestedSlot;
+    } else {
+      for (let s = 1; s <= 11; s++) {
+        if (!occupiedSlots.has(s)) {
+          assignedSlot = s;
+          break;
+        }
+      }
+    }
+    if (!assignedSlot || occupiedSlots.size >= 11) {
+      throw new Error("This Associate has reached the maximum limit of 11 direct Team Members. No available slots.");
+    }
+
+    // 3. Duplicate checks
+    const [dupMobile] = await tx`
+      SELECT user_id FROM users 
+      WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile.slice(-10)}
+    `;
+    const [dupInvestorMobile] = await tx`
+      SELECT id FROM investor_users 
+      WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile.slice(-10)} 
+        AND (deleted_at IS NULL) LIMIT 1
+    `;
+    if (dupMobile || dupInvestorMobile) {
+      throw new Error("Mobile number is already registered in the system.");
+    }
+
+    const [dupEmail] = await tx`SELECT user_id FROM users WHERE LOWER(email) = ${cleanEmail}`;
+    const [dupInvestorEmail] = await tx`SELECT id FROM investor_users WHERE LOWER(email) = ${cleanEmail} AND (deleted_at IS NULL) LIMIT 1`;
+    if (dupEmail || dupInvestorEmail) {
+      throw new Error("Email address is already registered in the system.");
+    }
+
+    // 4. Generate unique Team Member ID
+    const uid = await generateTeamMemberUid(tx);
+    const passwordHash = await bcrypt.hash(password, 12);
+    const cleanName = normalizeHumanName(fullName);
+
+    // 5. Insert into users
+    const [createdUser] = await tx`
+      INSERT INTO users (
+        member_id, user_type, full_name, mobile_no, email, password_hash,
+        sponsor_user_id, account_status, is_active, email_verified, is_otp_verified,
+        registered_at, updated_at
+      ) VALUES (
+        ${uid}, 'Team Member', ${cleanName}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
+        ${associateId}, 'Pending', true, true, true,
+        NOW(), NOW()
+      )
+      RETURNING user_id, member_id, user_type, full_name, email, mobile_no, account_status, registered_at
+    `;
+
+    // 6. Insert into team_members
+    const [insertedMember] = await tx`
+      INSERT INTO team_members (
+        team_member_uid, associate_id, associate_name, user_id, slot_number,
+        full_name, mobile_no, email_id, status, created_at, updated_at
+      ) VALUES (
+        ${uid}, ${associateId}, ${assocUser.full_name}, ${createdUser.user_id}, ${assignedSlot},
+        ${cleanName}, ${cleanMobile}, ${cleanEmail}, 'pending', NOW(), NOW()
+      )
+      RETURNING id, team_member_uid, associate_id, associate_name, user_id, slot_number, full_name, mobile_no, email_id, status, created_at
+    `;
+
+    try {
+      await tx`
+        INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
+        VALUES (${createdUser.user_id}, 'Team Member', 0, 0, 0, 0, 0)
+        ON CONFLICT (user_id) DO NOTHING
+      `;
+    } catch (_) {}
+
+    try {
+      await tx`
+        INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
+        VALUES (${associateId}, ${createdUser.user_id}, 'Pending', NULL)
+        ON CONFLICT (referred_user_id) DO NOTHING
+      `;
+    } catch (_) {}
+
+    createdResult = {
+      user_id: createdUser.user_id,
+      member_id: createdUser.member_id,
+      team_member_uid: insertedMember.team_member_uid,
+      full_name: createdUser.full_name,
+      email: createdUser.email,
+      mobile_no: createdUser.mobile_no,
+      user_type: createdUser.user_type,
+      slot_number: assignedSlot,
+      status: insertedMember.status,
+      account_status: createdUser.account_status,
+      sponsor_user_id: associateId,
+      sponsor_name: assocUser.full_name,
+      sponsor_member_id: assocUser.member_id || `ASSOC${associateId}`
+    };
+  });
+
+  return createdResult;
+}
+
 

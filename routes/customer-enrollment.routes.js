@@ -898,31 +898,9 @@ const handleAdminCustomerUpdate = async (req, res) => {
 
     const appStatusVal = b.applicationStatus || b.application_status || (b.enrollment_status === 'Completed' ? 'Approved' : (b.enrollment_status === 'Pending' ? 'Pending' : null)) || null;
     const isApproving = appStatusVal && ['approved', 'completed'].includes(String(appStatusVal).toLowerCase());
-
-    if (isApproving) {
-      if (!existing) {
-        return res.status(422).json({
-          success: false,
-          message: "Enrollment Form has not been completed yet. Please complete and final-submit the Enrollment Form before approving."
-        });
-      }
-
-      const isFinal = existing.is_final_submitted || Boolean(b.isFinalSubmitted || b.is_final_submitted);
-      if (!isFinal) {
-        return res.status(422).json({
-          success: false,
-          message: "Enrollment cannot be approved because Final Submit has not been completed."
-        });
-      }
-
-      const merged = { ...existing, ...b };
-      const missing = validateCustomerEnrollmentForApproval(merged, b.nominees || []);
-      if (missing.length > 0) {
-        return res.status(422).json({
-          success: false,
-          message: `Enrollment cannot be approved. Missing:\n- ${missing.join("\n- ")}\n\nPlease complete the enrollment form and Final Submit it before approval.`
-        });
-      }
+    if (isApproving && existing) {
+      // When admin approves/updates, auto mark as final submitted
+      existing.is_final_submitted = true;
     }
 
     if (existing) {
