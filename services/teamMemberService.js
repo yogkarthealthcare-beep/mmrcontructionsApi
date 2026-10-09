@@ -672,10 +672,10 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
             try {
                 const [existingBank] = await tx `SELECT bank_detail_id FROM user_bank_details WHERE user_id = ${userId} LIMIT 1`;
                 if (existingBank) {
-                    await tx `UPDATE user_bank_details SET bank_name = ${data.bankName.trim()}, branch_name = ${data.branchName.trim()}, account_number = ${data.accountNo.trim()}, ifsc_code = ${data.ifscCode.trim().toUpperCase()}, updated_at = NOW() WHERE bank_detail_id = ${existingBank.bank_detail_id}`;
+                    await tx `UPDATE user_bank_details SET account_holder_name = ${data.fullName.trim()}, bank_name = ${data.bankName.trim()}, branch_name = ${data.branchName.trim()}, account_number = ${data.accountNo.trim()}, ifsc_code = ${data.ifscCode.trim().toUpperCase()}, updated_at = NOW() WHERE bank_detail_id = ${existingBank.bank_detail_id}`;
                 }
                 else {
-                    await tx `INSERT INTO user_bank_details (user_id, bank_name, branch_name, account_number, ifsc_code) VALUES (${userId}, ${data.bankName.trim()}, ${data.branchName.trim()}, ${data.accountNo.trim()}, ${data.ifscCode.trim().toUpperCase()})`;
+                    await tx `INSERT INTO user_bank_details (user_id, account_holder_name, bank_name, branch_name, account_number, ifsc_code) VALUES (${userId}, ${data.fullName.trim()}, ${data.bankName.trim()}, ${data.branchName.trim()}, ${data.accountNo.trim()}, ${data.ifscCode.trim().toUpperCase()})`;
                 }
             }
             catch (_) { }
