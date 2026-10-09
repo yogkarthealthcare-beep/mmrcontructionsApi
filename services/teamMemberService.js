@@ -65,10 +65,85 @@ export async function ensureTeamMembersTable() {
         await sql `CREATE INDEX IF NOT EXISTS idx_team_members_status ON team_members (status)`.catch(() => { });
         await sql `CREATE INDEX IF NOT EXISTS idx_team_members_associate_created ON team_members (associate_id, created_at DESC)`.catch(() => { });
         await sql `CREATE UNIQUE INDEX IF NOT EXISTS uq_team_members_assoc_slot ON team_members (associate_id, slot_number)`.catch(() => { });
+        await syncExistingTeamMembersFromUsers();
         tableInitialized = true;
     }
     catch (err) {
         console.error("[TeamMemberService] Table initialization check:", err);
+    }
+}
+export async function syncExistingTeamMembersFromUsers() {
+    try {
+        const orphanedUsers = await sql `
+      SELECT u.user_id, u.member_id, u.full_name, u.mobile_no, u.email,
+             u.sponsor_user_id, u.account_status, u.aadhar_number, u.pan_number,
+             u.profile_image, u.created_at, u.registered_at,
+             assoc.full_name AS sponsor_name
+      FROM users u
+      LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
+      WHERE (
+        u.member_id ILIKE 'MMR-TM-%'
+        OR u.member_id ILIKE 'TM-%'
+        OR LOWER(u.user_type::TEXT) = 'teammember'
+        OR LOWER(u.user_type::TEXT) = 'team member'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id OR tm.team_member_uid = u.member_id
+      )
+    `;
+        for (const u of orphanedUsers) {
+            const uid = u.member_id || `MMR-TM-${String(u.user_id).padStart(5, '0')}`;
+            const assocId = Number(u.sponsor_user_id) || 0;
+            const assocName = u.sponsor_name || 'Direct / Head Office';
+            const status = (u.account_status || 'Active').toLowerCase() === 'active' ? 'approved' : 'pending';
+            await sql `
+        INSERT INTO team_members (
+          team_member_uid, associate_id, associate_name, user_id,
+          full_name, aadhar_no, pan_no, mobile_no, email_id, photo_url, status, created_at, updated_at
+        ) VALUES (
+          ${uid}, ${assocId}, ${assocName}, ${u.user_id},
+          ${u.full_name || 'Team Member'}, ${u.aadhar_number || null}, ${u.pan_number || null},
+          ${u.mobile_no || ''}, ${u.email || null}, ${u.profile_image || null},
+          ${status}, COALESCE(${u.registered_at || u.created_at}, NOW()), NOW()
+        )
+        ON CONFLICT (team_member_uid) DO UPDATE
+        SET user_id = EXCLUDED.user_id,
+            associate_id = CASE WHEN team_members.associate_id = 0 THEN EXCLUDED.associate_id ELSE team_members.associate_id END,
+            associate_name = CASE WHEN team_members.associate_name = 'Direct / Head Office' THEN EXCLUDED.associate_name ELSE team_members.associate_name END
+      `.catch(() => { });
+        }
+        const orphanedEnrollments = await sql `
+      SELECT e.id, e.associate_id, e.user_id, e.member_id, e.full_name, e.contact_1, e.contact_no_1, e.mobile_no,
+             e.email, e.sponsor_id, e.sponsor_name, e.status, e.app_status, e.created_at
+      FROM associate_enrollment e
+      WHERE (
+        e.member_id ILIKE 'MMR-TM-%'
+        OR e.member_id ILIKE 'TM-%'
+        OR e.associate_id ILIKE 'MMR-TM-%'
+        OR e.associate_id ILIKE 'TM-%'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM team_members tm WHERE tm.team_member_uid = e.member_id OR tm.team_member_uid = e.associate_id
+      )
+    `.catch(() => []);
+        for (const e of orphanedEnrollments) {
+            const uid = e.member_id || e.associate_id;
+            const mob = e.mobile_no || e.contact_1 || e.contact_no_1 || '';
+            await sql `
+        INSERT INTO team_members (
+          team_member_uid, associate_id, associate_name, user_id,
+          full_name, mobile_no, email_id, status, created_at, updated_at
+        ) VALUES (
+          ${uid}, ${Number(e.sponsor_id) || 0}, ${e.sponsor_name || 'Direct / Head Office'}, ${e.user_id || null},
+          ${e.full_name || 'Team Member'}, ${mob}, ${e.email || null},
+          'approved', COALESCE(${e.created_at}, NOW()), NOW()
+        )
+        ON CONFLICT (team_member_uid) DO NOTHING
+      `.catch(() => { });
+        }
+    }
+    catch (err) {
+        console.warn("[SyncTeamMembers] Sync warning:", err.message);
     }
 }
 // Zod Validation Schema

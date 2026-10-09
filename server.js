@@ -27,7 +27,7 @@ import invoiceModuleRoutes from './routes/invoice-module.routes.js';
 import customerEnrollmentRoutes from './routes/customer-enrollment.routes.js';
 import associateEnrollmentRoutes from './routes/associateEnrollmentRoutes.js';
 import teamMemberRoutes from './routes/teamMemberRoutes.js';
-import { ensureTeamMembersTable, registerTeamMemberQuick, approveTeamMemberByAssociate } from './services/teamMemberService.js';
+import { ensureTeamMembersTable, registerTeamMemberQuick, approveTeamMemberByAssociate, syncExistingTeamMembersFromUsers } from './services/teamMemberService.js';
 import receiptRoutes, { ensureReceiptsTable } from './routes/receipt.routes.js';
 import siteGalleryRoutes, { ensureSiteGalleryTable } from './routes/site-gallery.routes.js';
 import twoFactorRoutes from './routes/twoFactor.routes.js';
@@ -13269,6 +13269,7 @@ app.get("/api/admin/team-members",
   async (req, res) => {
     try {
       await ensureTeamMembersTable().catch(() => {});
+      await syncExistingTeamMembersFromUsers().catch(() => {});
       const { status = "", associate_id = "", search = "", page = 1, limit = 20, pageSize = 20 } = req.query;
       const pageNumber = Math.max(Number(page) || 1, 1);
       const actualLimit = Math.min(Math.max(Number(limit) || Number(pageSize) || 20, 1), 10000);
@@ -13279,17 +13280,75 @@ app.get("/api/admin/team-members",
       let rows = [];
       try {
         rows = await sql`
-          SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id, tm.associate_name,
-                 tm.slot_number, tm.full_name, tm.father_husband_name, tm.date_of_birth, tm.gender,
-                 tm.aadhar_no, tm.pan_no, tm.mobile_no, tm.email_id, tm.full_address,
-                 tm.nominee_name, tm.nominee_relation, tm.nominee_age_dob, tm.nominee_contact_no,
-                 tm.bank_name, tm.branch_name, tm.account_no, tm.ifsc_code, tm.status,
-                 tm.photo_url, tm.applicant_signature_url, tm.associate_signature_url,
-                 tm.created_at, tm.updated_at,
-                 assoc.full_name AS sponsor_name, assoc.member_id AS sponsor_member_id, 
-                 assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
-                 COALESCE(u.account_status, tm.status, 'Active') AS account_status,
-                 COALESCE(u.is_active, true) AS is_user_active,
+          WITH all_team_members AS (
+            SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id, 
+                   COALESCE(tm.associate_name, assoc.full_name, 'Direct / Head Office') AS associate_name,
+                   tm.slot_number, tm.full_name, tm.father_husband_name, tm.date_of_birth, tm.gender,
+                   tm.aadhar_no, tm.pan_no, tm.mobile_no, tm.email_id, tm.full_address,
+                   tm.nominee_name, tm.nominee_relation, tm.nominee_age_dob, tm.nominee_contact_no,
+                   tm.bank_name, tm.branch_name, tm.account_no, tm.ifsc_code, 
+                   COALESCE(tm.status, 'approved') AS status,
+                   tm.photo_url, tm.applicant_signature_url, tm.associate_signature_url,
+                   COALESCE(tm.created_at, NOW()) AS created_at, COALESCE(tm.updated_at, NOW()) AS updated_at,
+                   assoc.full_name AS sponsor_name, assoc.member_id AS sponsor_member_id, 
+                   assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
+                   COALESCE(u.account_status, tm.status, 'Active') AS account_status,
+                   COALESCE(u.is_active, true) AS is_user_active
+            FROM team_members tm
+            LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
+            LEFT JOIN users u ON u.user_id = tm.user_id
+
+            UNION ALL
+
+            SELECT
+              u.user_id::bigint AS id,
+              COALESCE(u.member_id, 'MMR-TM-' || LPAD(u.user_id::text, 5, '0')) AS team_member_uid,
+              u.user_id,
+              COALESCE(u.sponsor_user_id, 0)::bigint AS associate_id,
+              COALESCE(assoc.full_name, 'Direct / Head Office') AS associate_name,
+              NULL::smallint AS slot_number,
+              u.full_name,
+              NULL::varchar AS father_husband_name,
+              NULL::date AS date_of_birth,
+              NULL::varchar AS gender,
+              u.aadhar_number AS aadhar_no,
+              u.pan_number AS pan_no,
+              COALESCE(u.mobile_no, '') AS mobile_no,
+              u.email AS email_id,
+              NULL::text AS full_address,
+              NULL::varchar AS nominee_name,
+              NULL::varchar AS nominee_relation,
+              NULL::varchar AS nominee_age_dob,
+              NULL::varchar AS nominee_contact_no,
+              NULL::varchar AS bank_name,
+              NULL::varchar AS branch_name,
+              NULL::varchar AS account_no,
+              NULL::varchar AS ifsc_code,
+              CASE WHEN LOWER(COALESCE(u.account_status, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
+              u.profile_image AS photo_url,
+              NULL::varchar AS applicant_signature_url,
+              NULL::varchar AS associate_signature_url,
+              COALESCE(u.registered_at, u.created_at, NOW()) AS created_at,
+              COALESCE(u.updated_at, NOW()) AS updated_at,
+              assoc.full_name AS sponsor_name,
+              assoc.member_id AS sponsor_member_id,
+              assoc.mobile_no AS sponsor_mobile,
+              assoc.email AS sponsor_email,
+              COALESCE(u.account_status, 'Active') AS account_status,
+              COALESCE(u.is_active, true) AS is_user_active
+            FROM users u
+            LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
+            WHERE (
+              u.member_id ILIKE 'MMR-TM-%'
+              OR u.member_id ILIKE 'TM-%'
+              OR LOWER(u.user_type::TEXT) = 'teammember'
+              OR LOWER(u.user_type::TEXT) = 'team member'
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id OR tm.team_member_uid = u.member_id
+            )
+          )
+          SELECT tm.*,
                  COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
                  COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
                  COALESCE(b_stats.plots_sold_count, 0) AS plots_sold_count,
@@ -13299,9 +13358,7 @@ app.get("/api/admin/team-members",
                  COALESCE(m_sales.monthly_sales_gaj, 0) AS monthly_sales_gaj,
                  COALESCE(y_sales.yearly_sales_gaj, 0) AS yearly_sales_gaj,
                  COUNT(*) OVER() AS total_count
-          FROM team_members tm
-          LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
-          LEFT JOIN users u ON u.user_id = tm.user_id
+          FROM all_team_members tm
           LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
           LEFT JOIN LATERAL (
             SELECT COUNT(b.booking_id)::int AS plots_sold_count
@@ -13337,11 +13394,11 @@ app.get("/api/admin/team-members",
           ) y_sales ON true
           WHERE (
             ${statusFilter} = '' OR ${statusFilter} = 'all'
-            OR (${statusFilter} = 'active' AND (LOWER(tm.status) IN ('active', 'approved') OR LOWER(COALESCE(u.account_status, '')) = 'active'))
-            OR (${statusFilter} = 'pending' AND (LOWER(tm.status) IN ('pending', 'submitted') OR LOWER(COALESCE(u.account_status, '')) = 'pending'))
-            OR (${statusFilter} = 'suspended' AND (LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked') OR LOWER(COALESCE(u.account_status, '')) IN ('suspended', 'inactive', 'rejected', 'blocked')))
+            OR (${statusFilter} = 'active' AND (LOWER(tm.status) IN ('active', 'approved') OR LOWER(COALESCE(tm.account_status, '')) = 'active'))
+            OR (${statusFilter} = 'pending' AND (LOWER(tm.status) IN ('pending', 'submitted') OR LOWER(COALESCE(tm.account_status, '')) = 'pending'))
+            OR (${statusFilter} = 'suspended' AND (LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked') OR LOWER(COALESCE(tm.account_status, '')) IN ('suspended', 'inactive', 'rejected', 'blocked')))
             OR LOWER(tm.status) = ${statusFilter}
-            OR LOWER(COALESCE(u.account_status, '')) = ${statusFilter}
+            OR LOWER(COALESCE(tm.account_status, '')) = ${statusFilter}
           )
           AND (${assocId} = 0 OR tm.associate_id = ${assocId})
           AND (
@@ -13350,25 +13407,83 @@ app.get("/api/admin/team-members",
             OR tm.team_member_uid ILIKE ${searchTerm}
             OR tm.mobile_no ILIKE ${searchTerm}
             OR tm.email_id ILIKE ${searchTerm}
-            OR assoc.full_name ILIKE ${searchTerm}
-            OR assoc.member_id ILIKE ${searchTerm}
+            OR tm.sponsor_name ILIKE ${searchTerm}
+            OR tm.sponsor_member_id ILIKE ${searchTerm}
           )
           ORDER BY tm.created_at DESC
           LIMIT ${actualLimit} OFFSET ${(pageNumber - 1) * actualLimit}`;
       } catch (richErr) {
         console.warn("[Admin Team Members Rich Query Warning, using safe base query]:", richErr.message);
         rows = await sql`
-          SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id, tm.associate_name,
-                 tm.slot_number, tm.full_name, tm.father_husband_name, tm.date_of_birth, tm.gender,
-                 tm.aadhar_no, tm.pan_no, tm.mobile_no, tm.email_id, tm.full_address,
-                 tm.nominee_name, tm.nominee_relation, tm.nominee_age_dob, tm.nominee_contact_no,
-                 tm.bank_name, tm.branch_name, tm.account_no, tm.ifsc_code, tm.status,
-                 tm.photo_url, tm.applicant_signature_url, tm.associate_signature_url,
-                 tm.created_at, tm.updated_at,
-                 assoc.full_name AS sponsor_name, assoc.member_id AS sponsor_member_id, 
-                 assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
-                 COALESCE(u.account_status, tm.status, 'Active') AS account_status,
-                 COALESCE(u.is_active, true) AS is_user_active,
+          WITH all_team_members AS (
+            SELECT tm.id, tm.team_member_uid, tm.user_id, tm.associate_id, 
+                   COALESCE(tm.associate_name, assoc.full_name, 'Direct / Head Office') AS associate_name,
+                   tm.slot_number, tm.full_name, tm.father_husband_name, tm.date_of_birth, tm.gender,
+                   tm.aadhar_no, tm.pan_no, tm.mobile_no, tm.email_id, tm.full_address,
+                   tm.nominee_name, tm.nominee_relation, tm.nominee_age_dob, tm.nominee_contact_no,
+                   tm.bank_name, tm.branch_name, tm.account_no, tm.ifsc_code, 
+                   COALESCE(tm.status, 'approved') AS status,
+                   tm.photo_url, tm.applicant_signature_url, tm.associate_signature_url,
+                   COALESCE(tm.created_at, NOW()) AS created_at, COALESCE(tm.updated_at, NOW()) AS updated_at,
+                   assoc.full_name AS sponsor_name, assoc.member_id AS sponsor_member_id, 
+                   assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
+                   COALESCE(u.account_status, tm.status, 'Active') AS account_status,
+                   COALESCE(u.is_active, true) AS is_user_active
+            FROM team_members tm
+            LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
+            LEFT JOIN users u ON u.user_id = tm.user_id
+
+            UNION ALL
+
+            SELECT
+              u.user_id::bigint AS id,
+              COALESCE(u.member_id, 'MMR-TM-' || LPAD(u.user_id::text, 5, '0')) AS team_member_uid,
+              u.user_id,
+              COALESCE(u.sponsor_user_id, 0)::bigint AS associate_id,
+              COALESCE(assoc.full_name, 'Direct / Head Office') AS associate_name,
+              NULL::smallint AS slot_number,
+              u.full_name,
+              NULL::varchar AS father_husband_name,
+              NULL::date AS date_of_birth,
+              NULL::varchar AS gender,
+              u.aadhar_number AS aadhar_no,
+              u.pan_number AS pan_no,
+              COALESCE(u.mobile_no, '') AS mobile_no,
+              u.email AS email_id,
+              NULL::text AS full_address,
+              NULL::varchar AS nominee_name,
+              NULL::varchar AS nominee_relation,
+              NULL::varchar AS nominee_age_dob,
+              NULL::varchar AS nominee_contact_no,
+              NULL::varchar AS bank_name,
+              NULL::varchar AS branch_name,
+              NULL::varchar AS account_no,
+              NULL::varchar AS ifsc_code,
+              CASE WHEN LOWER(COALESCE(u.account_status, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
+              u.profile_image AS photo_url,
+              NULL::varchar AS applicant_signature_url,
+              NULL::varchar AS associate_signature_url,
+              COALESCE(u.registered_at, u.created_at, NOW()) AS created_at,
+              COALESCE(u.updated_at, NOW()) AS updated_at,
+              assoc.full_name AS sponsor_name,
+              assoc.member_id AS sponsor_member_id,
+              assoc.mobile_no AS sponsor_mobile,
+              assoc.email AS sponsor_email,
+              COALESCE(u.account_status, 'Active') AS account_status,
+              COALESCE(u.is_active, true) AS is_user_active
+            FROM users u
+            LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
+            WHERE (
+              u.member_id ILIKE 'MMR-TM-%'
+              OR u.member_id ILIKE 'TM-%'
+              OR LOWER(u.user_type::TEXT) = 'teammember'
+              OR LOWER(u.user_type::TEXT) = 'team member'
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id OR tm.team_member_uid = u.member_id
+            )
+          )
+          SELECT tm.*,
                  0 AS total_gaj_sold,
                  0 AS total_commission_earned,
                  0 AS plots_sold_count,
@@ -13378,16 +13493,14 @@ app.get("/api/admin/team-members",
                  0 AS monthly_sales_gaj,
                  0 AS yearly_sales_gaj,
                  COUNT(*) OVER() AS total_count
-          FROM team_members tm
-          LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
-          LEFT JOIN users u ON u.user_id = tm.user_id
+          FROM all_team_members tm
           WHERE (
             ${statusFilter} = '' OR ${statusFilter} = 'all'
-            OR (${statusFilter} = 'active' AND (LOWER(tm.status) IN ('active', 'approved') OR LOWER(COALESCE(u.account_status, '')) = 'active'))
-            OR (${statusFilter} = 'pending' AND (LOWER(tm.status) IN ('pending', 'submitted') OR LOWER(COALESCE(u.account_status, '')) = 'pending'))
-            OR (${statusFilter} = 'suspended' AND (LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked') OR LOWER(COALESCE(u.account_status, '')) IN ('suspended', 'inactive', 'rejected', 'blocked')))
+            OR (${statusFilter} = 'active' AND (LOWER(tm.status) IN ('active', 'approved') OR LOWER(COALESCE(tm.account_status, '')) = 'active'))
+            OR (${statusFilter} = 'pending' AND (LOWER(tm.status) IN ('pending', 'submitted') OR LOWER(COALESCE(tm.account_status, '')) = 'pending'))
+            OR (${statusFilter} = 'suspended' AND (LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked') OR LOWER(COALESCE(tm.account_status, '')) IN ('suspended', 'inactive', 'rejected', 'blocked')))
             OR LOWER(tm.status) = ${statusFilter}
-            OR LOWER(COALESCE(u.account_status, '')) = ${statusFilter}
+            OR LOWER(COALESCE(tm.account_status, '')) = ${statusFilter}
           )
           AND (${assocId} = 0 OR tm.associate_id = ${assocId})
           AND (
@@ -13396,8 +13509,8 @@ app.get("/api/admin/team-members",
             OR tm.team_member_uid ILIKE ${searchTerm}
             OR tm.mobile_no ILIKE ${searchTerm}
             OR tm.email_id ILIKE ${searchTerm}
-            OR assoc.full_name ILIKE ${searchTerm}
-            OR assoc.member_id ILIKE ${searchTerm}
+            OR tm.sponsor_name ILIKE ${searchTerm}
+            OR tm.sponsor_member_id ILIKE ${searchTerm}
           )
           ORDER BY tm.created_at DESC
           LIMIT ${actualLimit} OFFSET ${(pageNumber - 1) * actualLimit}`;
@@ -13418,10 +13531,17 @@ app.get("/api/admin/team-members",
         const [sumRow] = await sql`
           SELECT
             COALESCE(COUNT(*), 0)::int AS total_team_members,
-            COALESCE(COUNT(CASE WHEN LOWER(tm.status) IN ('approved', 'active') THEN 1 END), 0)::int AS active_count,
-            COALESCE(COUNT(CASE WHEN LOWER(tm.status) IN ('pending', 'submitted') THEN 1 END), 0)::int AS pending_count,
-            COALESCE(COUNT(CASE WHEN LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked') THEN 1 END), 0)::int AS suspended_count
-          FROM team_members tm`;
+            COALESCE(COUNT(CASE WHEN LOWER(status) IN ('approved', 'active') THEN 1 END), 0)::int AS active_count,
+            COALESCE(COUNT(CASE WHEN LOWER(status) IN ('pending', 'submitted') THEN 1 END), 0)::int AS pending_count,
+            COALESCE(COUNT(CASE WHEN LOWER(status) IN ('suspended', 'inactive', 'rejected', 'blocked') THEN 1 END), 0)::int AS suspended_count
+          FROM (
+            SELECT status FROM team_members
+            UNION ALL
+            SELECT CASE WHEN LOWER(COALESCE(account_status, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status
+            FROM users u
+            WHERE (u.member_id ILIKE 'MMR-TM-%' OR u.member_id ILIKE 'TM-%' OR LOWER(u.user_type::TEXT) = 'teammember' OR LOWER(u.user_type::TEXT) = 'team member')
+              AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id OR tm.team_member_uid = u.member_id)
+          ) tm_all`;
         if (sumRow) {
           summary = { ...summary, ...sumRow };
         }
@@ -13483,6 +13603,43 @@ app.get("/api/admin/team-members/:id",
             LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
             WHERE tm.id = ${numId} OR tm.team_member_uid = ${String(id)} OR tm.user_id = ${numId}
             LIMIT 1`;
+
+      if (!rows || rows.length === 0) {
+        const userRows = isNaN(numId)
+          ? await sql`
+              SELECT u.user_id AS id, u.member_id AS team_member_uid, u.user_id,
+                     COALESCE(u.sponsor_user_id, 0) AS associate_id,
+                     assoc.full_name AS associate_name, assoc.full_name AS sponsor_name,
+                     assoc.member_id AS sponsor_member_id, assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
+                     u.full_name, u.mobile_no, u.email AS email_id, u.aadhar_number AS aadhar_no, u.pan_number AS pan_no,
+                     u.profile_image AS photo_url,
+                     COALESCE(u.account_status, 'Active') AS account_status,
+                     CASE WHEN LOWER(COALESCE(u.account_status, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
+                     COALESCE(u.is_active, true) AS is_user_active,
+                     0 AS total_gaj_sold, 0 AS total_commission_earned
+              FROM users u
+              LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
+              WHERE u.member_id = ${String(id)}
+              LIMIT 1`
+          : await sql`
+              SELECT u.user_id AS id, u.member_id AS team_member_uid, u.user_id,
+                     COALESCE(u.sponsor_user_id, 0) AS associate_id,
+                     assoc.full_name AS associate_name, assoc.full_name AS sponsor_name,
+                     assoc.member_id AS sponsor_member_id, assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
+                     u.full_name, u.mobile_no, u.email AS email_id, u.aadhar_number AS aadhar_no, u.pan_number AS pan_no,
+                     u.profile_image AS photo_url,
+                     COALESCE(u.account_status, 'Active') AS account_status,
+                     CASE WHEN LOWER(COALESCE(u.account_status, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
+                     COALESCE(u.is_active, true) AS is_user_active,
+                     0 AS total_gaj_sold, 0 AS total_commission_earned
+              FROM users u
+              LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
+              WHERE u.user_id = ${numId} OR u.member_id = ${String(id)}
+              LIMIT 1`;
+        if (userRows && userRows.length > 0) {
+          rows = userRows;
+        }
+      }
 
       if (!rows || rows.length === 0) return err(res, "Team member not found", 404);
       const member = rows[0];
