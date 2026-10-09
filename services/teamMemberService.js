@@ -363,7 +363,7 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
                 member_id, user_type, full_name, mobile_no, email,
                 pan_number, aadhar_number, sponsor_user_id, account_status, is_active, registered_at
               ) VALUES (
-                ${uid}, 'Team Member', ${data.fullName.trim()}, ${cleanMobile}, ${cleanEmail},
+                ${uid}, 'Associate', ${data.fullName.trim()}, ${cleanMobile}, ${cleanEmail},
                 ${data.panNo || null}, ${cleanAadhar}, ${data.associateId}, 'Pending', true, NOW()
               )
               ON CONFLICT DO NOTHING
@@ -785,7 +785,7 @@ export async function updateTeamMemberStatus(id, status, authorizedSignatoryName
             await tx `
         UPDATE users
         SET
-          user_type = COALESCE(user_type, 'Team Member'),
+          user_type = COALESCE(user_type, 'Associate'),
           sponsor_user_id = COALESCE(sponsor_user_id, ${current.associate_id}),
           account_status = ${targetAccountStatus},
           is_active = ${targetIsActive},
@@ -804,11 +804,11 @@ export async function updateTeamMemberStatus(id, status, authorizedSignatoryName
           member_id, user_type, full_name, mobile_no, email,
           pan_number, aadhar_number, sponsor_user_id, account_status, is_active, registered_at
         ) VALUES (
-          ${current.team_member_uid}, 'Team Member', ${current.full_name}, ${cleanMobile}, ${cleanEmail},
+          ${current.team_member_uid}, 'Associate', ${current.full_name}, ${cleanMobile}, ${cleanEmail},
           ${current.pan_no || null}, ${cleanAadhar}, ${current.associate_id}, ${targetAccountStatus}, ${targetIsActive}, NOW()
         )
         ON CONFLICT (mobile_no) DO UPDATE
-        SET account_status = ${targetAccountStatus}, is_active = ${targetIsActive}, user_type = 'Team Member', sponsor_user_id = ${current.associate_id}
+        SET account_status = ${targetAccountStatus}, is_active = ${targetIsActive}, user_type = 'Associate', sponsor_user_id = ${current.associate_id}
         RETURNING user_id
       `;
             if (newUser) {
@@ -931,7 +931,7 @@ export async function registerTeamMemberQuick(associateId, data) {
                 sponsor_user_id, account_status, is_active, email_verified, is_otp_verified,
                 registered_at, updated_at
             ) VALUES (
-                ${uid}, 'Team Member', ${cleanName}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
+                ${uid}, 'Associate', ${cleanName}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
                 ${associateId}, 'Pending', true, true, true,
                 NOW(), NOW()
             )
@@ -953,7 +953,7 @@ export async function registerTeamMemberQuick(associateId, data) {
         try {
             await tx `
                 INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
-                VALUES (${createdUser.user_id}, 'Team Member', 0, 0, 0, 0, 0)
+                VALUES (${createdUser.user_id}, 'Associate', 0, 0, 0, 0, 0)
                 ON CONFLICT (user_id) DO NOTHING
             `;
         } catch (_) {}
@@ -973,7 +973,7 @@ export async function registerTeamMemberQuick(associateId, data) {
             full_name: createdUser.full_name,
             email: createdUser.email,
             mobile_no: createdUser.mobile_no,
-            user_type: createdUser.user_type,
+            user_type: 'Team Member',
             slot_number: assignedSlot,
             status: insertedMember.status,
             account_status: createdUser.account_status,

@@ -2101,7 +2101,7 @@ const generateCommissionForPayment = async (req, {
     const [seller] = await db`
       SELECT user_id, account_status, user_type, sponsor_user_id
       FROM users
-      WHERE user_id = ${sellerUserId} AND user_type IN ('Associate', 'Team Member')`;
+      WHERE user_id = ${sellerUserId} AND user_type = 'Associate'`;
     if (!seller) return { generated: 0, reason: "Seller associate/team member not found" };
     if (eligibility.require_active_associate !== false && seller.account_status !== "Active") {
       return { generated: 0, reason: "Seller inactive" };
@@ -2110,17 +2110,11 @@ const generateCommissionForPayment = async (req, {
       return { generated: 0, reason: "Seller blacklisted" };
     }
 
-    const isTeamMemberSeller = seller.user_type === 'Team Member';
+    const [tmSellerRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} LIMIT 1`;
+    const isTeamMemberSeller = Boolean(tmSellerRow);
     let leaderUserId = isTeamMemberSeller
-      ? Number(seller.sponsor_user_id || 0)
+      ? Number(tmSellerRow?.associate_id || seller.sponsor_user_id || 0)
       : sellerUserId;
-
-    if (isTeamMemberSeller && !leaderUserId) {
-      const [tmRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} LIMIT 1`;
-      if (tmRow?.associate_id) {
-        leaderUserId = Number(tmRow.associate_id);
-      }
-    }
 
     if (engine.commission_model === "FlatTeam" || engine.commission_model === "TeamMemberModel") {
       const teamDirectPercentage = Number(engine.team_direct_percentage ?? 5);
@@ -2135,18 +2129,12 @@ const generateCommissionForPayment = async (req, {
 
       // Find all eligible team members under actualLeaderId
       const teamRows = actualLeaderId ? await db`
-        SELECT DISTINCT u.user_id, u.account_status, u.user_type
-        FROM users u
-        WHERE u.user_type = 'Team Member'
-          AND (
-            u.sponsor_user_id = ${actualLeaderId}
-            OR EXISTS (
-              SELECT 1 FROM team_members tm
-              WHERE tm.associate_id = ${actualLeaderId}
-                AND tm.user_id = u.user_id
-                AND tm.status IN ('approved', 'active')
-            )
-          )` : [];
+        SELECT DISTINCT tm.user_id, COALESCE(u.account_status, 'Active') AS account_status, 'Team Member' AS user_type
+        FROM team_members tm
+        LEFT JOIN users u ON tm.user_id = u.user_id
+        WHERE tm.associate_id = ${actualLeaderId}
+          AND tm.status IN ('approved', 'active', 'pending')
+          AND tm.user_id IS NOT NULL` : [];
 
       const eligibleTeamMembers = teamRows.filter(m => {
         if (Number(m.user_id) === sellerUserId) return false;
@@ -2409,7 +2397,7 @@ const generateCommissionForPayment = async (req, {
     const candidates = new Map();
     candidates.set(sellerUserId, 1);
 
-    if (seller.user_type === 'Team Member' && leaderUserId) {
+    if (isTeamMemberSeller && leaderUserId) {
       if (2 <= Number(engine.maximum_levels)) {
         candidates.set(leaderUserId, 2);
       }
@@ -2444,7 +2432,7 @@ const generateCommissionForPayment = async (req, {
       const [candidateUser] = await db`
         SELECT account_status, user_type
         FROM users
-        WHERE user_id = ${candidateUserId} AND user_type IN ('Associate', 'Team Member')`;
+        WHERE user_id = ${candidateUserId} AND user_type = 'Associate'`;
       if (!candidateUser) continue;
       if (eligibility.require_active_associate !== false && candidateUser.account_status !== "Active") continue;
       if (eligibility.exclude_blacklisted !== false && candidateUser.account_status === "Blacklisted") continue;
@@ -2511,18 +2499,20 @@ const generateMlmCommissionForBooking = async (req, bookingId) => {
   const [seller] = await sql`
     SELECT user_id, account_status, user_type, sponsor_user_id
     FROM users
-    WHERE user_id = ${Number(booking.sponsor_user_id)} AND user_type IN ('Associate', 'Team Member')`;
+    WHERE user_id = ${Number(booking.sponsor_user_id)} AND user_type = 'Associate'`;
   if (!seller) return { generated: 0, reason: "Seller not found" };
 
-  const leaderUserId = seller.user_type === 'Team Member'
-    ? Number(seller.sponsor_user_id)
+  const [tmSellerLegacyRow] = await sql`SELECT associate_id FROM team_members WHERE user_id = ${seller.user_id} LIMIT 1`;
+  const isTeamMemberSellerLegacy = Boolean(tmSellerLegacyRow);
+  const leaderUserId = isTeamMemberSellerLegacy
+    ? Number(tmSellerLegacyRow?.associate_id || seller.sponsor_user_id)
     : Number(seller.user_id);
 
   const rules = await sql`SELECT * FROM commission_rules WHERE is_active = TRUE ORDER BY level_depth`;
   const candidates = new Map();
   candidates.set(Number(seller.user_id), 1);
 
-  if (seller.user_type === 'Team Member' && leaderUserId) {
+  if (isTeamMemberSellerLegacy && leaderUserId) {
     candidates.set(leaderUserId, 2);
     const uplines = await sql`
       SELECT ancestor_user_id, depth
@@ -2548,7 +2538,7 @@ const generateMlmCommissionForBooking = async (req, bookingId) => {
   let generated = 0;
   for (const [candidateUserId, depth] of candidates.entries()) {
     const [candidateUser] = await sql`
-      SELECT account_status FROM users WHERE user_id = ${candidateUserId} AND user_type IN ('Associate', 'Team Member')`;
+      SELECT account_status FROM users WHERE user_id = ${candidateUserId} AND user_type = 'Associate'`;
     if (!candidateUser || candidateUser.account_status === "Blacklisted") continue;
     const expectedType = depth === 1 ? "Direct" : "Upline";
     const rule = rules.find(r =>
@@ -5241,10 +5231,26 @@ app.post("/api/auth/login", async (req, res) => {
       return err(res, "Provide password or otp_code", 400);
     }
 
+    // Check if user has an associated Team Member record
+    const [tmRow] = await sql`
+      SELECT id, team_member_uid, slot_number, associate_id, status
+      FROM team_members
+      WHERE user_id = ${user.user_id}
+         OR (mobile_no IS NOT NULL AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile || 'NO_MOBILE'})
+      ORDER BY (user_id = ${user.user_id}) DESC, id DESC
+      LIMIT 1
+    `;
+    const isTm = Boolean(tmRow && tmRow.status !== 'rejected');
+    const effectiveUserType = isTm ? 'Team Member' : user.user_type;
+    const effectiveMemberId = tmRow?.team_member_uid || user.member_id;
+
     const payload = {
       user_id: user.user_id,
-      user_type: user.user_type,
-      member_id: user.member_id,
+      user_type: effectiveUserType,
+      role: effectiveUserType,
+      member_id: effectiveMemberId,
+      slot_number: tmRow?.slot_number || null,
+      team_lead_id: tmRow?.associate_id || user.sponsor_user_id || null,
       mobile_no: user.mobile_no,
       email: user.email,
     };
@@ -5260,8 +5266,11 @@ app.post("/api/auth/login", async (req, res) => {
         user_id: user.user_id,
         full_name: user.full_name,
         mobile_no: user.mobile_no,
-        user_type: user.user_type,
-        member_id: user.member_id,
+        user_type: effectiveUserType,
+        role: effectiveUserType,
+        member_id: effectiveMemberId,
+        slot_number: tmRow?.slot_number || null,
+        team_lead_id: tmRow?.associate_id || user.sponsor_user_id || null,
         invitation_code: user.invitation_code,
         email: user.email,
         account_status: user.account_status,
@@ -5818,18 +5827,21 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
     const [user] = await sql`
       SELECT u.user_id,
              COALESCE(
+               NULLIF(TRIM(tm.team_member_uid), ''),
                NULLIF(TRIM(u.member_id), ''),
                NULLIF(TRIM(u.invitation_code), ''),
-               NULLIF(TRIM(tm.team_member_uid), ''),
                NULLIF(TRIM(aen.application_no), ''),
                NULLIF(TRIM(ces.application_no), ''),
                CASE 
+                 WHEN tm.id IS NOT NULL THEN ('MMR-TM-' || LPAD(COALESCE(tm.slot_number, u.user_id)::text, 4, '0'))
                  WHEN LOWER(u.user_type::TEXT) = 'associate' THEN ('MMR-ASC-' || LPAD(u.user_id::text, 5, '0'))
-                 WHEN LOWER(u.user_type::TEXT) = 'team member' THEN ('MMR-TM-' || LPAD(u.user_id::text, 5, '0'))
                  ELSE ('MMR-CUS-' || LPAD(u.user_id::text, 5, '0'))
                END
              ) AS member_id,
-             COALESCE(NULLIF(TRIM(u.user_type::text), ''), 'Customer') AS user_type,
+             CASE
+               WHEN tm.id IS NOT NULL THEN 'Team Member'
+               ELSE COALESCE(NULLIF(TRIM(u.user_type::text), ''), 'Customer')
+             END AS user_type,
              COALESCE(NULLIF(TRIM(u.full_name), ''), NULLIF(TRIM(aen.full_name), ''), NULLIF(TRIM(tm.full_name), ''), NULLIF(TRIM(ces.applicant_name), '')) AS full_name,
              COALESCE(u.date_of_birth, aen.date_of_birth, tm.date_of_birth, ces.date_of_birth) AS date_of_birth,
              COALESCE(NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(aen.gender), ''), NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(ces.gender), '')) AS gender,
@@ -5880,7 +5892,7 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
                account_no, ifsc_code, applicant_signature_url, associate_signature_url, status
         FROM team_members
         WHERE user_id = u.user_id 
-           OR (u.user_type = 'Team Member' AND mobile_no IS NOT NULL AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(u.mobile_no, '\\D', '', 'g'), 10))
+           OR (mobile_no IS NOT NULL AND u.mobile_no IS NOT NULL AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(u.mobile_no, '\\D', '', 'g'), 10))
         ORDER BY (user_id = u.user_id) DESC, created_at DESC
         LIMIT 1
       ) tm ON TRUE
@@ -13267,7 +13279,7 @@ app.patch("/api/admin/team-members/:id/status",
         if (userId) {
           await tx`
             UPDATE users
-            SET user_type = COALESCE(user_type, 'Team Member'),
+            SET user_type = COALESCE(user_type, 'Associate'),
                 sponsor_user_id = COALESCE(sponsor_user_id, ${current.associate_id}),
                 account_status = ${targetAccountStatus},
                 is_active = ${targetIsActive},
@@ -13284,11 +13296,11 @@ app.patch("/api/admin/team-members/:id/status",
               member_id, user_type, full_name, mobile_no, email,
               pan_number, aadhar_number, sponsor_user_id, account_status, is_active, registered_at
             ) VALUES (
-              ${current.team_member_uid}, 'Team Member', ${current.full_name}, ${cleanMobile}, ${cleanEmail},
+              ${current.team_member_uid}, 'Associate', ${current.full_name}, ${cleanMobile}, ${cleanEmail},
               ${current.pan_no || null}, ${cleanAadhar}, ${current.associate_id}, ${targetAccountStatus}, ${targetIsActive}, NOW()
             )
             ON CONFLICT (mobile_no) DO UPDATE
-            SET account_status = ${targetAccountStatus}, is_active = ${targetIsActive}, user_type = 'Team Member', sponsor_user_id = ${current.associate_id}
+            SET account_status = ${targetAccountStatus}, is_active = ${targetIsActive}, user_type = 'Associate', sponsor_user_id = ${current.associate_id}
             RETURNING user_id`;
           if (newUser) {
             userId = newUser.user_id;

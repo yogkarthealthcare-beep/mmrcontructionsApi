@@ -134,7 +134,7 @@ async function generateCommissionForPayment(req, bookingId, sourceType, sourceId
     const [seller] = await db`
       SELECT user_id, account_status, user_type, sponsor_user_id
       FROM users
-      WHERE user_id = ${sellerUserId} AND user_type IN ('Associate', 'Team Member')`;
+      WHERE user_id = ${sellerUserId} AND user_type = 'Associate'`;
     if (!seller) return { generated: 0, reason: "Seller associate/team member not found" };
     if (eligibility.require_active_associate !== false && seller.account_status !== "Active") {
       return { generated: 0, reason: "Seller inactive" };
@@ -143,17 +143,11 @@ async function generateCommissionForPayment(req, bookingId, sourceType, sourceId
       return { generated: 0, reason: "Seller blacklisted" };
     }
 
-    const isTeamMemberSeller = seller.user_type === 'Team Member';
+    const [tmSellerRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} LIMIT 1`;
+    const isTeamMemberSeller = Boolean(tmSellerRow);
     let leaderUserId = isTeamMemberSeller
-      ? Number(seller.sponsor_user_id || 0)
+      ? Number(tmSellerRow?.associate_id || seller.sponsor_user_id || 0)
       : sellerUserId;
-
-    if (isTeamMemberSeller && !leaderUserId) {
-      const [tmRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} LIMIT 1`;
-      if (tmRow?.associate_id) {
-        leaderUserId = Number(tmRow.associate_id);
-      }
-    }
 
     if (engine.commission_model === "FlatTeam" || engine.commission_model === "TeamMemberModel") {
       const teamDirectPercentage = Number(engine.team_direct_percentage ?? 5);
@@ -168,18 +162,12 @@ async function generateCommissionForPayment(req, bookingId, sourceType, sourceId
 
       // Find all eligible team members under actualLeaderId
       const teamRows = actualLeaderId ? await db`
-        SELECT DISTINCT u.user_id, u.account_status, u.user_type
-        FROM users u
-        WHERE u.user_type = 'Team Member'
-          AND (
-            u.sponsor_user_id = ${actualLeaderId}
-            OR EXISTS (
-              SELECT 1 FROM team_members tm
-              WHERE tm.associate_id = ${actualLeaderId}
-                AND tm.user_id = u.user_id
-                AND tm.status IN ('approved', 'active')
-            )
-          )` : [];
+        SELECT DISTINCT tm.user_id, COALESCE(u.account_status, 'Active') AS account_status, 'Team Member' AS user_type
+        FROM team_members tm
+        LEFT JOIN users u ON tm.user_id = u.user_id
+        WHERE tm.associate_id = ${actualLeaderId}
+          AND tm.status IN ('approved', 'active', 'pending')
+          AND tm.user_id IS NOT NULL` : [];
 
       const eligibleTeamMembers = teamRows.filter(m => {
         if (Number(m.user_id) === sellerUserId) return false;
@@ -429,7 +417,7 @@ async function generateCommissionForPayment(req, bookingId, sourceType, sourceId
     const candidates = new Map();
     candidates.set(sellerUserId, 1);
 
-    if (seller.user_type === 'Team Member' && leaderUserId) {
+    if (isTeamMemberSeller && leaderUserId) {
       if (2 <= Number(engine.maximum_levels)) {
         candidates.set(leaderUserId, 2);
       }
@@ -463,7 +451,7 @@ async function generateCommissionForPayment(req, bookingId, sourceType, sourceId
       const [candidateUser] = await db`
         SELECT account_status, user_type
         FROM users
-        WHERE user_id = ${candidateUserId} AND user_type IN ('Associate', 'Team Member')`;
+        WHERE user_id = ${candidateUserId} AND user_type = 'Associate'`;
       if (!candidateUser) continue;
       if (eligibility.require_active_associate !== false && candidateUser.account_status !== "Active") continue;
       if (eligibility.exclude_blacklisted !== false && candidateUser.account_status === "Blacklisted") continue;

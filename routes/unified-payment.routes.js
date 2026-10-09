@@ -115,23 +115,17 @@ async function triggerMlmCommission(req, bookingId, sourceType, sourceId, amount
       const [seller] = await db`
         SELECT user_id, account_status, user_type, sponsor_user_id
         FROM users
-        WHERE user_id = ${sellerUserId} AND user_type IN ('Associate', 'Team Member')`;
+        WHERE user_id = ${sellerUserId} AND user_type = 'Associate'`;
       if (!seller) return { generated: 0, reason: "Seller not found", event_id: event.event_id };
       if (eligibility.require_active_associate !== false && seller.account_status !== "Active") {
         return { generated: 0, reason: "Seller inactive", event_id: event.event_id };
       }
 
-      const isTeamMemberSeller = seller.user_type === 'Team Member';
+      const [tmSellerRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} LIMIT 1`;
+      const isTeamMemberSeller = Boolean(tmSellerRow);
       let leaderUserId = isTeamMemberSeller
-        ? Number(seller.sponsor_user_id || 0)
+        ? Number(tmSellerRow?.associate_id || seller.sponsor_user_id || 0)
         : sellerUserId;
-
-      if (isTeamMemberSeller && !leaderUserId) {
-        const [tmRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} LIMIT 1`;
-        if (tmRow?.associate_id) {
-          leaderUserId = Number(tmRow.associate_id);
-        }
-      }
 
       if (engine.commission_model === "FlatTeam" || engine.commission_model === "TeamMemberModel") {
         const teamDirectPercentage = Number(engine.team_direct_percentage ?? 5);
@@ -146,18 +140,12 @@ async function triggerMlmCommission(req, bookingId, sourceType, sourceId, amount
 
         // Find all eligible team members under actualLeaderId
         const teamRows = actualLeaderId ? await db`
-          SELECT DISTINCT u.user_id, u.account_status, u.user_type
-          FROM users u
-          WHERE u.user_type = 'Team Member'
-            AND (
-              u.sponsor_user_id = ${actualLeaderId}
-              OR EXISTS (
-                SELECT 1 FROM team_members tm
-                WHERE tm.associate_id = ${actualLeaderId}
-                  AND tm.user_id = u.user_id
-                  AND tm.status IN ('approved', 'active')
-              )
-            )` : [];
+          SELECT DISTINCT tm.user_id, COALESCE(u.account_status, 'Active') AS account_status, 'Team Member' AS user_type
+          FROM team_members tm
+          LEFT JOIN users u ON tm.user_id = u.user_id
+          WHERE tm.associate_id = ${actualLeaderId}
+            AND tm.status IN ('approved', 'active', 'pending')
+            AND tm.user_id IS NOT NULL` : [];
 
         const eligibleTeamMembers = teamRows.filter(m => {
           if (Number(m.user_id) === sellerUserId) return false;
@@ -360,7 +348,7 @@ async function triggerMlmCommission(req, bookingId, sourceType, sourceId, amount
         : [];
       const candidates = new Map();
       candidates.set(sellerUserId, 1);
-      if (seller.user_type === 'Team Member' && leaderUserId) {
+      if (isTeamMemberSeller && leaderUserId) {
         if (2 <= Number(engine.maximum_levels || 10)) candidates.set(leaderUserId, 2);
         const uplines = await db`SELECT ancestor_user_id, depth FROM mlm_tree_closure WHERE descendant_user_id = ${leaderUserId} ORDER BY depth ASC`;
         for (const row of uplines) {
@@ -377,7 +365,7 @@ async function triggerMlmCommission(req, bookingId, sourceType, sourceId, amount
 
       let genCount = 0;
       for (const [candidateUserId, level] of candidates.entries()) {
-        const [candidateUser] = await db`SELECT account_status, user_type FROM users WHERE user_id = ${candidateUserId} AND user_type IN ('Associate', 'Team Member')`;
+        const [candidateUser] = await db`SELECT account_status, user_type FROM users WHERE user_id = ${candidateUserId} AND user_type = 'Associate'`;
         if (!candidateUser || (eligibility.require_active_associate !== false && candidateUser.account_status !== "Active")) continue;
         const percentage = engine.commission_model === "Upline"
           ? (level === 1 ? money(engine.direct_percentage) : money(engine.upline_percentage))
