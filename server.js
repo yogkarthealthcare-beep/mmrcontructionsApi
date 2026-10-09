@@ -27,7 +27,7 @@ import invoiceModuleRoutes from './routes/invoice-module.routes.js';
 import customerEnrollmentRoutes from './routes/customer-enrollment.routes.js';
 import associateEnrollmentRoutes from './routes/associateEnrollmentRoutes.js';
 import teamMemberRoutes from './routes/teamMemberRoutes.js';
-import { registerTeamMemberQuick } from './services/teamMemberService.js';
+import { registerTeamMemberQuick, approveTeamMemberByAssociate } from './services/teamMemberService.js';
 import receiptRoutes, { ensureReceiptsTable } from './routes/receipt.routes.js';
 import siteGalleryRoutes, { ensureSiteGalleryTable } from './routes/site-gallery.routes.js';
 import twoFactorRoutes from './routes/twoFactor.routes.js';
@@ -8602,6 +8602,40 @@ app.post(["/api/associate/team-members", "/api/associate/team-member-add"], veri
   }
 });
 
+// 1c. Associate approves their direct Team Member / Downline
+app.post(["/api/associate/team-members/:id/approve", "/api/associate/team-members/approve"], verifyUserToken, requireAssociate, async (req, res) => {
+  try {
+    const associateId = req.user.user_id;
+    const targetParam = req.params.id || req.body.id || req.body.user_id || req.body.userId;
+    if (!targetParam) {
+      return err(res, "Team member ID or User ID is required.", 400);
+    }
+    const result = await approveTeamMemberByAssociate(associateId, targetParam, req.user.full_name);
+    await syncMlmTreeAndReferrals().catch(() => {});
+    return ok(res, result, "Team Member has been successfully approved and activated.");
+  } catch (e) {
+    console.error("[Associate Approve Team Member Error]:", e);
+    return err(res, e.message || "Failed to approve team member.", 400);
+  }
+});
+
+// 1d. Associate approves their pending referral
+app.post(["/api/associate/referrals/:userId/approve", "/api/associate/referrals/approve"], verifyUserToken, requireAssociate, async (req, res) => {
+  try {
+    const associateId = req.user.user_id;
+    const targetUserId = req.params.userId || req.body.user_id || req.body.userId;
+    if (!targetUserId) {
+      return err(res, "Referred User ID is required.", 400);
+    }
+    const result = await approveTeamMemberByAssociate(associateId, targetUserId, req.user.full_name);
+    await syncMlmTreeAndReferrals().catch(() => {});
+    return ok(res, result, "Referred user account has been successfully approved and activated.");
+  } catch (e) {
+    console.error("[Associate Approve Referral Error]:", e);
+    return err(res, e.message || "Failed to approve referral.", 400);
+  }
+});
+
 // 2. Associate lists all authorized team members with plot booking & payment summary
 app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async (req, res) => {
   try {
@@ -8658,6 +8692,17 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
           sub.created_at AS enrollment_date
         FROM customer_enrollment_submissions sub
         ORDER BY sub.user_id, sub.created_at DESC
+      ),
+      tm_info AS (
+        SELECT DISTINCT ON (tm.user_id)
+          tm.id AS tm_record_id,
+          tm.user_id,
+          tm.team_member_uid,
+          tm.slot_number,
+          tm.status AS tm_status
+        FROM team_members tm
+        WHERE tm.associate_id = ${associateId}
+        ORDER BY tm.user_id, tm.created_at DESC
       )
       SELECT
         u.user_id,
@@ -8671,6 +8716,11 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
         u.registered_at,
         COALESCE(u.registered_at, u.updated_at, NOW()) AS created_at,
         MIN(d.depth) AS level,
+        -- Team Member details
+        tm.tm_record_id AS id,
+        tm.team_member_uid,
+        tm.slot_number,
+        COALESCE(tm.tm_status, CASE WHEN u.account_status = 'Active' THEN 'approved' ELSE 'pending' END) AS status,
         -- Booking details
         lb.booking_id,
         lb.booking_serial,
@@ -8695,6 +8745,7 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
         (ed.enrollment_id IS NOT NULL) AS has_enrollment
       FROM downline d
       JOIN users u ON d.user_id = u.user_id
+      LEFT JOIN tm_info tm ON u.user_id = tm.user_id
       LEFT JOIN latest_bookings lb ON u.user_id = lb.user_id
       LEFT JOIN invoice_totals it ON u.user_id = it.user_id
       LEFT JOIN enrollment_data ed ON u.user_id = ed.user_id
@@ -8702,6 +8753,7 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
       GROUP BY
         u.user_id, u.member_id, u.full_name, u.mobile_no, u.email, u.user_type,
         u.account_status, u.sponsor_user_id, u.registered_at, u.updated_at,
+        tm.tm_record_id, tm.team_member_uid, tm.slot_number, tm.tm_status,
         lb.booking_id, lb.booking_serial, lb.plot_id, lb.plot_number, lb.plot_area,
         lb.site_id, lb.site_name, lb.booking_status, lb.payment_type, lb.advance_amount,
         lb.base_price, lb.booking_date, it.total_invoiced, it.total_paid, it.total_balance,

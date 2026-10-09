@@ -1000,7 +1000,7 @@ export async function registerTeamMemberQuick(associateId: number, data: any) {
     const passwordHash = await bcrypt.hash(password, 12);
     const cleanName = normalizeHumanName(fullName);
 
-    // 5. Insert into users
+    // 5. Insert into users (Active & Approved immediately for direct associate creation)
     const [createdUser] = await tx`
       INSERT INTO users (
         member_id, user_type, full_name, mobile_no, email, password_hash,
@@ -1008,20 +1008,20 @@ export async function registerTeamMemberQuick(associateId: number, data: any) {
         registered_at, updated_at
       ) VALUES (
         ${uid}, 'Associate', ${cleanName}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
-        ${associateId}, 'Pending', true, true, true,
+        ${associateId}, 'Active', true, true, true,
         NOW(), NOW()
       )
       RETURNING user_id, member_id, user_type, full_name, email, mobile_no, account_status, registered_at
     `;
 
-    // 6. Insert into team_members
+    // 6. Insert into team_members (approved status)
     const [insertedMember] = await tx`
       INSERT INTO team_members (
         team_member_uid, associate_id, associate_name, user_id, slot_number,
         full_name, mobile_no, email_id, status, created_at, updated_at
       ) VALUES (
         ${uid}, ${associateId}, ${assocUser.full_name}, ${createdUser.user_id}, ${assignedSlot},
-        ${cleanName}, ${cleanMobile}, ${cleanEmail}, 'pending', NOW(), NOW()
+        ${cleanName}, ${cleanMobile}, ${cleanEmail}, 'approved', NOW(), NOW()
       )
       RETURNING id, team_member_uid, associate_id, associate_name, user_id, slot_number, full_name, mobile_no, email_id, status, created_at
     `;
@@ -1035,12 +1035,18 @@ export async function registerTeamMemberQuick(associateId: number, data: any) {
       `;
     }
 
-    // 8. Initialize Referral Registration
+    // 8. Initialize Referral Registration as Approved
     const [existingRef] = await tx`SELECT id FROM referral_registrations WHERE referred_user_id = ${createdUser.user_id} LIMIT 1`;
     if (!existingRef) {
       await tx`
         INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
-        VALUES (${associateId}, ${createdUser.user_id}, 'Pending', NULL)
+        VALUES (${associateId}, ${createdUser.user_id}, 'Approved', NOW())
+      `;
+    } else {
+      await tx`
+        UPDATE referral_registrations
+        SET status = 'Approved', approved_at = NOW(), sponsor_user_id = ${associateId}
+        WHERE id = ${existingRef.id}
       `;
     }
 
@@ -1063,5 +1069,153 @@ export async function registerTeamMemberQuick(associateId: number, data: any) {
 
   return createdResult;
 }
+
+/**
+ * 8. Associate approves their direct Team Member / Referral Downline
+ */
+export async function approveTeamMemberByAssociate(
+  associateId: number,
+  targetId: number | string,
+  signatoryName?: string
+) {
+  await ensureTeamMembersTable();
+  const numId = Number(targetId);
+  let approvedRecord: any = null;
+
+  await sql.begin(async (tx: any) => {
+    // 1. Find the target team_member or user record
+    let tmRow: any = null;
+    let userRow: any = null;
+
+    if (!isNaN(numId)) {
+      const [byTmId] = await tx`SELECT * FROM team_members WHERE id = ${numId} OR user_id = ${numId} LIMIT 1 FOR UPDATE`;
+      if (byTmId) tmRow = byTmId;
+
+      const [byUserId] = await tx`SELECT * FROM users WHERE user_id = ${numId} LIMIT 1 FOR UPDATE`;
+      if (byUserId) userRow = byUserId;
+    } else {
+      const [byUid] = await tx`SELECT * FROM team_members WHERE team_member_uid = ${String(targetId)} LIMIT 1 FOR UPDATE`;
+      if (byUid) tmRow = byUid;
+
+      const [byMemberId] = await tx`SELECT * FROM users WHERE member_id = ${String(targetId)} LIMIT 1 FOR UPDATE`;
+      if (byMemberId) userRow = byMemberId;
+    }
+
+    if (!tmRow && !userRow) {
+      throw new Error("Team member or user account not found.");
+    }
+
+    const userId = userRow?.user_id || tmRow?.user_id;
+
+    // 2. Authorization Verification
+    const isDirectSponsor = userRow && Number(userRow.sponsor_user_id) === Number(associateId);
+    const isDirectAssociate = tmRow && Number(tmRow.associate_id) === Number(associateId);
+    
+    let isDownline = false;
+    if (userId) {
+      const [closure] = await tx`
+        SELECT 1 FROM mlm_tree_closure
+        WHERE ancestor_user_id = ${associateId} AND descendant_user_id = ${userId}
+        LIMIT 1
+      `;
+      if (closure) isDownline = true;
+    }
+
+    if (!isDirectSponsor && !isDirectAssociate && !isDownline) {
+      throw new Error("Unauthorized: This member is not part of your authorized downline team.");
+    }
+
+    // 3. Update Users Account Status to 'Active'
+    if (userId) {
+      const [updUser] = await tx`
+        UPDATE users
+        SET
+          account_status = 'Active',
+          is_active = true,
+          sponsor_user_id = COALESCE(sponsor_user_id, ${associateId}),
+          updated_at = NOW()
+        WHERE user_id = ${userId}
+        RETURNING *
+      `;
+      if (updUser) userRow = updUser;
+    }
+
+    // 4. Update or Insert Team Member Record with Slot Number
+    if (tmRow) {
+      const [updTm] = await tx`
+        UPDATE team_members
+        SET
+          status = 'approved',
+          authorized_signatory_name = COALESCE(${signatoryName || null}, authorized_signatory_name),
+          updated_at = NOW()
+        WHERE id = ${tmRow.id}
+        RETURNING *
+      `;
+      tmRow = updTm;
+    } else if (userId && userRow) {
+      // Find occupied slots for this associate (1..10)
+      const existingMembers = await tx`
+        SELECT id, slot_number, status
+        FROM team_members
+        WHERE associate_id = ${associateId} AND status <> 'rejected'
+        ORDER BY slot_number ASC
+      `;
+      const occupiedSlots = new Set(existingMembers.map((m: any) => Number(m.slot_number)).filter(Boolean));
+      let assignedSlot: number | null = null;
+      for (let s = 1; s <= 10; s++) {
+        if (!occupiedSlots.has(s)) {
+          assignedSlot = s;
+          break;
+        }
+      }
+
+      const [assocUser] = await tx`SELECT full_name FROM users WHERE user_id = ${associateId} LIMIT 1`;
+      const [newTm] = await tx`
+        INSERT INTO team_members (
+          team_member_uid, associate_id, associate_name, user_id, slot_number,
+          full_name, mobile_no, email_id, status, created_at, updated_at
+        ) VALUES (
+          ${userRow.member_id || `MMR-TM-${userId}`}, ${associateId}, ${assocUser?.full_name || 'Associate'}, ${userId}, ${assignedSlot},
+          ${userRow.full_name}, ${userRow.mobile_no}, ${userRow.email}, 'approved', NOW(), NOW()
+        )
+        RETURNING *
+      `;
+      tmRow = newTm;
+    }
+
+    // 5. Update referral_registrations table
+    if (userId) {
+      const [existingRef] = await tx`SELECT id FROM referral_registrations WHERE referred_user_id = ${userId} LIMIT 1`;
+      if (existingRef) {
+        await tx`
+          UPDATE referral_registrations
+          SET status = 'Approved', approved_at = NOW(), sponsor_user_id = COALESCE(sponsor_user_id, ${associateId})
+          WHERE id = ${existingRef.id}
+        `;
+      } else {
+        await tx`
+          INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
+          VALUES (${associateId}, ${userId}, 'Approved', NOW())
+          ON CONFLICT DO NOTHING
+        `;
+      }
+    }
+
+    approvedRecord = {
+      user_id: userId,
+      member_id: userRow?.member_id || tmRow?.team_member_uid,
+      full_name: userRow?.full_name || tmRow?.full_name,
+      mobile_no: userRow?.mobile_no || tmRow?.mobile_no,
+      email: userRow?.email || tmRow?.email_id,
+      account_status: userRow?.account_status || 'Active',
+      status: tmRow?.status || 'approved',
+      slot_number: tmRow?.slot_number,
+      is_active: true
+    };
+  });
+
+  return approvedRecord;
+}
+
 
 
