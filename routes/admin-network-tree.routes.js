@@ -74,7 +74,7 @@ router.get('/', async (req, res) => {
           -- Level 1: Associates with sponsor_user_id IS NULL
           SELECT u.user_id, u.member_id, u.full_name, u.user_type::text AS user_type,
                  u.account_status::text AS account_status, u.sponsor_user_id,
-                 u.mobile_no, u.email, u.profile_image_url, u.registered_at,
+                 u.mobile_no, u.email, u.registered_at,
                  1 AS level,
                  ARRAY[u.user_id] AS path,
                  false AS is_cycle
@@ -90,7 +90,7 @@ router.get('/', async (req, res) => {
           -- Deeper levels (Level 2..depth)
           SELECT u.user_id, u.member_id, u.full_name, u.user_type::text AS user_type,
                  u.account_status::text AS account_status, u.sponsor_user_id,
-                 u.mobile_no, u.email, u.profile_image_url, u.registered_at,
+                 u.mobile_no, u.email, u.registered_at,
                  t.level + 1 AS level,
                  t.path || u.user_id AS path,
                  u.user_id = ANY(t.path) AS is_cycle
@@ -104,7 +104,8 @@ router.get('/', async (req, res) => {
             )
         )
         SELECT t.user_id, t.member_id, t.full_name, t.user_type, t.account_status,
-               t.sponsor_user_id, t.mobile_no, t.email, t.profile_image_url, t.registered_at, t.level,
+               t.sponsor_user_id, t.mobile_no, t.email, t.registered_at, t.level,
+               '' AS profile_image_url,
                tm.slot_number,
                sp.member_id AS sponsor_member_id, sp.full_name AS sponsor_name,
                COALESCE(ast.total_gaj_sold, 0)::numeric AS sales_gaj,
@@ -152,7 +153,7 @@ router.get('/', async (req, res) => {
           -- Level 0: The selected root user
           SELECT u.user_id, u.member_id, u.full_name, u.user_type::text AS user_type,
                  u.account_status::text AS account_status, u.sponsor_user_id,
-                 u.mobile_no, u.email, u.profile_image_url, u.registered_at,
+                 u.mobile_no, u.email, u.registered_at,
                  0 AS level,
                  ARRAY[u.user_id] AS path,
                  false AS is_cycle
@@ -164,7 +165,7 @@ router.get('/', async (req, res) => {
           -- Deeper levels (Level 1..depth)
           SELECT u.user_id, u.member_id, u.full_name, u.user_type::text AS user_type,
                  u.account_status::text AS account_status, u.sponsor_user_id,
-                 u.mobile_no, u.email, u.profile_image_url, u.registered_at,
+                 u.mobile_no, u.email, u.registered_at,
                  t.level + 1 AS level,
                  t.path || u.user_id AS path,
                  u.user_id = ANY(t.path) AS is_cycle
@@ -178,7 +179,8 @@ router.get('/', async (req, res) => {
             )
         )
         SELECT t.user_id, t.member_id, t.full_name, t.user_type, t.account_status,
-               t.sponsor_user_id, t.mobile_no, t.email, t.profile_image_url, t.registered_at, t.level,
+               t.sponsor_user_id, t.mobile_no, t.email, t.registered_at, t.level,
+               '' AS profile_image_url,
                tm.slot_number,
                sp.member_id AS sponsor_member_id, sp.full_name AS sponsor_name,
                COALESCE(ast.total_gaj_sold, 0)::numeric AS sales_gaj,
@@ -277,7 +279,8 @@ router.get('/children', async (req, res) => {
     const rows = await sql`
       SELECT u.user_id, u.member_id, u.full_name, u.user_type::text AS user_type,
              u.account_status::text AS account_status, u.sponsor_user_id,
-             u.mobile_no, u.email, u.profile_image_url, u.registered_at,
+             u.mobile_no, u.email, u.registered_at,
+             '' AS profile_image_url,
              tm.slot_number,
              sp.member_id AS sponsor_member_id, sp.full_name AS sponsor_name,
              COALESCE(ast.total_gaj_sold, 0)::numeric AS sales_gaj,
