@@ -10,9 +10,38 @@ const err = (res, message = 'Request failed', status = 400) =>
   res.status(status).json({ success: false, message });
 
 /**
+ * Escape ILIKE special wildcards (%, _, \)
+ */
+const escapeIlike = (str = '') => String(str).replace(/[%_\\]/g, '\\$&');
+
+/**
+ * Format database row with clean numeric casting
+ */
+const formatNode = (row) => ({
+  user_id: row.user_id,
+  member_id: row.member_id,
+  full_name: row.full_name,
+  user_type: row.user_type,
+  account_status: row.account_status,
+  sponsor_user_id: row.sponsor_user_id,
+  sponsor_member_id: row.sponsor_member_id || null,
+  sponsor_name: row.sponsor_name || null,
+  mobile_no: row.mobile_no || null,
+  email: row.email || null,
+  registered_at: row.registered_at || null,
+  level: Number(row.level || 0),
+  profile_image_url: row.profile_image_url || '',
+  slot_number: row.slot_number != null ? Number(row.slot_number) : null,
+  sales_gaj: Number(row.sales_gaj || 0),
+  commission_earned: Number(row.commission_earned || 0),
+  children_count: Number(row.children_count || 0),
+  downline_count: Number(row.downline_count || 0)
+});
+
+/**
  * Helper to fetch virtual Admin root details
  */
-async function getAdminVirtualNode(showCustomers = false) {
+async function getAdminVirtualNode(adminUser, showCustomers = false) {
   const [counts] = await sql`
     SELECT
       COUNT(CASE WHEN u.sponsor_user_id IS NULL AND u.user_type::text = 'Associate' THEN 1 END)::int AS top_level_count,
@@ -33,28 +62,29 @@ async function getAdminVirtualNode(showCustomers = false) {
     sponsor_member_id: null,
     sponsor_name: null,
     level: 0,
-    children_count: counts?.top_level_count || 0,
-    downline_count: counts?.total_network_count || 0,
+    children_count: Number(counts?.top_level_count || 0),
+    downline_count: Number(counts?.total_network_count || 0),
     slot_number: null,
     sales_gaj: 0,
     commission_earned: 0,
     profile_image_url: '',
-    mobile_no: '—',
-    email: 'admin@mmrconstructions.in',
-    city: 'Kanpur',
-    registered_at: '2026-01-01T00:00:00.000Z'
+    mobile_no: null,
+    email: adminUser?.email || 'admin@mmrconstructions.in',
+    city: null,
+    registered_at: null
   };
 }
 
 /**
  * 1. GET /api/admin/network-tree
- * Fetches root + descendants up to `depth` levels (default 4).
- * If root=ADMIN, includes virtual Admin node (level 0), top associates (level 1), and downlines.
+ * Fetches root + descendants up to `depth` levels (clamped to 1..6, default 4).
+ * If root=ADMIN, top level is strictly user_type = 'Associate' with sponsor_user_id IS NULL.
  */
 router.get('/', async (req, res) => {
   try {
     const rawRoot = String(req.query.root || 'ADMIN').trim();
-    const depth = Math.min(Math.max(1, parseInt(req.query.depth || '4', 10) || 4), 12);
+    // Clamp depth strictly to 1..6
+    const depth = Math.min(Math.max(1, parseInt(req.query.depth || '4', 10) || 4), 6);
     const showCustomers = String(req.query.show_customers || 'false').toLowerCase() === 'true';
 
     const isRootAdmin = rawRoot.toUpperCase() === 'ADMIN' || rawRoot === '0' || rawRoot === 'MMR-0';
@@ -67,11 +97,11 @@ router.get('/', async (req, res) => {
     let nodes = [];
 
     if (isRootAdmin) {
-      const adminRoot = await getAdminVirtualNode(showCustomers);
+      const adminRoot = await getAdminVirtualNode(req.admin, showCustomers);
 
       const rows = await sql`
         WITH RECURSIVE tree_cte AS (
-          -- Level 1: Associates with sponsor_user_id IS NULL
+          -- Level 1: Top-level Associates ONLY (sponsor_user_id IS NULL, user_type = 'Associate')
           SELECT u.user_id, u.member_id, u.full_name, u.user_type::text AS user_type,
                  u.account_status::text AS account_status, u.sponsor_user_id,
                  u.mobile_no, u.email, u.registered_at,
@@ -80,10 +110,7 @@ router.get('/', async (req, res) => {
                  false AS is_cycle
           FROM users u
           WHERE u.sponsor_user_id IS NULL
-            AND (
-              (${showCustomers} = true AND u.user_type::text IN ('Associate', 'Team Member', 'Customer'))
-              OR (${showCustomers} = false AND u.user_type::text IN ('Associate', 'Team Member'))
-            )
+            AND u.user_type::text = 'Associate'
 
           UNION ALL
 
@@ -146,7 +173,7 @@ router.get('/', async (req, res) => {
         ORDER BY t.level, COALESCE(tm.slot_number, 999), t.registered_at ASC;
       `;
 
-      nodes = [adminRoot, ...rows];
+      nodes = [adminRoot, ...rows.map(formatNode)];
     } else {
       const rows = await sql`
         WITH RECURSIVE tree_cte AS (
@@ -224,7 +251,7 @@ router.get('/', async (req, res) => {
       if (rows.length === 0) {
         return err(res, 'Root user not found', 404);
       }
-      nodes = rows;
+      nodes = rows.map(formatNode);
     }
 
     return ok(res, {
@@ -259,10 +286,7 @@ router.get('/children', async (req, res) => {
     }
 
     const whereCondition = isParentAdmin
-      ? sql`u.sponsor_user_id IS NULL AND (
-          (${showCustomers} = true AND u.user_type::text IN ('Associate', 'Team Member', 'Customer'))
-          OR (${showCustomers} = false AND u.user_type::text = 'Associate')
-        )`
+      ? sql`u.sponsor_user_id IS NULL AND u.user_type::text = 'Associate'`
       : sql`u.sponsor_user_id = ${parentUserId} AND (
           (${showCustomers} = true AND u.user_type::text IN ('Associate', 'Team Member', 'Customer'))
           OR (${showCustomers} = false AND u.user_type::text IN ('Associate', 'Team Member'))
@@ -328,7 +352,7 @@ router.get('/children', async (req, res) => {
       total,
       page,
       pageSize,
-      items: rows
+      items: rows.map(formatNode)
     });
   } catch (e) {
     console.error('[Admin Network Tree Children Error]:', e);
@@ -339,15 +363,17 @@ router.get('/children', async (req, res) => {
 /**
  * 3. GET /api/admin/network-tree/search
  * Server-side search by member_id, full_name, mobile_no, and sponsor member_id.
+ * Requires minimum 2 characters. Escapes wildcards in search pattern. Fully parameterized.
  */
 router.get('/search', async (req, res) => {
   try {
-    const q = String(req.query.q || '').trim();
-    if (!q || q.length < 2) {
+    const rawQ = String(req.query.q || '').trim();
+    if (!rawQ || rawQ.length < 2) {
       return ok(res, []);
     }
 
-    const term = `%${q}%`;
+    const escapedQ = escapeIlike(rawQ);
+    const term = `%${escapedQ}%`;
     const limit = Math.min(Math.max(1, parseInt(req.query.limit || '20', 10) || 20), 50);
 
     const matches = await sql`
@@ -372,7 +398,7 @@ router.get('/search', async (req, res) => {
       )
       AND u.user_type::text IN ('Associate', 'Team Member')
       ORDER BY 
-        CASE WHEN u.member_id ILIKE ${q} THEN 0
+        CASE WHEN u.member_id ILIKE ${rawQ} THEN 0
              WHEN u.member_id ILIKE ${term} THEN 1
              WHEN u.full_name ILIKE ${term} THEN 2
              ELSE 3
@@ -381,7 +407,7 @@ router.get('/search', async (req, res) => {
       LIMIT ${limit};
     `;
 
-    return ok(res, matches);
+    return ok(res, matches.map(formatNode));
   } catch (e) {
     console.error('[Admin Network Tree Search Error]:', e);
     return err(res, e.message || 'Failed to execute search');
