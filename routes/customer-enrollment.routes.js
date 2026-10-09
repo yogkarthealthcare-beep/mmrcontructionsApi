@@ -453,6 +453,12 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
       if (user_id) {
         await tx`
           UPDATE users SET
+            user_type = 'Customer',
+            member_id = CASE 
+              WHEN member_id IS NULL OR member_id = '' OR member_id ILIKE 'MMR0%' OR member_id ILIKE 'MMR-ASC-%'
+              THEN CONCAT('MMR-CUS-', LPAD(user_id::text, 5, '0'))
+              ELSE member_id
+            END,
             enrollment_status = COALESCE(enrollment_status, 'Pending'),
             gender = COALESCE(${b.gender || null}, gender),
             date_of_birth = COALESCE(${dobVal || null}, date_of_birth),

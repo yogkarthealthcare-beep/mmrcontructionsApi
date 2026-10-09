@@ -8652,6 +8652,10 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
         SELECT user_id, 1 AS depth
         FROM users
         WHERE sponsor_user_id = ${associateId}
+        UNION
+        SELECT user_id, 1 AS depth
+        FROM team_members
+        WHERE associate_id = ${associateId} AND user_id IS NOT NULL
       ),
       latest_bookings AS (
         SELECT DISTINCT ON (b.user_id)
@@ -9296,7 +9300,12 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
         OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id)
       )`);
     } else if (ut === "customer") {
-      where.push(`(LOWER(u.user_type::text) = 'customer' OR u.member_id ILIKE 'MMR-CUS-%' OR u.member_id ILIKE 'CUS-%')`);
+      where.push(`(
+        LOWER(u.user_type::text) = 'customer' 
+        OR u.member_id ILIKE 'MMR-CUS-%' 
+        OR u.member_id ILIKE 'CUS-%'
+        OR EXISTS (SELECT 1 FROM customer_enrollment_submissions ces WHERE ces.user_id = u.user_id OR (u.mobile_no IS NOT NULL AND ces.mobile_1 = u.mobile_no))
+      )`);
     } else if (ut === "investor") {
       where.push(`(LOWER(u.user_type::text) = 'investor' OR u.member_id ILIKE 'MMR-INV-%' OR u.member_id ILIKE 'INV-%')`);
     } else {
