@@ -9257,7 +9257,7 @@ const adminUsersResponse = (res, rows, totalRecords, page, pageSize) => {
   });
 };
 
-const getAdminUsersPage = async (query, defaults = {}) => {
+const getAdminUsersPage = async (query = {}, defaults = {}) => {
   const page = Math.max(1, Number(query.page || defaults.page || 1));
   const pageSize = Math.min(100, Math.max(1, Number(query.pageSize || query.limit || defaults.pageSize || 20)));
   const offset = (page - 1) * pageSize;
@@ -9271,9 +9271,12 @@ const getAdminUsersPage = async (query, defaults = {}) => {
     where.push(condition.replace("?", `$${params.length}`));
   };
 
-  if (defaults.statuses?.length) {
-    params.push(defaults.statuses);
-    where.push(`u.account_status::text = ANY($${params.length})`);
+  if (defaults.statuses && Array.isArray(defaults.statuses) && defaults.statuses.length > 0) {
+    const statusPlaceholders = defaults.statuses.map(s => {
+      params.push(s);
+      return `$${params.length}`;
+    }).join(", ");
+    where.push(`u.account_status::text IN (${statusPlaceholders})`);
   }
 
   if (query.status) add("u.account_status::text = ?", query.status);
@@ -9313,50 +9316,78 @@ const getAdminUsersPage = async (query, defaults = {}) => {
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const rows = await sql.unsafe(`
-    SELECT u.user_id,
-           CASE 
-             WHEN u.member_id IS NOT NULL AND u.member_id != '' THEN u.member_id
-             WHEN LOWER(u.user_type::TEXT) = 'associate' THEN CONCAT('MMR-ASC-', LPAD(u.user_id::text, 5, '0'))
-             WHEN LOWER(u.user_type::TEXT) = 'team member' THEN CONCAT('MMR-TM-', LPAD(u.user_id::text, 5, '0'))
-             ELSE CONCAT('MMR-CUS-', LPAD(u.user_id::text, 5, '0'))
-           END AS member_id,
-           u.user_type, u.full_name, u.mobile_no,
-           u.email, u.account_status, u.registered_at, u.updated_at,
-           COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
-           CASE WHEN LOWER(COALESCE(ces.application_status, u.enrollment_status, '')) IN ('completed', 'approved') THEN TRUE ELSE FALSE END AS is_verified,
-           COALESCE(pa.address_line1, ces.permanent_address, ces.present_address) AS address,
-           COALESCE(pa.city, ces.permanent_city, ces.present_city) AS city,
-           COALESCE(pa.state, ces.permanent_state_pin, ces.present_state_pin) AS state,
-           COALESCE(pa.pin_code, ces.permanent_state_pin, ces.present_state_pin) AS pin_code,
-           u.invitation_code, sp.full_name AS sponsor_name,
-           COALESCE(doc.doc_count, 0)::int AS doc_count
-    FROM users u
-    LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
-    LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
-    LEFT JOIN (
-      SELECT DISTINCT ON (user_id) user_id, permanent_address, present_address, permanent_city, present_city, permanent_state_pin, present_state_pin
-      FROM customer_enrollment_submissions
-      ORDER BY user_id, created_at DESC
-    ) ces ON ces.user_id = u.user_id
-    LEFT JOIN (
-      SELECT user_id, COUNT(*) AS doc_count
-      FROM user_documents
-      WHERE is_active = TRUE
-      GROUP BY user_id
-    ) doc ON doc.user_id = u.user_id
-    ${whereSql}
-    ORDER BY CASE WHEN u.user_id = 1 THEN 0 ELSE 1 END, ${sortBy} ${sortDir}, u.user_id DESC
-    LIMIT $${params.length + 1} OFFSET $${params.length + 2}
-  `, [...params, pageSize, offset]);
 
-  const [total] = await sql.unsafe(`
-    SELECT COUNT(*)::int AS count
-    FROM users u
-    ${whereSql}
-  `, params);
+  try {
+    const rows = await sql.unsafe(`
+      SELECT u.user_id,
+             CASE 
+               WHEN u.member_id IS NOT NULL AND u.member_id != '' THEN u.member_id
+               WHEN LOWER(u.user_type::TEXT) = 'associate' THEN CONCAT('MMR-ASC-', LPAD(u.user_id::text, 5, '0'))
+               WHEN LOWER(u.user_type::TEXT) = 'team member' THEN CONCAT('MMR-TM-', LPAD(u.user_id::text, 5, '0'))
+               ELSE CONCAT('MMR-CUS-', LPAD(u.user_id::text, 5, '0'))
+             END AS member_id,
+             u.user_type, u.full_name, u.mobile_no,
+             u.email, u.account_status, u.registered_at, u.updated_at,
+             COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
+             CASE WHEN LOWER(COALESCE(ces.application_status, u.enrollment_status, '')) IN ('completed', 'approved') THEN TRUE ELSE FALSE END AS is_verified,
+             COALESCE(pa.address_line1, ces.permanent_address, ces.present_address) AS address,
+             COALESCE(pa.city, ces.permanent_city, ces.present_city) AS city,
+             COALESCE(pa.state, ces.permanent_state_pin, ces.present_state_pin) AS state,
+             COALESCE(pa.pin_code, ces.permanent_state_pin, ces.present_state_pin) AS pin_code,
+             u.invitation_code, sp.full_name AS sponsor_name,
+             COALESCE(doc.doc_count, 0)::int AS doc_count
+      FROM users u
+      LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
+      LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
+      LEFT JOIN (
+        SELECT DISTINCT ON (user_id) user_id, permanent_address, present_address, permanent_city, present_city, permanent_state_pin, present_state_pin
+        FROM customer_enrollment_submissions
+        ORDER BY user_id, created_at DESC
+      ) ces ON ces.user_id = u.user_id
+      LEFT JOIN (
+        SELECT user_id, COUNT(*) AS doc_count
+        FROM user_documents
+        WHERE is_active = TRUE
+        GROUP BY user_id
+      ) doc ON doc.user_id = u.user_id
+      ${whereSql}
+      ORDER BY CASE WHEN u.user_id = 1 THEN 0 ELSE 1 END, ${sortBy} ${sortDir}, u.user_id DESC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `, [...params, pageSize, offset]);
 
-  return { rows, totalRecords: Number(total?.count || 0), page, pageSize };
+    const [total] = await sql.unsafe(`
+      SELECT COUNT(*)::int AS count
+      FROM users u
+      ${whereSql}
+    `, params);
+
+    return { rows, totalRecords: Number(total?.count || 0), page, pageSize };
+  } catch (errPrimary) {
+    console.warn("[getAdminUsersPage primary query error, using fallback query]:", errPrimary.message);
+    const fallbackRows = await sql.unsafe(`
+      SELECT u.user_id,
+             COALESCE(u.member_id, CONCAT('MMR-', u.user_type, '-', LPAD(u.user_id::text, 5, '0'))) AS member_id,
+             u.user_type, u.full_name, u.mobile_no,
+             u.email, u.account_status, u.registered_at, u.updated_at,
+             COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
+             COALESCE(u.is_verified, FALSE) AS is_verified,
+             u.invitation_code, sp.full_name AS sponsor_name,
+             0 AS doc_count
+      FROM users u
+      LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
+      ${whereSql}
+      ORDER BY CASE WHEN u.user_id = 1 THEN 0 ELSE 1 END, ${sortBy} ${sortDir}, u.user_id DESC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `, [...params, pageSize, offset]);
+
+    const [fallbackTotal] = await sql.unsafe(`
+      SELECT COUNT(*)::int AS count
+      FROM users u
+      ${whereSql}
+    `, params);
+
+    return { rows: fallbackRows, totalRecords: Number(fallbackTotal?.count || 0), page, pageSize };
+  }
 };
 
 const adminInquiriesResponse = (res, rows, totalRecords, page, pageSize, counts = []) => {
@@ -9632,7 +9663,7 @@ app.delete("/api/admin/inquiries/:id",
 
 app.get("/api/admin/users/pending",
   verifyAdminToken,
-  role("SuperAdmin", "SupportStaff"),
+  role("SuperAdmin", "Admin", "SupportStaff", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
       const result = await getAdminUsersPage(req.query, {
@@ -9642,6 +9673,7 @@ app.get("/api/admin/users/pending",
       });
       return adminUsersResponse(res, result.rows, result.totalRecords, result.page, result.pageSize);
     } catch (e) {
+      console.error("[Admin Pending Users Error]", e);
       return err(res, e.message);
     }
   }
@@ -9649,12 +9681,13 @@ app.get("/api/admin/users/pending",
 
 app.get("/api/admin/users",
   verifyAdminToken,
-  role("SuperAdmin", "SupportStaff"),
+  role("SuperAdmin", "Admin", "SupportStaff", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
       const result = await getAdminUsersPage(req.query);
       return adminUsersResponse(res, result.rows, result.totalRecords, result.page, result.pageSize);
     } catch (e) {
+      console.error("[Admin Users Error]", e);
       return err(res, e.message);
     }
   }
@@ -9662,7 +9695,7 @@ app.get("/api/admin/users",
 
 app.get("/api/admin/customers",
   verifyAdminToken,
-  role("SuperAdmin", "SupportStaff"),
+  role("SuperAdmin", "Admin", "SupportStaff", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
       const result = await getAdminUsersPage(
@@ -9671,6 +9704,7 @@ app.get("/api/admin/customers",
       );
       return adminUsersResponse(res, result.rows, result.totalRecords, result.page, result.pageSize);
     } catch (e) {
+      console.error("[Admin Customers Error]", e);
       return err(res, e.message);
     }
   }
@@ -10100,17 +10134,17 @@ app.delete("/api/admin/customers/:id",
 
 app.get("/api/admin/users/:id",
   verifyAdminToken,
-  role("SuperAdmin", "SupportStaff"),
+  role("SuperAdmin", "Admin", "SupportStaff", "FinanceManager", "SiteManager"),
   async (req, res) => {
     try {
       const uid = req.params.id;
       const [user] = await sql`SELECT * FROM users WHERE user_id = ${uid}`;
       if (!user) return err(res, "User not found", 404);
 
-      let [address] = await sql`SELECT * FROM user_addresses WHERE user_id = ${uid} AND address_type = 'Permanent'`;
-      let [bank] = await sql`SELECT * FROM user_bank_details WHERE user_id = ${uid}`;
-      let [nominee] = await sql`SELECT * FROM user_nominees WHERE user_id = ${uid}`;
-      const rawDocuments = await sql`SELECT * FROM user_documents WHERE user_id = ${uid} AND is_active = TRUE`;
+      let [address] = await sql`SELECT * FROM user_addresses WHERE user_id = ${uid} AND address_type = 'Permanent'`.catch(() => []);
+      let [bank] = await sql`SELECT * FROM user_bank_details WHERE user_id = ${uid}`.catch(() => []);
+      let [nominee] = await sql`SELECT * FROM user_nominees WHERE user_id = ${uid}`.catch(() => []);
+      const rawDocuments = await sql`SELECT * FROM user_documents WHERE user_id = ${uid} AND (is_active = TRUE OR is_active IS NULL)`.catch(() => []);
       const publicBase = (process.env.PUBLIC_API_URL || process.env.API_BASE_URL || "https://api.mmrconstructions.in").replace(/\/$/, "");
 
       const normalizeDocUrl = (urlOrPath) => {
@@ -10136,143 +10170,148 @@ app.get("/api/admin/users/:id",
       });
 
       // Fallback 1: Customer Enrollment Submissions
-      const [custSub] = await sql`
-        SELECT * FROM customer_enrollment_submissions 
-        WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}
-        ORDER BY created_at DESC LIMIT 1
-      `;
-      if (custSub) {
-        if (!address || (!address.address_line1 && !address.city && !address.state && !address.pin_code)) {
-          address = {
-            address_id: address?.address_id || null,
-            user_id: uid,
-            address_type: 'Permanent',
-            address_line1: custSub.permanent_address || custSub.present_address || null,
-            address_line2: null,
-            city: custSub.permanent_city || custSub.present_city || null,
-            state: custSub.permanent_state_pin || custSub.present_state_pin || null,
-            pin_code: custSub.permanent_state_pin || custSub.present_state_pin || null,
-            country: 'India'
-          };
+      try {
+        const [custSub] = await sql`
+          SELECT * FROM customer_enrollment_submissions 
+          WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}
+          ORDER BY created_at DESC LIMIT 1
+        `;
+        if (custSub) {
+          if (!address || (!address.address_line1 && !address.city && !address.state && !address.pin_code)) {
+            address = {
+              address_id: address?.address_id || null,
+              user_id: uid,
+              address_type: 'Permanent',
+              address_line1: custSub.permanent_address || custSub.present_address || null,
+              address_line2: null,
+              city: custSub.permanent_city || custSub.present_city || null,
+              state: custSub.permanent_state_pin || custSub.present_state_pin || null,
+              pin_code: custSub.permanent_state_pin || custSub.present_state_pin || null,
+              country: 'India'
+            };
+          }
+          if (!bank || (!bank.account_number && !bank.ifsc_code && !bank.account_holder_name && !bank.bank_name)) {
+            bank = {
+              bank_detail_id: bank?.bank_detail_id || null,
+              user_id: uid,
+              account_holder_name: custSub.acc_holder_name || user.full_name,
+              account_number: custSub.acc_number || null,
+              ifsc_code: custSub.ifsc_code || null,
+              branch_name: custSub.drawn_bank_branch || custSub.acc_bank_branch || null,
+              bank_name: custSub.acc_bank_branch || custSub.drawn_bank_branch || null,
+              is_verified: true
+            };
+          }
+          if (!nominee || (!nominee.nominee_name && !nominee.relationship)) {
+            const [custNom] = await sql`
+              SELECT * FROM customer_nominees 
+              WHERE submission_id = ${custSub.id} 
+              ORDER BY created_at ASC LIMIT 1
+            `.catch(() => []);
+            if (custNom || custSub.co_applicant_name) {
+              nominee = {
+                nominee_id: nominee?.nominee_id || null,
+                user_id: uid,
+                nominee_name: custNom?.nominee_name || custSub.co_applicant_name || null,
+                relationship: custNom?.relation || custSub.co_relation || null,
+                nominee_mobile: custSub.co_mobile || custSub.mobile_2 || null,
+                aadhar_number: custNom?.aadhar_no || custSub.co_aadhar_no || null,
+                date_of_birth: custNom?.age_dob || custSub.co_date_of_birth || null
+              };
+            }
+          }
         }
-        if (!bank || (!bank.account_number && !bank.ifsc_code && !bank.account_holder_name && !bank.bank_name)) {
-          bank = {
-            bank_detail_id: bank?.bank_detail_id || null,
-            user_id: uid,
-            account_holder_name: custSub.acc_holder_name || user.full_name,
-            account_number: custSub.acc_number || null,
-            ifsc_code: custSub.ifsc_code || null,
-            branch_name: custSub.drawn_bank_branch || custSub.acc_bank_branch || null,
-            bank_name: custSub.acc_bank_branch || custSub.drawn_bank_branch || null,
-            is_verified: true
-          };
-        }
-        if (!nominee || (!nominee.nominee_name && !nominee.relationship)) {
-          const [custNom] = await sql`
-            SELECT * FROM customer_nominees 
-            WHERE submission_id = ${custSub.id} 
-            ORDER BY created_at ASC LIMIT 1
-          `;
-          if (custNom || custSub.co_applicant_name) {
+      } catch (_) {}
+
+      // Fallback 2: Associate Enrollment Submissions
+      try {
+        const [assoc] = await sql`
+          SELECT ae.*, aa.local_address AS perm_address, aa.city AS perm_city, aa.state AS perm_state, aa.pin_code AS perm_pin,
+                 ab.bank_name, ab.account_holder_name, ab.account_no, ab.ifsc_code, ab.branch_name,
+                 an.nominee_name, an.relationship AS nom_rel
+          FROM associate_enrollment ae
+          LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
+          LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
+          LEFT JOIN associate_nominee an ON an.associate_id = ae.id
+          WHERE LOWER(ae.email) = LOWER(${user.email || ''}) OR ae.contact_no_1 = ${user.mobile_no || ''}
+          ORDER BY ae.created_at DESC LIMIT 1
+        `;
+        if (assoc) {
+          if (!address || (!address.address_line1 && !address.city && !address.state && !address.pin_code)) {
+            address = {
+              address_id: address?.address_id || null,
+              user_id: uid,
+              address_type: 'Permanent',
+              address_line1: assoc.perm_address || null,
+              city: assoc.perm_city || null,
+              state: assoc.perm_state || null,
+              pin_code: assoc.perm_pin || null,
+              country: 'India'
+            };
+          }
+          if (!bank || (!bank.account_number && !bank.ifsc_code)) {
+            bank = {
+              bank_detail_id: bank?.bank_detail_id || null,
+              user_id: uid,
+              account_holder_name: assoc.account_holder_name || user.full_name,
+              account_number: assoc.account_no || null,
+              ifsc_code: assoc.ifsc_code || null,
+              branch_name: assoc.branch_name || null,
+              bank_name: assoc.bank_name || null,
+              is_verified: true
+            };
+          }
+          if (!nominee || !nominee.nominee_name) {
             nominee = {
               nominee_id: nominee?.nominee_id || null,
               user_id: uid,
-              nominee_name: custNom?.nominee_name || custSub.co_applicant_name || null,
-              relationship: custNom?.relation || custSub.co_relation || null,
-              nominee_mobile: custSub.co_mobile || custSub.mobile_2 || null,
-              aadhar_number: custNom?.aadhar_no || custSub.co_aadhar_no || null,
-              date_of_birth: custNom?.age_dob || custSub.co_date_of_birth || null
+              nominee_name: assoc.nominee_name || null,
+              relationship: assoc.nom_rel || null,
+              nominee_mobile: null
             };
           }
+          if (assoc.applicant_photo_path && !documents.some(d => d.document_type === 'ProfilePhoto' || d.document_type === 'ApplicantPhoto')) {
+            const photoUrl = normalizeDocUrl(assoc.applicant_photo_path);
+            documents.push({
+              document_id: `assoc_photo_${assoc.id}`,
+              user_id: uid,
+              document_type: 'ProfilePhoto',
+              file_path: photoUrl,
+              document_path: photoUrl,
+              url: photoUrl,
+              file_name: 'Applicant Photo'
+            });
+          }
+          if (assoc.nominee_photo_path && !documents.some(d => d.document_type === 'NomineePhoto')) {
+            const nomUrl = normalizeDocUrl(assoc.nominee_photo_path);
+            documents.push({
+              document_id: `assoc_nom_${assoc.id}`,
+              user_id: uid,
+              document_type: 'NomineePhoto',
+              file_path: nomUrl,
+              document_path: nomUrl,
+              url: nomUrl,
+              file_name: 'Nominee Photo'
+            });
+          }
+          if (assoc.applicant_signature_path && !documents.some(d => d.document_type === 'Signature')) {
+            const sigUrl = normalizeDocUrl(assoc.applicant_signature_path);
+            documents.push({
+              document_id: `assoc_sig_${assoc.id}`,
+              user_id: uid,
+              document_type: 'Signature',
+              file_path: sigUrl,
+              document_path: sigUrl,
+              url: sigUrl,
+              file_name: 'Applicant Signature'
+            });
+          }
         }
-      }
-
-      // Fallback 2: Associate Enrollment Submissions
-      const [assoc] = await sql`
-        SELECT ae.*, aa.local_address AS perm_address, aa.city AS perm_city, aa.state AS perm_state, aa.pin_code AS perm_pin,
-               ab.bank_name, ab.account_holder_name, ab.account_no, ab.ifsc_code, ab.branch_name,
-               an.nominee_name, an.relationship AS nom_rel
-        FROM associate_enrollment ae
-        LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
-        LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
-        LEFT JOIN associate_nominee an ON an.associate_id = ae.id
-        WHERE LOWER(ae.email) = LOWER(${user.email || ''}) OR ae.contact_no_1 = ${user.mobile_no || ''}
-        ORDER BY ae.created_at DESC LIMIT 1
-      `;
-      if (assoc) {
-        if (!address || (!address.address_line1 && !address.city && !address.state && !address.pin_code)) {
-          address = {
-            address_id: address?.address_id || null,
-            user_id: uid,
-            address_type: 'Permanent',
-            address_line1: assoc.perm_address || null,
-            city: assoc.perm_city || null,
-            state: assoc.perm_state || null,
-            pin_code: assoc.perm_pin || null,
-            country: 'India'
-          };
-        }
-        if (!bank || (!bank.account_number && !bank.ifsc_code)) {
-          bank = {
-            bank_detail_id: bank?.bank_detail_id || null,
-            user_id: uid,
-            account_holder_name: assoc.account_holder_name || user.full_name,
-            account_number: assoc.account_no || null,
-            ifsc_code: assoc.ifsc_code || null,
-            branch_name: assoc.branch_name || null,
-            bank_name: assoc.bank_name || null,
-            is_verified: true
-          };
-        }
-        if (!nominee || !nominee.nominee_name) {
-          nominee = {
-            nominee_id: nominee?.nominee_id || null,
-            user_id: uid,
-            nominee_name: assoc.nominee_name || null,
-            relationship: assoc.nom_rel || null,
-            nominee_mobile: null
-          };
-        }
-        if (assoc.applicant_photo_path && !documents.some(d => d.document_type === 'ProfilePhoto' || d.document_type === 'ApplicantPhoto')) {
-          const photoUrl = normalizeDocUrl(assoc.applicant_photo_path);
-          documents.push({
-            document_id: `assoc_photo_${assoc.id}`,
-            user_id: uid,
-            document_type: 'ProfilePhoto',
-            file_path: photoUrl,
-            document_path: photoUrl,
-            url: photoUrl,
-            file_name: 'Applicant Photo'
-          });
-        }
-        if (assoc.nominee_photo_path && !documents.some(d => d.document_type === 'NomineePhoto')) {
-          const nomUrl = normalizeDocUrl(assoc.nominee_photo_path);
-          documents.push({
-            document_id: `assoc_nom_${assoc.id}`,
-            user_id: uid,
-            document_type: 'NomineePhoto',
-            file_path: nomUrl,
-            document_path: nomUrl,
-            url: nomUrl,
-            file_name: 'Nominee Photo'
-          });
-        }
-        if (assoc.applicant_signature_path && !documents.some(d => d.document_type === 'Signature')) {
-          const sigUrl = normalizeDocUrl(assoc.applicant_signature_path);
-          documents.push({
-            document_id: `assoc_sig_${assoc.id}`,
-            user_id: uid,
-            document_type: 'Signature',
-            file_path: sigUrl,
-            document_path: sigUrl,
-            url: sigUrl,
-            file_name: 'Applicant Signature'
-          });
-        }
-      }
+      } catch (_) {}
 
       return ok(res, { ...user, address, bank, nominee, documents });
     } catch (e) {
+      console.error("[Admin Get User Error]", e);
       return err(res, e.message);
     }
   }
@@ -10280,14 +10319,14 @@ app.get("/api/admin/users/:id",
 
 app.post("/api/admin/users/:id/approve",
   verifyAdminToken,
-  role("SuperAdmin"),
+  role("SuperAdmin", "Admin", "SupportStaff"),
   async (req, res) => {
     try {
-      await requireMlmSchema();
+      await requireMlmSchema().catch(() => {});
       const uid = req.params.id;
       const { verify_note } = req.body;
       const [user] = await sql`
-        SELECT user_id, user_type, full_name, account_status, member_id, invitation_code
+        SELECT user_id, user_type, full_name, email, mobile_no, account_status, member_id, invitation_code
         FROM users
         WHERE user_id = ${uid}`;
       if (!user) return err(res, "User not found", 404);
@@ -10300,6 +10339,7 @@ app.post("/api/admin/users/:id/approve",
       await sql`
         UPDATE users SET
           account_status = 'Active',
+          enrollment_status = 'Completed',
           member_id = ${memberId},
           invitation_code = ${user.user_type === "Associate" ? invCode : user.invitation_code},
           is_verified = TRUE,
@@ -10307,6 +10347,13 @@ app.post("/api/admin/users/:id/approve",
           approved_at = NOW(),
           updated_at = NOW()
         WHERE user_id = ${uid}`;
+
+      // Synchronize associated document status & KYC profiles
+      await sql`UPDATE user_documents SET review_status = 'Approved', is_active = TRUE, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+      await sql`UPDATE user_kyc_profiles SET status = 'Approved', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+      await sql`UPDATE customer_enrollment_submissions SET application_status = 'Approved', updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}`.catch(() => {});
+      await sql`UPDATE associate_enrollment SET status = 'Approved', is_verified = TRUE, updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email) = LOWER(${user.email || ''}) OR contact_no_1 = ${user.mobile_no || ''}`.catch(() => {});
+      await sql`UPDATE team_members SET status = 'active', updated_at = NOW() WHERE user_id = ${uid} OR (mobile_no IS NOT NULL AND ${user.mobile_no || ''} != '' AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(${user.mobile_no || ''}, '\\D', '', 'g'), 10))`.catch(() => {});
 
       // For associate: insert tracker + MLM node
       if (user.user_type === "Associate") {
@@ -10351,11 +10398,12 @@ app.post("/api/admin/users/:id/approve",
                                 target_table, target_record_id, new_value)
         VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
                 'UserApproval', 'Approved', 'users', ${uid},
-                ${JSON.stringify({ member_id: memberId, note: verify_note || "" })})`;
+                ${JSON.stringify({ member_id: memberId, note: verify_note || "" })})`.catch(() => {});
 
       return ok(res, { member_id: memberId, invitation_code: invCode },
         `User and KYC documents approved successfully. Member ID: ${memberId}`);
     } catch (e) {
+      console.error("[Approve User Error]", e);
       return err(res, e.message);
     }
   }
@@ -10363,7 +10411,7 @@ app.post("/api/admin/users/:id/approve",
 
 app.post("/api/admin/users/:id/reject",
   verifyAdminToken,
-  role("SuperAdmin"),
+  role("SuperAdmin", "Admin", "SupportStaff"),
   async (req, res) => {
     try {
       const uid = req.params.id;
@@ -10377,15 +10425,18 @@ app.post("/api/admin/users/:id/reject",
           updated_at = NOW()
         WHERE user_id = ${uid}`;
 
+      await sql`UPDATE user_documents SET review_status = 'Rejected', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+
       await sql`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action,
                                target_table, target_record_id, new_value)
         VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
                 'UserApproval', 'Rejected', 'users', ${uid},
-                ${JSON.stringify({ reason: rejection_reason, custom: rejection_custom })})`;
+                ${JSON.stringify({ reason: rejection_reason, custom: rejection_custom })})`.catch(() => {});
 
       return ok(res, {}, "User rejected");
     } catch (e) {
+      console.error("[Reject User Error]", e);
       return err(res, e.message);
     }
   }
@@ -10393,7 +10444,7 @@ app.post("/api/admin/users/:id/reject",
 
 app.post("/api/admin/users/:id/request-info",
   verifyAdminToken,
-  role("SuperAdmin"),
+  role("SuperAdmin", "Admin", "SupportStaff"),
   async (req, res) => {
     try {
       const { message } = req.body;
@@ -10404,6 +10455,7 @@ app.post("/api/admin/users/:id/request-info",
         WHERE user_id = ${req.params.id}`;
       return ok(res, {}, "Info requested from user");
     } catch (e) {
+      console.error("[Request Info Error]", e);
       return err(res, e.message);
     }
   }
@@ -10411,7 +10463,7 @@ app.post("/api/admin/users/:id/request-info",
 
 app.post("/api/admin/users/:id/blacklist",
   verifyAdminToken,
-  role("SuperAdmin"),
+  role("SuperAdmin", "Admin"),
   async (req, res) => {
     try {
       const { reason } = req.body;
@@ -10419,9 +10471,10 @@ app.post("/api/admin/users/:id/blacklist",
       await sql`UPDATE users SET account_status = 'Blacklisted', updated_at = NOW() WHERE user_id = ${req.params.id}`;
       await sql`
         INSERT INTO blacklist_registry (user_id, blacklisted_by_admin_id, blacklist_reason)
-        VALUES (${req.params.id}, ${req.admin.admin_id}, ${reason})`;
+        VALUES (${req.params.id}, ${req.admin.admin_id}, ${reason})`.catch(() => {});
       return ok(res, {}, "User blacklisted");
     } catch (e) {
+      console.error("[Blacklist User Error]", e);
       return err(res, e.message);
     }
   }
