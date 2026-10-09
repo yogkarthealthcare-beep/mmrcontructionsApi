@@ -52,7 +52,7 @@ export async function ensureTeamMembersTable(): Promise<void> {
     await sql`ALTER TABLE team_members ADD COLUMN IF NOT EXISTS slot_number SMALLINT`.catch(() => {});
     await sql`ALTER TABLE team_members DROP CONSTRAINT IF EXISTS team_members_slot_number_check`.catch(() => {});
     await sql`ALTER TABLE team_members DROP CONSTRAINT IF EXISTS chk_team_members_slot`.catch(() => {});
-    await sql`ALTER TABLE team_members ADD CONSTRAINT team_members_slot_number_check CHECK (slot_number BETWEEN 1 AND 11)`.catch(() => {});
+    await sql`ALTER TABLE team_members ADD CONSTRAINT team_members_slot_number_check CHECK (slot_number BETWEEN 1 AND 10)`.catch(() => {});
     await sql`ALTER TABLE team_members ALTER COLUMN father_husband_name DROP NOT NULL`.catch(() => {});
     await sql`ALTER TABLE team_members ALTER COLUMN date_of_birth DROP NOT NULL`.catch(() => {});
     await sql`ALTER TABLE team_members ALTER COLUMN gender DROP NOT NULL`.catch(() => {});
@@ -363,13 +363,13 @@ export async function createTeamMemberRecord(
       }
     }
 
-    // Determine assigned slot
+    // Determine assigned slot (1 to 10 direct members, 11 total with Team Lead)
     let assignedSlot: number | null = existingTm ? Number(existingTm.slot_number) : null;
-    if (!assignedSlot && data.slotNumber && Number(data.slotNumber) >= 1 && Number(data.slotNumber) <= 11 && !occupiedSlots.has(Number(data.slotNumber))) {
+    if (!assignedSlot && data.slotNumber && Number(data.slotNumber) >= 1 && Number(data.slotNumber) <= 10 && !occupiedSlots.has(Number(data.slotNumber))) {
       assignedSlot = Number(data.slotNumber);
     }
     if (!assignedSlot) {
-      for (let s = 1; s <= 11; s++) {
+      for (let s = 1; s <= 10; s++) {
         if (!occupiedSlots.has(s)) {
           assignedSlot = s;
           break;
@@ -377,8 +377,8 @@ export async function createTeamMemberRecord(
       }
     }
 
-    if (!assignedSlot || (occupiedSlots.size >= 11 && !existingTm)) {
-      throw new Error("This Associate has reached the maximum limit of 11 direct Team Members. No available slots.");
+    if (!assignedSlot || (occupiedSlots.size >= 10 && !existingTm)) {
+      throw new Error("This Associate (Team Lead) has reached the maximum limit of 10 direct Team Members (11 total team size). No available slots.");
     }
 
     // Generate unique Team Member ID if not already present
@@ -940,21 +940,21 @@ export async function registerTeamMemberQuick(associateId: number, data: any) {
 
     let assignedSlot: number | null = null;
     const requestedSlot = Number(data?.slotNumber || data?.slot_number || 0);
-    if (requestedSlot >= 1 && requestedSlot <= 11) {
+    if (requestedSlot >= 1 && requestedSlot <= 10) {
       if (occupiedSlots.has(requestedSlot)) {
         throw new Error(`Slot #${requestedSlot} is already occupied. Please select an available slot.`);
       }
       assignedSlot = requestedSlot;
     } else {
-      for (let s = 1; s <= 11; s++) {
+      for (let s = 1; s <= 10; s++) {
         if (!occupiedSlots.has(s)) {
           assignedSlot = s;
           break;
         }
       }
     }
-    if (!assignedSlot || occupiedSlots.size >= 11) {
-      throw new Error("This Associate has reached the maximum limit of 11 direct Team Members. No available slots.");
+    if (!assignedSlot || occupiedSlots.size >= 10) {
+      throw new Error("This Associate (Team Lead) has reached the maximum limit of 10 direct Team Members (11 total team size). No available slots.");
     }
 
     // 3. Duplicate checks

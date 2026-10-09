@@ -8549,7 +8549,7 @@ app.post("/api/associate/customers", verifyUserToken, requireAssociate, async (r
   }
 });
 
-// 1b. Associate registers new direct Team Member (Max 11 Slots)
+// 1b. Associate registers new direct Team Member (Max 10 Direct Slots · 11 Total Team with Lead)
 app.post(["/api/associate/team-members", "/api/associate/team-member-add"], verifyUserToken, requireAssociate, async (req, res) => {
   try {
     const associateId = req.user.user_id;
