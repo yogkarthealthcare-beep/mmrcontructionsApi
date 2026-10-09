@@ -13369,10 +13369,10 @@ app.get("/api/admin/diagnose-db-detail", verifyAdminToken, async (_req, res) => 
   try {
     const enums = await sql`SELECT t.typname, e.enumlabel, e.enumsortorder FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid WHERE t.typname IN ('user_type_enum', 'account_status_enum') ORDER BY t.typname, e.enumsortorder`;
     const users = await sql`SELECT user_id, member_id, full_name, email, mobile_no, user_type::text AS user_type, account_status::text AS account_status, sponsor_user_id, registered_at FROM users ORDER BY user_id ASC`;
-    const assocEnroll = await sql`SELECT id, user_id, member_id, full_name, contact_no_1, status, sponsor_name, created_at FROM associate_enrollment ORDER BY created_at DESC LIMIT 5`;
-    const custEnroll = await sql`SELECT id, user_id, application_no, applicant_name, mobile_1, application_status, associate_id, associate_name, created_at FROM customer_enrollment_submissions ORDER BY created_at DESC LIMIT 5`;
-    const teamMembers = await sql`SELECT id, team_member_uid, user_id, associate_id, associate_name, full_name, mobile_no, status, slot_number, created_at FROM team_members ORDER BY id ASC`;
-    const investors = await sql`SELECT id, user_id, name, is_active, created_at FROM investors ORDER BY id ASC LIMIT 5`;
+    const assocEnroll = await sql`SELECT * FROM associate_enrollment ORDER BY created_at DESC LIMIT 5`.catch(e => ({ error: e.message }));
+    const custEnroll = await sql`SELECT * FROM customer_enrollment_submissions ORDER BY created_at DESC LIMIT 5`.catch(e => ({ error: e.message }));
+    const teamMembers = await sql`SELECT * FROM team_members ORDER BY id ASC`.catch(e => ({ error: e.message }));
+    const investors = await sql`SELECT * FROM investors ORDER BY id ASC LIMIT 5`.catch(e => ({ error: e.message }));
 
     return ok(res, {
       enums,
