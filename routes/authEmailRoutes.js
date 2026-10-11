@@ -6,6 +6,7 @@ import { sendEmail, otpEmailHtml } from '../emailService.js';
 import twoFactorService from '../services/twoFactor.service.js';
 import { bookingApprovalConfig } from '../config/bookingApproval.js';
 import { resolveReferralCode } from '../services/referralResolver.service.js';
+import { generateTeamMemberId } from '../services/teamMemberService.js';
 
 const router = express.Router();
 
@@ -307,30 +308,38 @@ async function canResend(email) {
 
 async function createUserWithUniqueMemberId(db, pending) {
   await db`SELECT pg_advisory_xact_lock(hashtext('users_member_id_registration'))`;
-  const isAssociate = String(pending.user_type || '').toLowerCase() === 'associate';
-  const prefix = isAssociate ? 'MMR-ASC-' : 'MMR-CUS-';
-  const [sequence] = isAssociate ? await db`
-    SELECT COALESCE(MAX(
-      CASE
-        WHEN member_id ~* '^MMR-ASC-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
-        WHEN member_id ~* '^MMR-A-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
-        WHEN member_id ~* '^MMR[0-9]+$' AND LOWER(user_type::TEXT) = 'associate' THEN SUBSTRING(member_id FROM 4)::integer
-        ELSE 0 END
-    ), 0) + 1 AS next_value
-    FROM users` : await db`
-    SELECT COALESCE(MAX(
-      CASE
-        WHEN member_id ~* '^MMR-CUS-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
-        WHEN member_id ~* '^MMR-C-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
-        WHEN member_id ~* '^MMR[0-9]+$' AND LOWER(user_type::TEXT) = 'customer' THEN SUBSTRING(member_id FROM 4)::integer
-        ELSE 0 END
-    ), 0) + 1 AS next_value
-    FROM users`;
-  const memberId = `${prefix}${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
+  const normType = String(pending.user_type || '').toLowerCase();
+  let memberId;
+  if (normType.includes('team')) {
+    memberId = await generateTeamMemberId(db);
+  } else {
+    const isAssociate = normType === 'associate';
+    const prefix = isAssociate ? 'MMR-ASC-' : 'MMR-CUS-';
+    const [sequence] = isAssociate ? await db`
+      SELECT COALESCE(MAX(
+        CASE
+          WHEN member_id ~* '^MMR-ASC-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
+          WHEN member_id ~* '^MMR-A-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
+          WHEN member_id ~* '^MMR[0-9]+$' AND LOWER(user_type::TEXT) = 'associate' THEN SUBSTRING(member_id FROM 4)::integer
+          ELSE 0 END
+      ), 0) + 1 AS next_value
+      FROM users` : await db`
+      SELECT COALESCE(MAX(
+        CASE
+          WHEN member_id ~* '^MMR-CUS-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
+          WHEN member_id ~* '^MMR-C-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::integer
+          WHEN member_id ~* '^MMR[0-9]+$' AND LOWER(user_type::TEXT) = 'customer' THEN SUBSTRING(member_id FROM 4)::integer
+          ELSE 0 END
+      ), 0) + 1 AS next_value
+      FROM users`;
+    memberId = `${prefix}${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
+  }
   let created;
   const referredByUserId = pending.referred_by_user_id !== undefined ? pending.referred_by_user_id : (pending.sponsor_user_id || null);
   const referredBySource = pending.referred_by_source !== undefined ? pending.referred_by_source : (referredByUserId ? 'REGISTRATION_CODE' : 'DIRECT_SIGNUP');
   const referredBySetAt = pending.referred_by_set_at || (referredByUserId ? new Date() : null);
+
+  const initialAccountStatus = pending.user_type === 'Customer' ? 'Active' : (normType.includes('team') ? 'Active' : 'Pending');
 
   try {
     [created] = await db`
@@ -342,7 +351,7 @@ async function createUserWithUniqueMemberId(db, pending) {
       ) VALUES (
         ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
         ${pending.password_hash}, ${pending.sponsor_user_id || null}, ${memberId},
-        ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE,
+        ${initialAccountStatus}, TRUE, NOW(), TRUE,
         ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
       )
       RETURNING user_id, full_name, email, mobile_no, user_type, member_id, invitation_code, referred_by_user_id, referred_by_source`;
@@ -357,7 +366,7 @@ async function createUserWithUniqueMemberId(db, pending) {
         ) VALUES (
           ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
           ${pending.password_hash}, ${pending.sponsor_user_id || null}, ${memberId},
-          ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE,
+          ${initialAccountStatus}, TRUE, NOW(), TRUE,
           ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
         )
         RETURNING user_id, full_name, email, mobile_no, user_type, member_id, referred_by_user_id, referred_by_source`;
@@ -365,6 +374,41 @@ async function createUserWithUniqueMemberId(db, pending) {
       throw err;
     }
   }
+
+  // Link Team Member to team_members table under sponsoring Associate
+  if (normType.includes('team') && pending.sponsor_user_id && created?.user_id) {
+    try {
+      const associateId = Number(pending.sponsor_user_id);
+      const existingMembers = await db`
+        SELECT slot_number FROM team_members
+        WHERE associate_id = ${associateId} AND status <> 'rejected'
+      `;
+      const occupiedSlots = new Set(existingMembers.map((m) => Number(m.slot_number)).filter(Boolean));
+      let assignedSlot = null;
+      for (let s = 1; s <= 10; s++) {
+        if (!occupiedSlots.has(s)) {
+          assignedSlot = s;
+          break;
+        }
+      }
+      const [assoc] = await db`SELECT full_name FROM users WHERE user_id = ${associateId} LIMIT 1`;
+      const assocName = assoc?.full_name || 'Associate';
+      await db`
+        INSERT INTO team_members (
+          team_member_uid, associate_id, associate_name, user_id, slot_number,
+          full_name, mobile_no, email_id, status, created_at, updated_at
+        ) VALUES (
+          ${created.member_id}, ${associateId}, ${assocName}, ${created.user_id}, ${assignedSlot},
+          ${created.full_name}, ${created.mobile_no}, ${created.email}, 'approved', NOW(), NOW()
+        )
+        ON CONFLICT (team_member_uid) DO UPDATE
+        SET user_id = EXCLUDED.user_id, status = EXCLUDED.status, updated_at = NOW()
+      `;
+    } catch (tmErr) {
+      console.warn('[createUserWithUniqueMemberId] team_members link warning:', tmErr.message);
+    }
+  }
+
   return created;
 }
 
@@ -392,8 +436,12 @@ async function validateSignupInput(body) {
   if (!body.password || body.password.length < 6) {
     validationErrors.push('Password must be at least 6 characters');
   }
-  if (!['Customer', 'Associate', 'Investor'].includes(userType)) {
-    validationErrors.push('user_type must be Customer, Associate, or Investor');
+  if (!['Customer', 'Associate', 'Investor', 'Team Member'].includes(userType)) {
+    validationErrors.push('user_type must be Customer, Associate, Investor, or Team Member');
+  }
+
+  if (userType === 'Team Member' && !rawSponsorCode) {
+    validationErrors.push('Sponsor Associate ID is required for Team Member registration.');
   }
 
   if (validationErrors.length) {
@@ -434,6 +482,20 @@ async function validateSignupInput(body) {
 
     if (!res.valid) {
       return { error: res.error || 'Invalid referral code', status: res.status || 400 };
+    }
+
+    if (userType === 'Team Member') {
+      if (!res.referrer || res.referrer.user_type !== 'Associate') {
+        return { error: 'Team Member sponsor must be an active Associate.', status: 400 };
+      }
+      const existingMembers = await sql`
+        SELECT slot_number FROM team_members
+        WHERE associate_id = ${res.userId} AND status <> 'rejected'
+      `;
+      const occupiedSlots = new Set(existingMembers.map((m) => Number(m.slot_number)).filter(Boolean));
+      if (occupiedSlots.size >= 10) {
+        return { error: 'This Associate has reached the maximum limit of 10 direct Team Members. No available slots.', status: 400 };
+      }
     }
 
     if (res.referrer) {

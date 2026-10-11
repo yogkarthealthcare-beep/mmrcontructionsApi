@@ -1,6 +1,6 @@
 import express from "express";
 import multer from "multer";
-import { userAuth, adminAuth } from "../middleware/auth.middleware.js";
+import { userAuth, adminAuth, resolveEffectivePanel } from "../middleware/auth.middleware.js";
 import { 
   createAssociateEnrollment, 
   printAssociateEnrollment, 
@@ -20,6 +20,13 @@ const upload = multer({
     fileSize: 5 * 1024 * 1024 // 5 MB limit per photo
   }
 });
+
+const blockActingTeamMember = (req: any, res: any, next: any) => {
+  if (resolveEffectivePanel(req.user) === 'team-member') {
+    return res.status(403).json({ success: false, message: "Forbidden — Associate enrollment access blocked while acting as Team Member." });
+  }
+  next();
+};
 
 // Admin routes
 router.get(["/admin/associate-enrollments", "/admin/associate-enrollment"], adminAuth, getAdminAssociateEnrollments);
@@ -43,6 +50,7 @@ router.delete(["/admin/associate-enrollments/:id", "/admin/associate-enrollment/
 router.get(
   "/associate-enrollment/me",
   userAuth,
+  blockActingTeamMember,
   getMyAssociateEnrollment
 );
 
@@ -51,6 +59,7 @@ router.get(
 router.post(
   "/associate-enrollment",
   userAuth,
+  blockActingTeamMember,
   upload.fields([
     { name: "applicantPhoto", maxCount: 1 },
     { name: "nomineePhoto", maxCount: 1 },
@@ -65,6 +74,7 @@ router.post(
 router.get(
   "/associate-enrollment/:id/print",
   userAuth,
+  blockActingTeamMember,
   printAssociateEnrollment
 );
 

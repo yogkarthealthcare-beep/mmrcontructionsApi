@@ -29,7 +29,7 @@ import customerEnrollmentRoutes from './routes/customer-enrollment.routes.js';
 import associateEnrollmentRoutes from './routes/associateEnrollmentRoutes.js';
 import teamMemberRoutes from './routes/teamMemberRoutes.js';
 import adminNetworkTreeRoutes from './routes/admin-network-tree.routes.js';
-import { ensureTeamMembersTable, registerTeamMemberQuick, approveTeamMemberByAssociate, syncExistingTeamMembersFromUsers } from './services/teamMemberService.js';
+import { ensureTeamMembersTable, registerTeamMemberQuick, approveTeamMemberByAssociate, syncExistingTeamMembersFromUsers, generateTeamMemberId } from './services/teamMemberService.js';
 import receiptRoutes, { ensureReceiptsTable } from './routes/receipt.routes.js';
 import siteGalleryRoutes, { ensureSiteGalleryTable } from './routes/site-gallery.routes.js';
 import twoFactorRoutes from './routes/twoFactor.routes.js';
@@ -50,6 +50,7 @@ import bookingService from "./services/bookingService.js";
 import salesAttributionReportsRoutes from "./routes/sales-attribution-reports.routes.js";
 import bookingApprovalsRoutes from "./routes/booking-approvals.routes.js";
 import adminAttributionRoutes from "./routes/admin-attribution.routes.js";
+import masterDataRoutes from "./routes/master-data.routes.js";
 import { bookingApprovalConfig } from "./config/bookingApproval.js";
 
 const app = express();
@@ -283,6 +284,7 @@ ensureUnifiedPaymentSchema().then(() => {
 app.use('/api', salesAttributionReportsRoutes);
 app.use('/api', bookingApprovalsRoutes);
 app.use('/api', adminAttributionRoutes);
+app.use('/api', masterDataRoutes);
 
 export async function ensurePlotManagementSchema() {
   try {
@@ -2923,15 +2925,7 @@ const genMemberID = async (userType) => {
       FROM users`;
     return `MMR-ASC-${String(row?.seq || 1).padStart(4, "0")}`;
   } else if (normType.includes("team")) {
-    const [row] = await sql`
-      SELECT COALESCE(MAX(
-        CASE
-          WHEN team_member_uid ~* '^MMR-TM-[0-9]+$' THEN SUBSTRING(team_member_uid FROM 8)::integer
-          WHEN team_member_uid ~* '^MMR-TM-[0-9]+-[0-9]+$' THEN SUBSTRING(team_member_uid FROM 13)::integer
-          ELSE 0 END
-      ), 0) + 1 AS seq
-      FROM team_members`;
-    return `MMR-TM-${String(row?.seq || 1).padStart(5, "0")}`;
+    return await generateTeamMemberId(sql);
   } else if (normType.includes("invest")) {
     try {
       const [row] = await sql`
@@ -4880,8 +4874,8 @@ app.post("/api/auth/register-quick", async (req, res) => {
 
     if (!user_type || !full_name || !email || !mobile_no || !password)
       return err(res, "user_type, full_name, email, mobile_no, password required", 400);
-    if (!["Customer", "Associate", "Investor"].includes(user_type))
-      return err(res, "user_type must be Customer, Associate, or Investor", 400);
+    if (!["Customer", "Associate", "Investor", "Team Member"].includes(user_type))
+      return err(res, "user_type must be Customer, Associate, Investor, or Team Member", 400);
 
     const cleanEmail = String(email).trim().toLowerCase();
     const cleanMobile = String(mobile_no).replace(/\D/g, "");
@@ -4917,6 +4911,24 @@ app.post("/api/auth/register-quick", async (req, res) => {
     }
     if (!sponsorUserId && user_type !== "Investor") {
       sponsorUserId = await getDefaultSponsorUserId();
+    }
+
+    if (user_type === "Team Member") {
+      if (!sponsor_invite_code || !sponsorUserId) {
+        return err(res, "Sponsor Associate ID is required for Team Member registration.", 400);
+      }
+      const [sponsorAssoc] = await sql`SELECT user_id, user_type, full_name FROM users WHERE user_id = ${sponsorUserId} LIMIT 1`;
+      if (!sponsorAssoc || sponsorAssoc.user_type !== "Associate") {
+        return err(res, "Team Member sponsor must be an active Associate.", 400);
+      }
+      const existingMembers = await sql`
+        SELECT slot_number FROM team_members
+        WHERE associate_id = ${sponsorUserId} AND status <> 'rejected'
+      `;
+      const occupiedSlots = new Set(existingMembers.map((m) => Number(m.slot_number)).filter(Boolean));
+      if (occupiedSlots.size >= 10) {
+        return err(res, "This Associate has reached the maximum limit of 10 direct Team Members. No available slots.", 400);
+      }
     }
 
     // ── Referral attribution (Phase 2) ──
@@ -5017,6 +5029,38 @@ app.post("/api/auth/register-quick", async (req, res) => {
             ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
           )
           RETURNING user_id, member_id, user_type, full_name, email, mobile_no`;
+
+        if (user_type === "Team Member") {
+          try {
+            const existingMembers = await sql`
+              SELECT slot_number FROM team_members
+              WHERE associate_id = ${sponsorUserId} AND status <> 'rejected'
+            `;
+            const occupiedSlots = new Set(existingMembers.map((m) => Number(m.slot_number)).filter(Boolean));
+            let assignedSlot = null;
+            for (let s = 1; s <= 10; s++) {
+              if (!occupiedSlots.has(s)) {
+                assignedSlot = s;
+                break;
+              }
+            }
+            const [assoc] = await sql`SELECT full_name FROM users WHERE user_id = ${sponsorUserId} LIMIT 1`;
+            const assocName = assoc?.full_name || 'Associate';
+            await sql`
+              INSERT INTO team_members (
+                team_member_uid, associate_id, associate_name, user_id, slot_number,
+                full_name, mobile_no, email_id, status, created_at, updated_at
+              ) VALUES (
+                ${createdUser.member_id}, ${sponsorUserId}, ${assocName}, ${createdUser.user_id}, ${assignedSlot},
+                ${createdUser.full_name}, ${cleanMobile}, ${cleanEmail}, 'approved', NOW(), NOW()
+              )
+              ON CONFLICT (team_member_uid) DO UPDATE
+              SET user_id = EXCLUDED.user_id, status = EXCLUDED.status, updated_at = NOW()
+            `;
+          } catch (tmErr) {
+            console.warn('[register] team_members insertion warning:', tmErr.message);
+          }
+        }
 
         try {
           await sql`
@@ -5188,6 +5232,38 @@ app.post("/api/auth/verify-email-otp", async (req, res) => {
         ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
       )
       RETURNING user_id, full_name, email, user_type, member_id, invitation_code`;
+
+    if (pending.user_type === "Team Member" && pending.sponsor_user_id) {
+      try {
+        const existingMembers = await sql`
+          SELECT slot_number FROM team_members
+          WHERE associate_id = ${pending.sponsor_user_id} AND status <> 'rejected'
+        `;
+        const occupiedSlots = new Set(existingMembers.map((m) => Number(m.slot_number)).filter(Boolean));
+        let assignedSlot = null;
+        for (let s = 1; s <= 10; s++) {
+          if (!occupiedSlots.has(s)) {
+            assignedSlot = s;
+            break;
+          }
+        }
+        const [assoc] = await sql`SELECT full_name FROM users WHERE user_id = ${pending.sponsor_user_id} LIMIT 1`;
+        const assocName = assoc?.full_name || 'Associate';
+        await sql`
+          INSERT INTO team_members (
+            team_member_uid, associate_id, associate_name, user_id, slot_number,
+            full_name, mobile_no, email_id, status, created_at, updated_at
+          ) VALUES (
+            ${createdUser.member_id}, ${pending.sponsor_user_id}, ${assocName}, ${createdUser.user_id}, ${assignedSlot},
+            ${createdUser.full_name}, ${pending.mobile_no}, ${pending.email}, 'approved', NOW(), NOW()
+          )
+          ON CONFLICT (team_member_uid) DO UPDATE
+          SET user_id = EXCLUDED.user_id, status = EXCLUDED.status, updated_at = NOW()
+        `;
+      } catch (tmErr) {
+        console.warn('[verify-email-otp] team_members insertion warning:', tmErr.message);
+      }
+    }
 
     await sql`DELETE FROM pending_registrations WHERE email = ${cleanEmail}`;
 
@@ -13606,7 +13682,7 @@ app.get("/api/admin/team-members",
 
             SELECT
               u.user_id::bigint AS id,
-              COALESCE(u.member_id, 'MMR-TM-' || LPAD(u.user_id::text, 5, '0')) AS team_member_uid,
+              COALESCE(u.member_id, 'MMR-TM-' || LPAD(u.user_id::text, 4, '0')) AS team_member_uid,
               u.user_id,
               COALESCE(u.sponsor_user_id, 1)::bigint AS associate_id,
               COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
@@ -13741,7 +13817,7 @@ app.get("/api/admin/team-members",
 
             SELECT
               u.user_id::bigint AS id,
-              COALESCE(u.member_id, 'MMR-TM-' || LPAD(u.user_id::text, 5, '0')) AS team_member_uid,
+              COALESCE(u.member_id, 'MMR-TM-' || LPAD(u.user_id::text, 4, '0')) AS team_member_uid,
               u.user_id,
               COALESCE(u.sponsor_user_id, 1)::bigint AS associate_id,
               COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS associate_name,

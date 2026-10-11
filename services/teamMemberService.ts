@@ -428,21 +428,62 @@ export async function saveSignatureDataUrl(
 }
 
 /**
- * Auto-generate UID in format MMR-TM-XXXXX (e.g. MMR-TM-00001)
+ * Canonical Source of Truth for Team Member Sponsor ID generation.
+ * Format: MMR-TM-0001, MMR-TM-0002... (4-digit zero-padded, natural overflow at 10000+).
+ * Handles both legacy 5-digit (MMR-TM-00005) and 4-digit (MMR-TM-0005) sequences seamlessly
+ * by taking the numeric maximum tail across BOTH users.member_id and team_members.team_member_uid.
+ * Concurrency protected via pg_advisory_xact_lock with automatic retry on collision.
  */
-async function generateTeamMemberUid(tx: any): Promise<string> {
+export async function generateTeamMemberId(tx: any = sql, attempt = 1): Promise<string> {
+  // Concurrency control via PostgreSQL transaction-level advisory lock
+  await tx`SELECT pg_advisory_xact_lock(hashtext('team_member_id_generation'))`;
+
   const [res] = await tx`
+    WITH id_candidates AS (
+      SELECT member_id AS id_str
+      FROM users
+      WHERE member_id ~* '^MMR-TM-[0-9]+$'
+         OR member_id ~* '^MMR-TM-[0-9]+-[0-9]+$'
+         OR member_id ~* '^TM-[0-9]+$'
+      UNION ALL
+      SELECT team_member_uid AS id_str
+      FROM team_members
+      WHERE team_member_uid ~* '^MMR-TM-[0-9]+$'
+         OR team_member_uid ~* '^MMR-TM-[0-9]+-[0-9]+$'
+         OR team_member_uid ~* '^TM-[0-9]+$'
+    )
     SELECT COALESCE(MAX(
       CASE
-        WHEN team_member_uid ~* '^MMR-TM-[0-9]+$' THEN SUBSTRING(team_member_uid FROM 8)::integer
-        WHEN team_member_uid ~* '^MMR-TM-[0-9]+-[0-9]+$' THEN SUBSTRING(team_member_uid FROM 13)::integer
-        ELSE id END
+        WHEN id_str ~* '^MMR-TM-[0-9]+$' THEN SUBSTRING(id_str FROM 8)::bigint
+        WHEN id_str ~* '^MMR-TM-[0-9]+-[0-9]+$' THEN SUBSTRING(id_str FROM 13)::bigint
+        WHEN id_str ~* '^TM-[0-9]+$' THEN SUBSTRING(id_str FROM 4)::bigint
+        ELSE 0 END
     ), 0) + 1 AS next_seq
-    FROM team_members
+    FROM id_candidates
   `;
-  const nextSeq = res?.next_seq || 1;
-  return `MMR-TM-${String(nextSeq).padStart(5, "0")}`;
+
+  let nextSeq = Number(res?.next_seq || 1);
+  if (attempt > 1) {
+    nextSeq += (attempt - 1);
+  }
+  const formattedId = `MMR-TM-${String(nextSeq).padStart(4, "0")}`;
+
+  // Double check if formattedId exists in users or team_members (collision avoidance)
+  const [conflict] = await tx`
+    SELECT 1 FROM users WHERE member_id = ${formattedId}
+    UNION ALL
+    SELECT 1 FROM team_members WHERE team_member_uid = ${formattedId}
+    LIMIT 1
+  `;
+
+  if (conflict && attempt <= 3) {
+    return generateTeamMemberId(tx, attempt + 1);
+  }
+
+  return formattedId;
 }
+
+export const generateTeamMemberUid = generateTeamMemberId;
 
 /**
  * 1. Prefill Endpoint
@@ -1305,7 +1346,7 @@ export async function registerTeamMemberQuick(associateId: number, data: any) {
     if (!existingWallet) {
       await tx`
         INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
-        VALUES (${createdUser.user_id}, 'Associate', 0, 0, 0, 0, 0)
+        VALUES (${createdUser.user_id}, 'Team Member', 0, 0, 0, 0, 0)
       `;
     }
 

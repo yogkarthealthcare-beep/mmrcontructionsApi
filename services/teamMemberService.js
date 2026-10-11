@@ -79,17 +79,18 @@ export async function syncExistingTeamMembersFromUsers() {
     // Auto-mutation is strictly disabled unless TEAM_MEMBER_AUTOHEAL is explicitly 'true'.
     if (process.env.TEAM_MEMBER_AUTOHEAL !== 'true' && process.env.NODE_ENV !== 'test') {
         try {
-            const [mismatch] = await sql`
-              SELECT COUNT(*) AS mismatch_count
-              FROM team_members tm
-              JOIN users u ON u.user_id = tm.user_id
-              WHERE (u.user_type != 'Team Member' OR tm.team_member_uid ILIKE 'MMR-ASC-%')
-                AND LOWER(tm.status) IN ('approved', 'active')
-            `.catch(() => [null]);
+            const [mismatch] = await sql `
+        SELECT COUNT(*) AS mismatch_count
+        FROM team_members tm
+        JOIN users u ON u.user_id = tm.user_id
+        WHERE (u.user_type != 'Team Member' OR tm.team_member_uid ILIKE 'MMR-ASC-%')
+          AND LOWER(tm.status) IN ('approved', 'active')
+      `.catch(() => [null]);
             if (mismatch && Number(mismatch.mismatch_count) > 0) {
                 console.log(`[SyncTeamMembers] Detected ${mismatch.mismatch_count} user/team_member role mismatch rows. TEAM_MEMBER_AUTOHEAL is OFF; leaving production data completely unchanged.`);
             }
-        } catch (_) {}
+        }
+        catch (_) { }
         return;
     }
     try {
@@ -271,45 +272,45 @@ export async function syncExistingTeamMembersFromUsers() {
         ON CONFLICT (team_member_uid) DO NOTHING
       `.catch(() => { });
         }
-
         // 6. Role Consistency Check (READ-ONLY by default; NO automatic writes to users or team_members)
         // Automatic mutation is strictly guarded behind TEAM_MEMBER_AUTOHEAL flag (default OFF).
         const autoHealEnabled = process.env.TEAM_MEMBER_AUTOHEAL === 'true';
         if (autoHealEnabled) {
-          console.warn("[SyncTeamMembers] CAUTION: TEAM_MEMBER_AUTOHEAL is explicitly enabled via environment variable.");
-          // Normalize team_members UIDs if flag is explicitly ON
-          await sql`
-            UPDATE team_members
-            SET team_member_uid = REGEXP_REPLACE(team_member_uid, '^(MMR-)?ASC-', 'MMR-TM-', 'i'),
-                updated_at = NOW()
-            WHERE team_member_uid ILIKE 'MMR-ASC-%' OR team_member_uid ILIKE 'ASC-%'
-          `.catch(() => {});
-
-          await sql`
-            UPDATE team_members tm
-            SET user_id = u.user_id,
-                updated_at = NOW()
-            FROM users u
-            WHERE tm.user_id IS NULL
-              AND (
-                u.mobile_no = tm.mobile_no 
-                OR u.member_id = tm.team_member_uid
-              )
-          `.catch(() => {});
-        } else {
-          // READ-ONLY DIAGNOSTIC LOG (Zero writes, zero updates)
-          try {
-            const [mismatch] = await sql`
-              SELECT COUNT(*) AS mismatch_count
-              FROM team_members tm
-              JOIN users u ON u.user_id = tm.user_id
-              WHERE u.user_type != 'Team Member'
-                 OR tm.team_member_uid ILIKE 'MMR-ASC-%'
-            `;
-            if (mismatch && Number(mismatch.mismatch_count) > 0) {
-              console.log(`[SyncTeamMembers] Detected ${mismatch.mismatch_count} user/team_member role mismatch rows. TEAM_MEMBER_AUTOHEAL is OFF; leaving production data unchanged.`);
+            console.warn("[SyncTeamMembers] CAUTION: TEAM_MEMBER_AUTOHEAL is explicitly enabled via environment variable.");
+            // Normalize team_members UIDs if flag is explicitly ON
+            await sql `
+        UPDATE team_members
+        SET team_member_uid = REGEXP_REPLACE(team_member_uid, '^(MMR-)?ASC-', 'MMR-TM-', 'i'),
+            updated_at = NOW()
+        WHERE team_member_uid ILIKE 'MMR-ASC-%' OR team_member_uid ILIKE 'ASC-%'
+      `.catch(() => { });
+            await sql `
+        UPDATE team_members tm
+        SET user_id = u.user_id,
+            updated_at = NOW()
+        FROM users u
+        WHERE tm.user_id IS NULL
+          AND (
+            u.mobile_no = tm.mobile_no 
+            OR u.member_id = tm.team_member_uid
+          )
+      `.catch(() => { });
+        }
+        else {
+            // READ-ONLY DIAGNOSTIC LOG (Zero writes, zero updates)
+            try {
+                const [mismatch] = await sql `
+          SELECT COUNT(*) AS mismatch_count
+          FROM team_members tm
+          JOIN users u ON u.user_id = tm.user_id
+          WHERE u.user_type != 'Team Member'
+             OR tm.team_member_uid ILIKE 'MMR-ASC-%'
+        `;
+                if (mismatch && Number(mismatch.mismatch_count) > 0) {
+                    console.log(`[SyncTeamMembers] Detected ${mismatch.mismatch_count} user/team_member role mismatch rows. TEAM_MEMBER_AUTOHEAL is OFF; leaving production data unchanged.`);
+                }
             }
-          } catch (_) {}
+            catch (_) { }
         }
     }
     catch (err) {
@@ -399,21 +400,56 @@ export async function saveSignatureDataUrl(dataUrl, associateId, sigType) {
     }
 }
 /**
- * Auto-generate UID in format MMR-TM-XXXXX (e.g. MMR-TM-00001)
+ * Canonical Source of Truth for Team Member Sponsor ID generation.
+ * Format: MMR-TM-0001, MMR-TM-0002... (4-digit zero-padded, natural overflow at 10000+).
+ * Handles both legacy 5-digit (MMR-TM-00005) and 4-digit (MMR-TM-0005) sequences seamlessly
+ * by taking the numeric maximum tail across BOTH users.member_id and team_members.team_member_uid.
+ * Concurrency protected via pg_advisory_xact_lock with automatic retry on collision.
  */
-async function generateTeamMemberUid(tx) {
+export async function generateTeamMemberId(tx = sql, attempt = 1) {
+    // Concurrency control via PostgreSQL transaction-level advisory lock
+    await tx `SELECT pg_advisory_xact_lock(hashtext('team_member_id_generation'))`;
     const [res] = await tx `
+    WITH id_candidates AS (
+      SELECT member_id AS id_str
+      FROM users
+      WHERE member_id ~* '^MMR-TM-[0-9]+$'
+         OR member_id ~* '^MMR-TM-[0-9]+-[0-9]+$'
+         OR member_id ~* '^TM-[0-9]+$'
+      UNION ALL
+      SELECT team_member_uid AS id_str
+      FROM team_members
+      WHERE team_member_uid ~* '^MMR-TM-[0-9]+$'
+         OR team_member_uid ~* '^MMR-TM-[0-9]+-[0-9]+$'
+         OR team_member_uid ~* '^TM-[0-9]+$'
+    )
     SELECT COALESCE(MAX(
       CASE
-        WHEN team_member_uid ~* '^MMR-TM-[0-9]+$' THEN SUBSTRING(team_member_uid FROM 8)::integer
-        WHEN team_member_uid ~* '^MMR-TM-[0-9]+-[0-9]+$' THEN SUBSTRING(team_member_uid FROM 13)::integer
-        ELSE id END
+        WHEN id_str ~* '^MMR-TM-[0-9]+$' THEN SUBSTRING(id_str FROM 8)::bigint
+        WHEN id_str ~* '^MMR-TM-[0-9]+-[0-9]+$' THEN SUBSTRING(id_str FROM 13)::bigint
+        WHEN id_str ~* '^TM-[0-9]+$' THEN SUBSTRING(id_str FROM 4)::bigint
+        ELSE 0 END
     ), 0) + 1 AS next_seq
-    FROM team_members
+    FROM id_candidates
   `;
-    const nextSeq = res?.next_seq || 1;
-    return `MMR-TM-${String(nextSeq).padStart(5, "0")}`;
+    let nextSeq = Number(res?.next_seq || 1);
+    if (attempt > 1) {
+        nextSeq += (attempt - 1);
+    }
+    const formattedId = `MMR-TM-${String(nextSeq).padStart(4, "0")}`;
+    // Double check if formattedId exists in users or team_members (collision avoidance)
+    const [conflict] = await tx `
+    SELECT 1 FROM users WHERE member_id = ${formattedId}
+    UNION ALL
+    SELECT 1 FROM team_members WHERE team_member_uid = ${formattedId}
+    LIMIT 1
+  `;
+    if (conflict && attempt <= 3) {
+        return generateTeamMemberId(tx, attempt + 1);
+    }
+    return formattedId;
 }
+export const generateTeamMemberUid = generateTeamMemberId;
 /**
  * 1. Prefill Endpoint
  * Returns known associate information to auto-fill the form
@@ -598,19 +634,20 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
         if (!uid || uid.toUpperCase().startsWith('MMR-ASC-') || uid.toUpperCase().startsWith('ASC-')) {
             if (existingUser?.member_id && existingUser.member_id.toUpperCase().startsWith('MMR-TM-')) {
                 uid = existingUser.member_id;
-            } else {
+            }
+            else {
                 uid = await generateTeamMemberUid(tx);
             }
         }
         if (existingUser) {
             await tx `
-              UPDATE users
-              SET user_type = 'Team Member',
-                  member_id = ${uid},
-                  sponsor_user_id = COALESCE(sponsor_user_id, ${data.associateId}),
-                  updated_at = NOW()
-              WHERE user_id = ${userId}
-            `;
+        UPDATE users
+        SET user_type = 'Team Member',
+            member_id = ${uid},
+            sponsor_user_id = COALESCE(sponsor_user_id, ${data.associateId}),
+            updated_at = NOW()
+        WHERE user_id = ${userId}
+      `;
         }
         if (!existingUser) {
             const [newUser] = await tx `
@@ -1212,7 +1249,7 @@ export async function registerTeamMemberQuick(associateId, data) {
         if (!existingWallet) {
             await tx `
         INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
-        VALUES (${createdUser.user_id}, 'Associate', 0, 0, 0, 0, 0)
+        VALUES (${createdUser.user_id}, 'Team Member', 0, 0, 0, 0, 0)
       `;
         }
         // 8. Initialize Referral Registration as Approved

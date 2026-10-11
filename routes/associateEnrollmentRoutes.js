@@ -10,14 +10,12 @@ const upload = multer({
         fileSize: 5 * 1024 * 1024 // 5 MB limit per photo
     }
 });
-
 const blockActingTeamMember = (req, res, next) => {
     if (resolveEffectivePanel(req.user) === 'team-member') {
         return res.status(403).json({ success: false, message: "Forbidden — Associate enrollment access blocked while acting as Team Member." });
     }
     next();
 };
-
 // Admin routes
 router.get(["/admin/associate-enrollments", "/admin/associate-enrollment"], adminAuth, getAdminAssociateEnrollments);
 router.get(["/admin/associate-enrollments/:id", "/admin/associate-enrollment/:id"], adminAuth, getAdminAssociateEnrollmentById);

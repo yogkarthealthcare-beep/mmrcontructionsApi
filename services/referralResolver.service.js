@@ -65,6 +65,8 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
     WHERE (
       UPPER(COALESCE(u.invitation_code, '')) = ${code}
       OR UPPER(COALESCE(u.member_id, '')) = ${code}
+      OR UPPER(COALESCE(u.legacy_member_id, '')) = ${code}
+      OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-(ASC|CUS|TM|[ACTM])-', 'MMR')) = ${code}
       OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-[ACTM]-', 'MMR')) = ${code}
       OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-[AC]-', 'MMR')) = ${code}
       OR UPPER(COALESCE(l.invite_code, '')) = ${code}
