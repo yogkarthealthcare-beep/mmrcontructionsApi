@@ -21,3 +21,4 @@ test_query.*
 test_count.*
 dump_schema.*
 test-db.*
+tmp_schema/

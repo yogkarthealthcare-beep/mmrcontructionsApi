@@ -33,11 +33,10 @@ export const getDatabaseConfig = () => {
 };
 
 const resolveSsl = (url) => {
+  if (/localhost|127\.0\.0\.1/i.test(url)) return false;
   const value = String(process.env.DB_SSL || process.env.PGSSLMODE || "").toLowerCase();
   if (["disable", "false", "0", "no"].includes(value)) return false;
   if (["require", "true", "1", "yes"].includes(value)) return "require";
-
-  if (/localhost|127\.0\.0\.1/i.test(url)) return false;
   return false;
 };
 

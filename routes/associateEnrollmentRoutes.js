@@ -1,6 +1,6 @@
 import express from "express";
 import multer from "multer";
-import { userAuth, adminAuth } from "../middleware/auth.middleware.js";
+import { userAuth, adminAuth, resolveEffectivePanel } from "../middleware/auth.middleware.js";
 import { createAssociateEnrollment, printAssociateEnrollment, getMyAssociateEnrollment, getAdminAssociateEnrollments, getAdminAssociateEnrollmentById, updateAdminAssociateEnrollment, deleteAdminAssociateEnrollment } from "../controllers/associateEnrollmentController.js";
 const router = express.Router();
 // Multer memory storage configuration for file processing
@@ -10,6 +10,14 @@ const upload = multer({
         fileSize: 5 * 1024 * 1024 // 5 MB limit per photo
     }
 });
+
+const blockActingTeamMember = (req, res, next) => {
+    if (resolveEffectivePanel(req.user) === 'team-member') {
+        return res.status(403).json({ success: false, message: "Forbidden — Associate enrollment access blocked while acting as Team Member." });
+    }
+    next();
+};
+
 // Admin routes
 router.get(["/admin/associate-enrollments", "/admin/associate-enrollment"], adminAuth, getAdminAssociateEnrollments);
 router.get(["/admin/associate-enrollments/:id", "/admin/associate-enrollment/:id"], adminAuth, getAdminAssociateEnrollmentById);
@@ -23,10 +31,10 @@ router.put(["/admin/associate-enrollments/:id", "/admin/associate-enrollment/:id
 router.delete(["/admin/associate-enrollments/:id", "/admin/associate-enrollment/:id"], adminAuth, deleteAdminAssociateEnrollment);
 // GET /api/associate-enrollment/me
 // Returns current authenticated associate's enrollment details if submitted
-router.get("/associate-enrollment/me", userAuth, getMyAssociateEnrollment);
+router.get("/associate-enrollment/me", userAuth, blockActingTeamMember, getMyAssociateEnrollment);
 // POST /api/associate-enrollment
 // Authenticated route, handles multipart form uploads
-router.post("/associate-enrollment", userAuth, upload.fields([
+router.post("/associate-enrollment", userAuth, blockActingTeamMember, upload.fields([
     { name: "applicantPhoto", maxCount: 1 },
     { name: "nomineePhoto", maxCount: 1 },
     { name: "applicantSignature", maxCount: 1 },
@@ -34,5 +42,5 @@ router.post("/associate-enrollment", userAuth, upload.fields([
     { name: "sponsorSignature", maxCount: 1 }
 ]), createAssociateEnrollment);
 // GET /api/associate-enrollment/:id/print
-router.get("/associate-enrollment/:id/print", userAuth, printAssociateEnrollment);
+router.get("/associate-enrollment/:id/print", userAuth, blockActingTeamMember, printAssociateEnrollment);
 export default router;

@@ -1,0 +1,13 @@
+{
+  "executed_at": "2026-10-10T02:08:32.506Z",
+  "mode": "PARSED_SQL_DUMP",
+  "total_users": 2,
+  "users_with_referrer": 0,
+  "company_direct_customers": 0,
+  "legacy_sponsor_inferred_users": 0,
+  "inactive_or_deleted_referrers": 0,
+  "duplicate_invitation_or_member_codes": 0,
+  "total_bookings": 0,
+  "unresolved_on_behalf_bookings": 0,
+  "plots_with_multiple_active_bookings": 0
+}

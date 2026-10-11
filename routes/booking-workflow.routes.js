@@ -6,6 +6,7 @@ import GatewayFactory from "../payment/GatewayFactory.js";
 import { ensureEmiSchedulesForBooking } from "../services/emi.service.js";
 import { setPlotStatus } from "../services/plotStatus.service.js";
 import { dispatchBookingNotification } from "../services/bookingNotification.service.js";
+import bookingService from "../services/bookingService.js";
 
 const router = express.Router();
 const ok = (res, data, message = "Success", status = 200) =>
@@ -143,7 +144,7 @@ async function generateCommissionForPayment(req, bookingId, sourceType, sourceId
       return { generated: 0, reason: "Seller blacklisted" };
     }
 
-    const [tmSellerRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} LIMIT 1`;
+    const [tmSellerRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} AND LOWER(status) IN ('approved', 'active') LIMIT 1`;
     const isTeamMemberSeller = Boolean(tmSellerRow);
     let leaderUserId = isTeamMemberSeller
       ? Number(tmSellerRow?.associate_id || seller.sponsor_user_id || 0)
@@ -632,6 +633,12 @@ async function completeBooking(bookingId, payment, adminId = null) {
       FOR UPDATE OF b`;
     if (!booking) throw new Error("Booking not found.");
     if (booking.booking_status === "Confirmed") return booking;
+    if (booking.associate_approval_status === "Pending") {
+      throw Object.assign(
+        new Error("Cannot confirm booking: Associate approval is pending. Associate must approve or Admin must override."),
+        { status: 409 }
+      );
+    }
 
     await db`
       UPDATE bookings SET
@@ -663,7 +670,7 @@ async function completeBooking(bookingId, payment, adminId = null) {
       JOIN sites s ON s.site_id = p.site_id
       WHERE b.plot_id = ${booking.plot_id}
         AND b.booking_id != ${bookingId}
-        AND b.booking_status IN ('Submitted', 'PaymentPending', 'Allocated')
+        AND b.booking_status IN ('Submitted', 'PaymentPending', 'Allocated', 'Pending')
       ORDER BY b.created_at ASC`;
 
     let pos = 1;
@@ -811,64 +818,56 @@ router.post("/booking/initiate", userAuth, async (req, res) => {
     const required = money(config.minimum_booking_amount) + money(config.first_emi_amount);
     const lockMinutes = Number(config.plot_lock_minutes);
 
-    const created = await sql.begin(async (db) => {
-      await db`SELECT pg_advisory_xact_lock(${plotId})`;
-      await releaseExpiredLocks(db);
-      const [plot] = await db`
-        SELECT p.*, s.site_name
-        FROM plots p JOIN sites s ON s.site_id = p.site_id
-        WHERE p.plot_id = ${plotId}
-        FOR UPDATE`;
-      if (!plot) throw Object.assign(new Error("Plot not found."), { status: 404 });
-      if (plot.plot_status === "Booked" || plot.plot_status === "Sold" || plot.is_active === false) {
-        throw Object.assign(new Error("This plot is already booked or sold and no longer available."), { status: 409 });
-      }
+    await releaseExpiredLocks(sql);
 
-      const [seq] = await db`SELECT nextval('bookings_booking_id_seq') AS booking_id`;
-      const bookingId = Number(seq.booking_id);
-      const serial = `MMR-${new Date().getFullYear()}-${String(bookingId).padStart(5, "0")}`;
-      const paymentType = paymentMethod === "Online" ? "Online" : "Cheque";
-      const [booking] = await db`
-        INSERT INTO bookings (
-          booking_id, booking_serial, user_id, plot_id, payment_type, advance_amount,
-          booking_status, workflow_status, payment_method, required_booking_amount,
-          minimum_booking_amount, first_emi_amount, remaining_balance
-        ) VALUES (
-          ${bookingId}, ${serial}, ${req.user.user_id}, ${plotId}, ${paymentType},
-          ${required}, 'Submitted', ${paymentMethod === "Online" ? "Payment Pending" : "Appointment Scheduled"},
-          ${paymentMethod}, ${required}, ${config.minimum_booking_amount}, ${config.first_emi_amount},
-          ${Math.max(0, money(plot.base_price) - required)}
-        ) RETURNING *`;
-      const [lock] = await db`
-        INSERT INTO plot_booking_locks (plot_id, user_id, booking_id, expires_at)
-        VALUES (${plotId}, ${req.user.user_id}, ${bookingId}, NOW() + make_interval(mins => ${lockMinutes}))
-        RETURNING lock_token, expires_at`;
-      await db`UPDATE plots SET plot_status = 'InProcess', updated_at = NOW() WHERE plot_id = ${plotId}`;
-      const orderId = `BOOKING-${bookingId}-${Date.now()}`;
-      await db`
-        INSERT INTO booking_payment_records (
-          booking_id, user_id, payment_method, gateway_name, amount, status, order_id
-        ) VALUES (
-          ${bookingId}, ${req.user.user_id}, ${paymentMethod},
-          ${paymentMethod === "Online" ? "razorpay" : null}, ${required},
-          ${paymentMethod === "Online" ? "Pending" : "Verification Pending"}, ${orderId}
-        )`;
-      await db`UPDATE bookings SET payment_order_id = ${orderId} WHERE booking_id = ${bookingId}`;
-      if (paymentMethod === "Offline") {
-        if (!appointment?.date || !appointment?.start_time || !appointment?.end_time) {
-          throw Object.assign(new Error("Appointment date and time slot are required for offline payment."), { status: 400 });
-        }
-        await db`
-          INSERT INTO booking_appointments (
-            booking_id, user_id, appointment_date, start_time, end_time, payment_mode
-          ) VALUES (
-            ${bookingId}, ${req.user.user_id}, ${appointment.date},
-            ${appointment.start_time}, ${appointment.end_time}, ${appointment.payment_mode || "Office Visit"}
-          )`;
-        await db`UPDATE bookings SET booking_status = 'PaymentPending' WHERE booking_id = ${bookingId}`;
-      }
-      return { booking, plot, lock, orderId };
+    const bookingResult = await bookingService.createBooking({
+      actor: req.user,
+      buyerType: "SELF",
+      plotId,
+      paymentType: paymentMethod === "Online" ? "Online" : "Cheque",
+      advanceAmount: required,
+      paymentMethod,
+      workflowStatus: paymentMethod === "Online" ? "Payment Pending" : "Appointment Scheduled",
+      bookingStatus: paymentMethod === "Offline" ? "PaymentPending" : "Submitted",
+      requiredBookingAmount: required,
+      minimumBookingAmount: config.minimum_booking_amount,
+      firstEmiAmount: config.first_emi_amount,
+      lockMinutes
     });
+
+    const bookingId = bookingResult.booking.booking_id;
+    const orderId = `BOOKING-${bookingId}-${Date.now()}`;
+
+    await sql`
+      INSERT INTO booking_payment_records (
+        booking_id, user_id, payment_method, gateway_name, amount, status, order_id
+      ) VALUES (
+        ${bookingId}, ${req.user.user_id}, ${paymentMethod},
+        ${paymentMethod === "Online" ? "razorpay" : null}, ${required},
+        ${paymentMethod === "Online" ? "Pending" : "Verification Pending"}, ${orderId}
+      )`;
+    await sql`UPDATE bookings SET payment_order_id = ${orderId} WHERE booking_id = ${bookingId}`;
+
+    if (paymentMethod === "Offline") {
+      if (!appointment?.date || !appointment?.start_time || !appointment?.end_time) {
+        throw Object.assign(new Error("Appointment date and time slot are required for offline payment."), { status: 400 });
+      }
+      await sql`
+        INSERT INTO booking_appointments (
+          booking_id, user_id, appointment_date, start_time, end_time, payment_mode
+        ) VALUES (
+          ${bookingId}, ${req.user.user_id}, ${appointment.date},
+          ${appointment.start_time}, ${appointment.end_time}, ${appointment.payment_mode || "Office Visit"}
+        )`;
+      await sql`UPDATE bookings SET booking_status = 'PaymentPending' WHERE booking_id = ${bookingId}`;
+    }
+
+    const created = {
+      booking: bookingResult.booking,
+      plot: bookingResult.plot,
+      lock: { expires_at: bookingResult.lockExpiresAt },
+      orderId
+    };
 
     if (paymentMethod === "Offline") {
       return ok(res, {
@@ -929,7 +928,7 @@ router.post("/booking/:id/online/verify", userAuth, async (req, res) => {
     const commission = await generateCommissionForPayment(req, bookingId, sourceType, `online-${booking.payment_order_id}`, amount, "Online");
     return ok(res, { booking_id: bookingId, invoice_url: `/api/booking/${bookingId}/invoice.pdf`, commission }, "Payment received and plot booked.");
   } catch (error) {
-    return fail(res, error.message, 400);
+    return fail(res, error.message, error.status || 400);
   }
 });
 
@@ -1139,7 +1138,7 @@ router.post("/admin/bookings/:id/offline/approve", adminAuth, async (req, res) =
     );
     return ok(res, { booking_id: bookingId, commission }, "Offline payment approved and booking confirmed.");
   } catch (error) {
-    return fail(res, error.message, 400);
+    return fail(res, error.message, error.status || 400);
   }
 });
 

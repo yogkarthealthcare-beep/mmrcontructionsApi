@@ -859,7 +859,7 @@ export async function pruneOldBackups() {
 }
 
 export function startBackupScheduler({ logAudit } = {}) {
-  if (schedulerStarted || parseBool(process.env.DB_BACKUP_SCHEDULER_DISABLED, false)) return;
+  if (schedulerStarted || process.env.NODE_ENV === "test" || parseBool(process.env.DB_BACKUP_SCHEDULER_DISABLED, false)) return;
   schedulerStarted = true;
 
   setInterval(async () => {

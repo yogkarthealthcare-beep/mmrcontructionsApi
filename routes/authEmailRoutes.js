@@ -4,6 +4,8 @@ import jwt from 'jsonwebtoken';
 import sql from '../db.js';
 import { sendEmail, otpEmailHtml } from '../emailService.js';
 import twoFactorService from '../services/twoFactor.service.js';
+import { bookingApprovalConfig } from '../config/bookingApproval.js';
+import { resolveReferralCode } from '../services/referralResolver.service.js';
 
 const router = express.Router();
 
@@ -139,6 +141,9 @@ async function ensurePendingRegistrationTable() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
   await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS optional_data JSONB NOT NULL DEFAULT '{}'::jsonb`;
+  await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS referred_by_user_id INTEGER`;
+  await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS referred_by_source TEXT`;
+  await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS referred_by_set_at TIMESTAMPTZ`;
   ensureRegistrationUniqueIndexes().catch((error) => {
     console.warn('[Associate Registration] Unique index check skipped; existing duplicates may need cleanup.', {
       message: error?.message,
@@ -185,48 +190,42 @@ async function findSponsorByCode(code) {
   const sponsorCode = normalizeSponsorCode(code);
   if (!sponsorCode) return null;
 
-  await ensureReferralLinkTable();
-
-  let [sponsor] = await sql`
-    SELECT DISTINCT u.user_id, u.full_name, u.member_id, u.invitation_code
-    FROM users u
-    LEFT JOIN associate_referral_links l
-      ON l.associate_user_id = u.user_id
-      AND l.is_active = TRUE
-    WHERE (
-        UPPER(COALESCE(u.invitation_code, '')) = ${sponsorCode}
-        OR UPPER(COALESCE(u.member_id, '')) = ${sponsorCode}
-        OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-[AC]-', 'MMR')) = ${sponsorCode}
-        OR UPPER(COALESCE(l.invite_code, '')) = ${sponsorCode}
-      )
-    LIMIT 1`;
-
-  if (!sponsor) {
-    let numericId = null;
-    if (/^\d+$/.test(sponsorCode)) {
-      numericId = parseInt(sponsorCode, 10);
-    } else if (/^INV-?\d+$/i.test(sponsorCode)) {
-      numericId = parseInt(sponsorCode.replace(/^INV-?/i, ''), 10);
-    }
-
-    const [invSponsor] = await sql`
-      SELECT id as user_id, full_name, mobile_number as member_id, mobile_number as invitation_code
-      FROM investor_users
-      WHERE deleted_at IS NULL
-        AND (
-          UPPER(mobile_number) = ${sponsorCode}
-          OR UPPER(email) = ${sponsorCode}
-          ${numericId ? sql`OR id = ${numericId}` : sql`OR FALSE`}
-        )
-      LIMIT 1
-    `;
-    if (invSponsor) {
-       sponsor = invSponsor;
-    }
+  // Use shared referral resolver
+  const resolved = await resolveReferralCode(sql, sponsorCode, { allowDefaultFallback: true });
+  if (resolved.valid && resolved.referrer) {
+    return {
+      user_id: resolved.userId,
+      full_name: resolved.fullName,
+      member_id: resolved.memberId,
+      invitation_code: resolved.invitationCode || resolved.memberId
+    };
   }
 
-  // Fallback for default sponsor MMR0001 (Suraj Kumar Verma)
-  if (!sponsor && (sponsorCode === 'MMR0001' || sponsorCode === 'MMR00001' || sponsorCode === 'MMR3001' || sponsorCode === 'MMR-A-3001' || sponsorCode === 'MMR-C-3001' || sponsorCode === 'MMR-ASC-0001')) {
+  // Investor fallback for legacy investor sponsor codes
+  let numericId = null;
+  if (/^\d+$/.test(sponsorCode)) {
+    numericId = parseInt(sponsorCode, 10);
+  } else if (/^INV-?\d+$/i.test(sponsorCode)) {
+    numericId = parseInt(sponsorCode.replace(/^INV-?/i, ''), 10);
+  }
+
+  const [invSponsor] = await sql`
+    SELECT id as user_id, full_name, mobile_number as member_id, mobile_number as invitation_code
+    FROM investor_users
+    WHERE deleted_at IS NULL
+      AND (
+        UPPER(mobile_number) = ${sponsorCode}
+        OR UPPER(email) = ${sponsorCode}
+        ${numericId ? sql`OR id = ${numericId}` : sql`OR FALSE`}
+      )
+    LIMIT 1
+  `.catch(() => []);
+  if (invSponsor) {
+    return invSponsor;
+  }
+
+  // Fallback for default corporate sponsor MMR0001 (Suraj Kumar Verma)
+  if (sponsorCode === 'MMR0001' || sponsorCode === 'MMR00001' || sponsorCode === 'MMR3001' || sponsorCode === 'MMR-A-3001' || sponsorCode === 'MMR-C-3001' || sponsorCode === 'MMR-ASC-0001') {
     const [suraj] = await sql`
       SELECT user_id, full_name, member_id, invitation_code
       FROM users
@@ -234,26 +233,19 @@ async function findSponsorByCode(code) {
          OR LOWER(email) = 'mmrconstructions@hotmail.com'
          OR user_id = 1
       ORDER BY user_id ASC
-      LIMIT 1`;
+      LIMIT 1`.catch(() => []);
     
     if (suraj) {
-      sponsor = {
+      return {
         user_id: suraj.user_id,
         full_name: suraj.full_name || 'Suraj Kumar Verma',
         member_id: suraj.invitation_code || suraj.member_id || 'MMR0001',
         invitation_code: suraj.invitation_code || 'MMR0001'
       };
-    } else {
-      sponsor = {
-        user_id: 1,
-        full_name: 'Suraj Kumar Verma',
-        member_id: 'MMR0001',
-        invitation_code: 'MMR0001'
-      };
     }
   }
 
-  return sponsor || null;
+  return null;
 }
 
 router.get('/verify-sponsor/:code', async (req, res) => {
@@ -336,31 +328,39 @@ async function createUserWithUniqueMemberId(db, pending) {
     FROM users`;
   const memberId = `${prefix}${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
   let created;
+  const referredByUserId = pending.referred_by_user_id !== undefined ? pending.referred_by_user_id : (pending.sponsor_user_id || null);
+  const referredBySource = pending.referred_by_source !== undefined ? pending.referred_by_source : (referredByUserId ? 'REGISTRATION_CODE' : 'DIRECT_SIGNUP');
+  const referredBySetAt = pending.referred_by_set_at || (referredByUserId ? new Date() : null);
+
   try {
     [created] = await db`
       INSERT INTO users (
         user_type, full_name, mobile_no, email,
         password_hash, sponsor_user_id, member_id,
-        account_status, email_verified, email_verified_at, is_otp_verified
+        account_status, email_verified, email_verified_at, is_otp_verified,
+        referred_by_user_id, referred_by_source, referred_by_set_at
       ) VALUES (
         ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
-        ${pending.password_hash}, ${pending.sponsor_user_id}, ${memberId},
-        ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE
+        ${pending.password_hash}, ${pending.sponsor_user_id || null}, ${memberId},
+        ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE,
+        ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
       )
-      RETURNING user_id, full_name, email, mobile_no, user_type, member_id, invitation_code`;
+      RETURNING user_id, full_name, email, mobile_no, user_type, member_id, invitation_code, referred_by_user_id, referred_by_source`;
   } catch (err) {
-    if (String(err?.message || '').includes('invitation_code')) {
+    if (String(err?.message || '').includes('invitation_code') || String(err?.message || '').includes('referred_by')) {
       [created] = await db`
         INSERT INTO users (
           user_type, full_name, mobile_no, email,
           password_hash, sponsor_user_id, member_id,
-          account_status, email_verified, email_verified_at, is_otp_verified
+          account_status, email_verified, email_verified_at, is_otp_verified,
+          referred_by_user_id, referred_by_source, referred_by_set_at
         ) VALUES (
           ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
-          ${pending.password_hash}, ${pending.sponsor_user_id}, ${memberId},
-          ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE
+          ${pending.password_hash}, ${pending.sponsor_user_id || null}, ${memberId},
+          ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE,
+          ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
         )
-        RETURNING user_id, full_name, email, mobile_no, user_type, member_id`;
+        RETURNING user_id, full_name, email, mobile_no, user_type, member_id, referred_by_user_id, referred_by_source`;
     } else {
       throw err;
     }
@@ -372,17 +372,16 @@ async function validateSignupInput(body) {
   const userType = body.user_type || 'Customer';
   const email = normalizeEmail(body.email);
   const mobileNo = normalizeMobileNo(body.mobile_no);
-  const DEFAULT_SPONSOR_CODE = 'MMR0001';
-  const effectiveSponsorCode = normalizeSponsorCode(body.sponsor_invite_code) || DEFAULT_SPONSOR_CODE;
+  const rawSponsorCode = body.sponsor_invite_code ? String(body.sponsor_invite_code).trim() : '';
   const fullName = body.full_name?.trim();
   const validationErrors = [];
 
-  console.log('[Associate Registration] Validating signup input...', {
+  console.log('[Registration] Validating signup input...', {
     user_type: userType,
     email,
     mobile_no: mobileNo,
     full_name_present: Boolean(fullName),
-    sponsor_invite_code: effectiveSponsorCode,
+    sponsor_invite_code: rawSponsorCode,
   });
 
   if (!fullName) validationErrors.push('Full name is required');
@@ -422,18 +421,45 @@ async function validateSignupInput(body) {
     return { error: 'Mobile number already registered', status: 409 };
   }
 
-  console.log('[Associate Registration] Validating sponsor invite code...', { effectiveSponsorCode });
-  const sponsor = await findSponsorByCode(effectiveSponsorCode);
-  if (!sponsor) {
-    console.error('[Associate Registration] Invalid sponsor invitation code:', {
-      sponsor_invite_code: effectiveSponsorCode,
-    });
-    return { error: 'Invalid sponsor code. Associate sponsor not found or inactive.', status: 400 };
-  }
-  const sponsorUserId = sponsor.user_id;
-  console.log('[Associate Registration] Sponsor found:', { sponsor_user_id: sponsorUserId, full_name: sponsor.full_name });
+  let sponsorUserId = null;
+  let sponsorInviteCode = null;
+  let referredByUserId = null;
+  let referredBySource = null;
+  let referredBySetAt = null;
 
-  console.log('[Associate Registration] Validation Passed');
+  if (rawSponsorCode) {
+    const sponsorCode = normalizeSponsorCode(rawSponsorCode);
+    console.log('[Registration] Resolving referral code with shared resolver...', { sponsorCode });
+    const res = await resolveReferralCode(sql, sponsorCode, { userType, allowDefaultFallback: false });
+
+    if (!res.valid) {
+      return { error: res.error || 'Invalid referral code', status: res.status || 400 };
+    }
+
+    if (res.referrer) {
+      sponsorUserId = res.userId;
+      sponsorInviteCode = res.invitationCode || res.memberId || sponsorCode;
+      referredByUserId = res.userId;
+      referredBySource = res.source || 'REGISTRATION_CODE';
+      referredBySetAt = new Date();
+    } else {
+      referredByUserId = null;
+      referredBySource = 'DIRECT_SIGNUP';
+      referredBySetAt = new Date();
+    }
+  } else {
+    // If user is Associate and no sponsor code given, fall back to default sponsor MMR0001 if exists
+    if (userType === 'Associate') {
+      const defaultSponsor = await findSponsorByCode('MMR0001');
+      if (defaultSponsor) {
+        sponsorUserId = defaultSponsor.user_id;
+        sponsorInviteCode = 'MMR0001';
+      }
+    }
+    referredByUserId = null;
+    referredBySource = 'DIRECT_SIGNUP';
+    referredBySetAt = new Date();
+  }
 
   return {
     value: {
@@ -443,7 +469,10 @@ async function validateSignupInput(body) {
       fullName,
       password: body.password,
       sponsorUserId,
-      sponsorInviteCode: effectiveSponsorCode,
+      sponsorInviteCode,
+      referredByUserId,
+      referredBySource,
+      referredBySetAt,
       optionalData: {},
     },
   };
@@ -478,6 +507,9 @@ router.post('/register-quick', async (req, res) => {
       password,
       sponsorUserId,
       sponsorInviteCode,
+      referredByUserId,
+      referredBySource,
+      referredBySetAt,
       optionalData,
     } = validation.value;
 
@@ -556,6 +588,9 @@ router.post('/register-quick', async (req, res) => {
         password_hash: passwordHash,
         sponsor_user_id: sponsorUserId,
         sponsor_invite_code: sponsorInviteCode,
+        referred_by_user_id: referredByUserId,
+        referred_by_source: referredBySource,
+        referred_by_set_at: referredBySetAt,
         optional_data: optionalData || {},
       };
 
@@ -798,10 +833,10 @@ router.post('/register-quick', async (req, res) => {
     await sql`
       INSERT INTO pending_registrations (
         email, mobile_no, user_type, full_name, password_hash,
-        sponsor_user_id, sponsor_invite_code, optional_data, otp_code, expires_at
+        sponsor_user_id, sponsor_invite_code, referred_by_user_id, referred_by_source, optional_data, otp_code, expires_at
       ) VALUES (
         ${email}, ${mobileNo}, ${userType}, ${fullName}, ${passwordHash},
-        ${sponsorUserId}, ${sponsorInviteCode}, ${sql.json(optionalData || {})}, ${otp}, ${expires}
+        ${sponsorUserId}, ${sponsorInviteCode}, ${referredByUserId}, ${referredBySource}, ${sql.json(optionalData || {})}, ${otp}, ${expires}
       )`;
     console.log(`[Registration:${requestId}] Pending record created`);
 

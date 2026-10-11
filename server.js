@@ -46,6 +46,11 @@ import { ensureEmiSchedulesForBooking, ensureInvoiceForEmi, ensureReceiptForEmi 
 import { setPlotStatus } from "./services/plotStatus.service.js";
 import { dispatchBookingNotification } from "./services/bookingNotification.service.js";
 import { normalizeHumanName, isValidHumanName, calculateAge, isValidState } from "./utils/validationHelper.js";
+import bookingService from "./services/bookingService.js";
+import salesAttributionReportsRoutes from "./routes/sales-attribution-reports.routes.js";
+import bookingApprovalsRoutes from "./routes/booking-approvals.routes.js";
+import adminAttributionRoutes from "./routes/admin-attribution.routes.js";
+import { bookingApprovalConfig } from "./config/bookingApproval.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -254,6 +259,7 @@ app.use('/api', newRoutes);
 app.use('/api', paymentRoutes);
 app.use('/api', walletRoutes);
 app.use('/api', bookingWorkflowRoutes);
+app.use(bookingWorkflowRoutes);
 app.use('/api', databaseBackupRoutes);
 app.use('/api', whatsappRoutes);
 app.use('/api', investorRoutes);
@@ -272,6 +278,11 @@ app.use(unifiedPaymentRoutes);
 ensureUnifiedPaymentSchema().then(() => {
   runHistoricalPaymentMigration();
 }).catch(err => console.error("[UnifiedPayment] Initialization error:", err));
+
+// Phase 2 Routes: Sales Attribution Reports, Booking Approvals & Bookable Customers
+app.use('/api', salesAttributionReportsRoutes);
+app.use('/api', bookingApprovalsRoutes);
+app.use('/api', adminAttributionRoutes);
 
 export async function ensurePlotManagementSchema() {
   try {
@@ -718,9 +729,9 @@ const ensureHomeExperienceSchema = () => {
         )`;
       await sql`ALTER TABLE investors ADD COLUMN IF NOT EXISTS user_id INTEGER`;
       await sql`ALTER TABLE investors ADD COLUMN IF NOT EXISTS investment_amount NUMERIC(15, 2) DEFAULT 0`;
-      await sql`CREATE SEQUENCE IF NOT EXISTS investors_id_seq`;
-      await sql`ALTER TABLE investors ALTER COLUMN id SET DEFAULT nextval('investors_id_seq')`;
-      await sql`ALTER SEQUENCE investors_id_seq OWNED BY investors.id`;
+      await sql`CREATE SEQUENCE IF NOT EXISTS investors_id_seq`.catch(() => {});
+      await sql`ALTER TABLE investors ALTER COLUMN id SET DEFAULT nextval('investors_id_seq')`.catch(() => {});
+      await sql`ALTER SEQUENCE investors_id_seq OWNED BY investors.id`.catch(() => {});
       await sql`CREATE INDEX IF NOT EXISTS idx_investors_public_order ON investors(display_order, created_at) WHERE is_active = TRUE AND is_deleted = FALSE`;
       await sql`
         CREATE TABLE IF NOT EXISTS book_plot_background_images (
@@ -1498,7 +1509,9 @@ const requireMlmSchema = (() => {
                         NEW.member_id := fn_generate_member_id(NEW.user_type);
                     END IF;
 
-                    IF NEW.user_type = 'Associate' AND NEW.invitation_code IS NULL THEN
+                    -- Extended: Generate invitation code for both Associate AND Team Member (mirrors Phase 1 migration)
+                    IF (NEW.user_type::TEXT = 'Associate' OR NEW.user_type::TEXT = 'Team Member') 
+                       AND (NEW.invitation_code IS NULL OR TRIM(NEW.invitation_code) = '') THEN
                         NEW.invitation_code := fn_generate_invite_code();
                     END IF;
 
@@ -2117,7 +2130,7 @@ const generateCommissionForPayment = async (req, {
       return { generated: 0, reason: "Seller blacklisted" };
     }
 
-    const [tmSellerRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} LIMIT 1`;
+    const [tmSellerRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} AND LOWER(status) IN ('approved', 'active') LIMIT 1`;
     const isTeamMemberSeller = Boolean(tmSellerRow);
     let leaderUserId = isTeamMemberSeller
       ? Number(tmSellerRow?.associate_id || seller.sponsor_user_id || 0)
@@ -2509,7 +2522,7 @@ const generateMlmCommissionForBooking = async (req, bookingId) => {
     WHERE user_id = ${Number(booking.sponsor_user_id)} AND user_type = 'Associate'`;
   if (!seller) return { generated: 0, reason: "Seller not found" };
 
-  const [tmSellerLegacyRow] = await sql`SELECT associate_id FROM team_members WHERE user_id = ${seller.user_id} LIMIT 1`;
+  const [tmSellerLegacyRow] = await sql`SELECT associate_id FROM team_members WHERE user_id = ${seller.user_id} AND LOWER(status) IN ('approved', 'active') LIMIT 1`;
   const isTeamMemberSellerLegacy = Boolean(tmSellerLegacyRow);
   const leaderUserId = isTeamMemberSellerLegacy
     ? Number(tmSellerLegacyRow?.associate_id || seller.sponsor_user_id)
@@ -2678,9 +2691,13 @@ const addPlotBookingHistory = async ({
 
 const addUserNotification = async ({ userId, adminId = null, title = null, message, channel = "InApp" }) => {
   if (!userId || !message) return;
-  await sql`
-    INSERT INTO notification_log (user_id, sent_by_admin_id, channel, title, message)
-    VALUES (${userId}, ${adminId}, ${channel}, ${title}, ${message})`;
+  try {
+    await sql`
+      INSERT INTO notification_log (user_id, sent_by_admin_id, channel, title, message)
+      VALUES (${userId}, ${adminId}, ${channel}, ${title}, ${message})`;
+  } catch (err) {
+    console.warn("[MMR API] Notification log insert notice (non-fatal):", err?.message);
+  }
   try {
     const [user] = await sql`SELECT mobile_no FROM users WHERE user_id = ${userId}`;
     if (user?.mobile_no) {
@@ -2993,7 +3010,35 @@ const verifyUserToken = async (req, res, next) => {
   }
 };
 
+const resolveEffectivePanel = (user) => {
+  if (!user) return null;
+  if (user.acting_panel === 'team-member' && Boolean(user.impersonated_by_admin_id)) {
+    return 'team-member';
+  }
+  const roleStr = String(user.user_type || user.role || '').toLowerCase().trim();
+  if (roleStr === 'team member' || roleStr === 'teammember') {
+    return 'team-member';
+  }
+  if (roleStr === 'associate') {
+    return 'associate';
+  }
+  if (roleStr === 'customer') {
+    return 'customer';
+  }
+  if (roleStr === 'investor') {
+    return 'investor';
+  }
+  if (['superadmin', 'admin', 'financemanager'].includes(roleStr)) {
+    return 'admin';
+  }
+  return null;
+};
+
 const requireAssociate = (req, res, next) => {
+  const panel = resolveEffectivePanel(req.user);
+  if (panel === 'team-member') {
+    return err(res, "Forbidden — Associate access required (current session is acting as Team Member)", 403);
+  }
   const isAssoc = req.user?.user_type === "Associate" ||
                   req.user?.role === "Associate" ||
                   Boolean(req.user?.is_associate) ||
@@ -3004,7 +3049,9 @@ const requireAssociate = (req, res, next) => {
 };
 
 const requireSalesEntity = (req, res, next) => {
-  const isSales = ["Associate", "Team Member"].includes(req.user?.user_type) ||
+  const panel = resolveEffectivePanel(req.user);
+  const isSales = (panel === 'team-member') ||
+                  ["Associate", "Team Member"].includes(req.user?.user_type) ||
                   req.user?.role === "Associate" ||
                   req.user?.role === "Team Member" ||
                   Boolean(req.user?.is_associate) ||
@@ -4688,7 +4735,7 @@ app.post("/api/auth/register", upload.fields([
     const [dupAadhar] = await sql`SELECT user_id FROM users WHERE aadhar_number = ${aadhar_number}`;
     if (dupAadhar) return err(res, "Aadhar already registered", 409);
 
-    // ── Find sponsor ──
+    // ── Find sponsor (MLM tree) ──
     let sponsorUserId = null;
     if (sponsor_invite_code) {
       const [sponsor] = await sql`
@@ -4699,6 +4746,43 @@ app.post("/api/auth/register", upload.fields([
     }
     if (!sponsorUserId && user_type !== "Investor") {
       sponsorUserId = await getDefaultSponsorUserId();
+    }
+
+    // ── Referral attribution (Phase 2) ──
+    let referredByUserId = null;
+    let referredBySource = null;
+    let referredBySetAt = null;
+
+    if (user_type === "Customer") {
+      const rawCode = String(sponsor_invite_code || req.body.referral_code || req.body.invitation_code || "").trim();
+      if (rawCode) {
+        const cleanCode = rawCode.toUpperCase();
+        const [referrer] = await sql`
+          SELECT user_id, user_type, account_status FROM users
+          WHERE (
+            UPPER(COALESCE(invitation_code, '')) = ${cleanCode}
+            OR UPPER(COALESCE(member_id, '')) = ${cleanCode}
+            OR UPPER(regexp_replace(COALESCE(member_id, ''), '^MMR-[AC]-', 'MMR')) = ${cleanCode}
+          )
+          LIMIT 1`;
+        if (referrer && referrer.account_status === "Active" && ["Associate", "Team Member"].includes(referrer.user_type)) {
+          referredByUserId = referrer.user_id;
+          referredBySource = "REGISTRATION_CODE";
+          referredBySetAt = new Date();
+        } else {
+          if (bookingApprovalConfig.REFERRAL_INVALID_CODE_MODE === "reject") {
+            return err(res, "Invalid referral code", 400);
+          } else {
+            referredByUserId = null;
+            referredBySource = "DIRECT_SIGNUP";
+            referredBySetAt = new Date();
+          }
+        }
+      } else {
+        referredByUserId = null;
+        referredBySource = "DIRECT_SIGNUP";
+        referredBySetAt = new Date();
+      }
     }
 
     // ── Hash password if provided ──
@@ -4712,14 +4796,16 @@ app.post("/api/auth/register", upload.fields([
         mobile_no, alternate_mobile, email,
         pan_number, aadhar_number, is_otp_verified,
         password_hash,
-        sponsor_user_id, account_status
+        sponsor_user_id, account_status,
+        referred_by_user_id, referred_by_source, referred_by_set_at
       ) VALUES (
         ${user_type}, ${cleanFullName}, ${date_of_birth || null}, ${gender || null},
         ${cleanFatherName}, ${cleanMotherName}, ${cleanSpouseName},
         ${mobile_no}, ${alternate_mobile || null}, ${email || null},
         ${pan_number.toUpperCase()}, ${aadhar_number}, TRUE,
         ${passwordHash},
-        ${sponsorUserId}, 'Pending'
+        ${sponsorUserId}, 'Pending',
+        ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
       ) RETURNING user_id, full_name, mobile_no, user_type`;
 
     const userId = newUser.user_id;
@@ -4833,6 +4919,43 @@ app.post("/api/auth/register-quick", async (req, res) => {
       sponsorUserId = await getDefaultSponsorUserId();
     }
 
+    // ── Referral attribution (Phase 2) ──
+    let referredByUserId = null;
+    let referredBySource = null;
+    let referredBySetAt = null;
+
+    if (user_type === "Customer") {
+      const rawCode = String(sponsor_invite_code || "").trim();
+      if (rawCode) {
+        const cleanCode = rawCode.toUpperCase();
+        const [referrer] = await sql`
+          SELECT user_id, user_type, account_status FROM users
+          WHERE (
+            UPPER(COALESCE(invitation_code, '')) = ${cleanCode}
+            OR UPPER(COALESCE(member_id, '')) = ${cleanCode}
+            OR UPPER(regexp_replace(COALESCE(member_id, ''), '^MMR-[AC]-', 'MMR')) = ${cleanCode}
+          )
+          LIMIT 1`;
+        if (referrer && referrer.account_status === "Active" && ["Associate", "Team Member"].includes(referrer.user_type)) {
+          referredByUserId = referrer.user_id;
+          referredBySource = "REGISTRATION_CODE";
+          referredBySetAt = new Date();
+        } else {
+          if (bookingApprovalConfig.REFERRAL_INVALID_CODE_MODE === "reject") {
+            return err(res, "Invalid referral code", 400);
+          } else {
+            referredByUserId = null;
+            referredBySource = "DIRECT_SIGNUP";
+            referredBySetAt = new Date();
+          }
+        }
+      } else {
+        referredByUserId = null;
+        referredBySource = "DIRECT_SIGNUP";
+        referredBySetAt = new Date();
+      }
+    }
+
     const passwordHash = await bcrypt.hash(password, 12);
 
     const authSettings = await getAppAuthSettingsRow();
@@ -4885,11 +5008,13 @@ app.post("/api/auth/register-quick", async (req, res) => {
           INSERT INTO users (
             member_id, user_type, full_name, mobile_no, email, password_hash,
             sponsor_user_id, account_status, email_verified, is_otp_verified,
-            registered_at, updated_at
+            registered_at, updated_at,
+            referred_by_user_id, referred_by_source, referred_by_set_at
           ) VALUES (
             ${memberId}, ${user_type}, ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
             ${sponsorUserId}, 'Active', true, true,
-            NOW(), NOW()
+            NOW(), NOW(),
+            ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
           )
           RETURNING user_id, member_id, user_type, full_name, email, mobile_no`;
 
@@ -4956,12 +5081,18 @@ app.post("/api/auth/register-quick", async (req, res) => {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`;
 
+    const pendingData = {
+      referred_by_user_id: referredByUserId,
+      referred_by_source: referredBySource,
+      referred_by_set_at: referredBySetAt ? referredBySetAt.toISOString() : null
+    };
+
     await sql`DELETE FROM pending_registrations WHERE email = ${cleanEmail} OR mobile_no = ${cleanMobile}`;
     await sql`
       INSERT INTO pending_registrations (
-        email, mobile_no, user_type, full_name, password_hash, sponsor_user_id, sponsor_invite_code, otp_code, expires_at
+        email, mobile_no, user_type, full_name, password_hash, sponsor_user_id, sponsor_invite_code, optional_data, otp_code, expires_at
       ) VALUES (
-        ${cleanEmail}, ${cleanMobile}, ${user_type}, ${full_name.trim()}, ${passwordHash}, ${sponsorUserId}, ${sponsor_invite_code || null}, ${otp}, ${exp}
+        ${cleanEmail}, ${cleanMobile}, ${user_type}, ${full_name.trim()}, ${passwordHash}, ${sponsorUserId}, ${sponsor_invite_code || null}, ${sql.json(pendingData)}, ${otp}, ${exp}
       )`;
 
     try {
@@ -5039,16 +5170,22 @@ app.post("/api/auth/verify-email-otp", async (req, res) => {
 
     // Customer or Associate
     const memberId = await genMemberID(pending.user_type);
+    const optData = pending.optional_data || {};
+    const referredByUserId = optData.referred_by_user_id || null;
+    const referredBySource = optData.referred_by_source || null;
+    const referredBySetAt = optData.referred_by_set_at ? new Date(optData.referred_by_set_at) : (referredBySource ? new Date() : null);
 
     const [createdUser] = await sql`
       INSERT INTO users (
         user_type, full_name, mobile_no, email,
         password_hash, sponsor_user_id, member_id,
-        account_status, email_verified, email_verified_at, is_otp_verified
+        account_status, email_verified, email_verified_at, is_otp_verified,
+        referred_by_user_id, referred_by_source, referred_by_set_at
       ) VALUES (
         ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
         ${pending.password_hash}, ${pending.sponsor_user_id}, ${memberId},
-        ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE
+        ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE,
+        ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
       )
       RETURNING user_id, full_name, email, user_type, member_id, invitation_code`;
 
@@ -5499,7 +5636,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
   }
 });
 
-app.post("/api/auth/change-password", verifyUserToken, async (req, res) => {
+app.post(["/api/auth/change-password", "/api/user/change-password"], verifyUserToken, async (req, res) => {
   try {
     const { current_password, new_password, confirm_password } = req.body;
     if (!current_password || !new_password || !confirm_password)
@@ -5715,31 +5852,65 @@ app.post(["/api/admin/login-as-user", "/api/admin/auth/impersonate", "/api/admin
     let redirectUrl = "";
     let payload = {};
 
-    if (["Customer", "Associate"].some(t => t.toLowerCase() === normalizedType.toLowerCase())) {
-      const [user] = await sql`
+    if (["Customer", "Associate", "Team Member", "teammember"].some(t => t.toLowerCase() === normalizedType.toLowerCase())) {
+      let [user] = await sql`
         SELECT user_id, full_name, email, mobile_no, user_type, account_status, member_id, invitation_code
         FROM users
         WHERE user_id = ${cleanUserId}`;
 
       if (!user) {
+        const [tm] = await sql`SELECT * FROM team_members WHERE (id = ${cleanUserId} OR user_id = ${cleanUserId}) AND LOWER(status) IN ('approved', 'active') LIMIT 1`;
+        if (tm && tm.user_id) {
+          [user] = await sql`SELECT user_id, full_name, email, mobile_no, user_type, account_status, member_id, invitation_code FROM users WHERE user_id = ${tm.user_id}`;
+        }
+      }
+
+      if (!user) {
         return err(res, "User account not found", 404);
       }
 
-      if (user.account_status !== "Active") {
-        return err(res, `Account cannot be accessed because status is '${user.account_status}'.`, 403);
+      if (user.account_status !== "Active" && user.account_status !== "Approved") {
+        return err(res, `Account cannot be accessed because status is '${user.account_status}'.`, 400);
       }
 
-      targetUser = user;
-      redirectUrl = user.user_type === "Associate" ? "/associate/dashboard" : "/user/dashboard";
+      // C1: Strict match only on user_id AND status in ('approved', 'active'). Zero mobile_no / member_id matching.
+      const [tmRecord] = await sql`
+        SELECT id, team_member_uid, status FROM team_members 
+        WHERE user_id = ${user.user_id} 
+          AND LOWER(status) IN ('approved', 'active')
+        LIMIT 1
+      `;
+      const isTmMembership = Boolean(tmRecord);
+      const isRequestedTm = normalizedType.toLowerCase().includes("team member") || normalizedType.toLowerCase() === "teammember";
+      const dbRole = user.user_type || 'Customer';
+      const isRoleConflict = isTmMembership && (dbRole === 'Associate' || dbRole === 'Customer');
+
+      let acting_panel = null;
+      if (isRequestedTm || String(dbRole).toLowerCase().includes("team member")) {
+        redirectUrl = "/team-member/dashboard";
+        if (dbRole !== "Team Member") {
+          acting_panel = 'team-member';
+        }
+      } else {
+        redirectUrl = dbRole === "Associate" ? "/associate/dashboard" : "/customer/dashboard";
+      }
+
+      targetUser = {
+        ...user,
+        role_conflict: isRoleConflict,
+        acting_panel: acting_panel || undefined
+      };
 
       payload = {
         user_id: user.user_id,
-        user_type: user.user_type,
+        user_type: dbRole, // Source of truth from database
+        role: dbRole,
         member_id: user.member_id,
         mobile_no: user.mobile_no,
         email: user.email,
         full_name: user.full_name,
-        impersonated_by_admin_id: req.admin?.admin_id || req.admin?.id || 1
+        impersonated_by_admin_id: req.admin?.admin_id || req.admin?.id || 1,
+        ...(acting_panel ? { acting_panel } : {})
       };
     } else if (normalizedType.toLowerCase() === "investor") {
       const [investor] = await sql`
@@ -5778,7 +5949,7 @@ app.post(["/api/admin/login-as-user", "/api/admin/auth/impersonate", "/api/admin
         impersonated_by_admin_id: req.admin?.admin_id || req.admin?.id || 1
       };
     } else {
-      return err(res, "Invalid user_type. Expected 'Customer', 'Associate', or 'Investor'.", 400);
+      return err(res, "Invalid user_type. Expected 'Customer', 'Associate', 'Team Member', or 'Investor'.", 400);
     }
 
     const jwtSecret = process.env.JWT_SECRET;
@@ -5805,6 +5976,7 @@ app.post(["/api/admin/login-as-user", "/api/admin/auth/impersonate", "/api/admin
       token,
       refresh_token: refreshToken,
       user: targetUser,
+      role_conflict: targetUser?.role_conflict || false,
       redirect_url: redirectUrl
     }, `Successfully generated login session for ${targetUser.full_name}`);
   } catch (e) {
@@ -5892,8 +6064,8 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
                account_no, ifsc_code, applicant_signature_url, associate_signature_url, status
         FROM team_members
         WHERE user_id = u.user_id 
-           OR (mobile_no IS NOT NULL AND u.mobile_no IS NOT NULL AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(u.mobile_no, '\\D', '', 'g'), 10))
-        ORDER BY (user_id = u.user_id) DESC, created_at DESC
+          AND LOWER(status) IN ('approved', 'active')
+        ORDER BY created_at DESC
         LIMIT 1
       ) tm ON TRUE
       LEFT JOIN LATERAL (
@@ -5955,7 +6127,17 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
       WHERE u.user_id = ${req.user.user_id}`;
 
     if (!user) return err(res, "User not found", 404);
-    return ok(res, user);
+    const effectivePanel = resolveEffectivePanel(req.user);
+    const referralCode = user.invitation_code || user.member_id || "";
+    const referralLink = referralCode ? `https://mmrconstructions.in/register?ref=${encodeURIComponent(referralCode)}` : null;
+    return ok(res, {
+      ...user,
+      acting_panel: effectivePanel === 'team-member' ? 'team-member' : undefined,
+      invitation_code: user.invitation_code || referralCode,
+      referral_code: referralCode,
+      referral_link: referralLink,
+      referral_url: referralLink,
+    });
   } catch (e) {
     console.error("[GET /api/profile Error]", e);
     return err(res, e.message);
@@ -7026,77 +7208,34 @@ async function safeInsertPlotStatusHistory({ plot_id, old_status, new_status, ch
 
 app.post("/api/bookings", verifyUserToken, async (req, res) => {
   try {
-    const { plot_id, payment_type, advance_amount } = req.body;
+    const { plot_id, payment_type, advance_amount, notes } = req.body;
     if (!plot_id || !payment_type || !advance_amount)
       return err(res, "plot_id, payment_type, advance_amount required", 400);
-    if (!["EMI", "FullPayment", "DownPayment"].includes(payment_type))
+    if (!["EMI", "FullPayment", "DownPayment", "OneTime", "PartWise", "Partial", "Cash", "Online", "Installment"].includes(payment_type))
       return err(res, "Invalid payment_type", 400);
     if (!Number.isFinite(Number(advance_amount)) || Number(advance_amount) <= 0)
       return err(res, "advance_amount must be greater than 0", 400);
 
-    const [user] = await sql`
-      SELECT u.account_status, u.is_active,
-             (COALESCE(u.email_verified, FALSE) OR COALESCE(u.is_otp_verified, FALSE)) AS email_verified,
-             COALESCE(k.status, 'Not Submitted') AS kyc_status
-      FROM users u
-      LEFT JOIN user_kyc_profiles k ON k.user_id = u.user_id
-      WHERE u.user_id = ${req.user.user_id}`;
-    if (!user || !["Active", "Approved"].includes(String(user.account_status)))
-      return err(res, "User must be approved and active before booking.", 403);
-    if (!user.email_verified)
-      return err(res, "Please verify your email address before booking a plot.", 403);
-    if (user.kyc_status !== "Approved")
-      return err(res, "Your KYC documents must be approved before booking a plot.", 403);
+    const result = await bookingService.createBooking({
+      actor: req.user,
+      buyerType: req.body.buyer_type || req.body.buyerType || "SELF",
+      customerId: req.body.customer_id || req.body.customerId,
+      plotId: plot_id,
+      paymentType: payment_type,
+      advanceAmount: advance_amount,
+      paymentMethod: req.body.payment_method || "Online",
+      notes: notes || "Booking submitted by user"
+    });
 
-    // Check plot is active and available (Vacant or InProcess permitted, Booked/Sold blocked)
-    const [plot] = await sql`SELECT * FROM plots WHERE plot_id = ${plot_id} AND is_active = TRUE`;
-    if (!plot) return err(res, "Plot not found or inactive", 404);
-    if (plot.plot_status === "Booked" || plot.plot_status === "Sold")
-      return err(res, "This plot is already booked or sold and no longer available.", 409);
+    const booking = {
+      booking_id: result.booking.booking_id,
+      booking_serial: result.serial,
+      booking_status: result.booking.booking_status
+    };
 
-    // Sync bookings sequence
-    await sql`
-      SELECT setval(
-        pg_get_serial_sequence('bookings', 'booking_id'),
-        COALESCE((SELECT MAX(booking_id) FROM bookings), 0) + 1,
-        false
-      )
-    `.catch(() => {});
-
-    // Generate serial
-    const [seq] = await sql`
-      SELECT COALESCE(MAX(CAST(SUBSTRING(booking_serial FROM 10) AS INT)),0)+1 AS n
-      FROM bookings WHERE booking_serial LIKE 'MMR-' || to_char(NOW(),'YYYY') || '-%'`;
-    const serial = `MMR-${new Date().getFullYear()}-${String(seq.n).padStart(5, "0")}`;
-
-    const [booking] = await sql`
-      INSERT INTO bookings (booking_serial, user_id, plot_id, payment_type, advance_amount)
-      VALUES (${serial}, ${req.user.user_id}, ${plot_id}, ${payment_type}, ${advance_amount})
-      RETURNING booking_id, booking_serial, booking_status`;
-
-    if (payment_type === "EMI") {
-      const start = new Date();
-      start.setMonth(start.getMonth() + 1);
-      const tenure = Number(plot.emi_tenure_months || 60);
-      for (let i = 1; i <= tenure; i++) {
-        const due = new Date(start);
-        due.setMonth(due.getMonth() + (i - 1));
-        try {
-          await sql`
-            INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
-            VALUES (${booking.booking_id}, ${req.user.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi || 0})
-          `;
-        } catch (emiErr) {
-          console.warn(`[MMR API] EMI schedule insert notice (installment ${i}):`, emiErr?.message);
-        }
-      }
-    }
-
-    // Mark plot InProcess immediately so public availability updates on refresh.
-    await sql`UPDATE plots SET plot_status = 'InProcess', updated_at = NOW() WHERE plot_id = ${plot_id}`;
     await safeInsertPlotStatusHistory({
       plot_id,
-      old_status: plot.plot_status || 'Vacant',
+      old_status: result.plot?.plot_status || 'Vacant',
       new_status: 'InProcess',
       reason: 'Booking submitted by user'
     });
@@ -7113,12 +7252,12 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
     await addUserNotification({
       userId: req.user.user_id,
       title: "Booking submitted",
-      message: `Aapki booking ${serial} submit ho gayi, admin review karega`,
+      message: `Aapki booking ${booking.booking_serial} submit ho gayi, admin review karega`,
     });
 
     return ok(res, booking, "Booking submitted. Awaiting admin confirmation.", 201);
   } catch (e) {
-    return err(res, e.message);
+    return err(res, e.message, e.status || 400);
   }
 });
 
@@ -8171,7 +8310,7 @@ app.get("/api/associate/commissions", verifyUserToken, requireSalesEntity, async
   }
 });
 
-app.get("/api/associate/invite-code", verifyUserToken, requireAssociate, async (req, res) => {
+app.get("/api/associate/invite-code", verifyUserToken, requireSalesEntity, async (req, res) => {
   try {
     const [user] = await sql`
       SELECT user_id, invitation_code, member_id, full_name FROM users WHERE user_id = ${req.user.user_id}`;
@@ -8182,17 +8321,27 @@ app.get("/api/associate/invite-code", verifyUserToken, requireAssociate, async (
   }
 });
 
-app.get("/api/associate/referral-link", verifyUserToken, requireAssociate, async (req, res) => {
+app.get("/api/associate/referral-link", verifyUserToken, requireSalesEntity, async (req, res) => {
   try {
     const [user] = await sql`
       SELECT user_id, invitation_code, member_id, full_name, user_type, account_status
       FROM users WHERE user_id = ${req.user.user_id}`;
-    if (!user || user.user_type !== "Associate" || user.account_status !== "Active")
-      return err(res, "Only active associates can access referral link", 403);
+    if (!user || !["Associate", "Team Member"].includes(user.user_type) || user.account_status !== "Active")
+      return err(res, "Only active associates and team members can access referral link", 403);
     return ok(res, await ensureAssociateReferralLink(req, user));
   } catch (e) {
     return err(res, e.message);
   }
+});
+
+app.get("/api/team-member/referral-link", verifyUserToken, requireSalesEntity, (req, res, next) => {
+  req.url = "/api/associate/referral-link";
+  app.handle(req, res, next);
+});
+
+app.get("/api/team-member/invite-code", verifyUserToken, requireSalesEntity, (req, res, next) => {
+  req.url = "/api/associate/invite-code";
+  app.handle(req, res, next);
 });
 
 const getDefaultSponsorUserId = async () => {
@@ -8519,11 +8668,13 @@ app.post("/api/associate/customers", verifyUserToken, requireAssociate, async (r
       INSERT INTO users (
         member_id, user_type, full_name, mobile_no, email, password_hash,
         sponsor_user_id, account_status, email_verified, is_otp_verified,
-        registered_at, updated_at
+        registered_at, updated_at,
+        referred_by_user_id, referred_by_source, referred_by_set_at
       ) VALUES (
         ${memberId}, 'Customer', ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
         ${sponsorUserId}, 'Active', true, true,
-        NOW(), NOW()
+        NOW(), NOW(),
+        ${sponsorUserId}, 'ASSOCIATE_ENROLLMENT', NOW()
       )
       RETURNING user_id, member_id, user_type, full_name, email, mobile_no, account_status, registered_at`;
 
@@ -8805,91 +8956,29 @@ app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (re
       return err(res, "Installment (EMI) option is currently unavailable. Please choose One-Time or Part-Wise Payment.", 400);
     }
 
-    // ── 1. Backend Authorization: Verify team member belongs to this Associate ──
-    const [teamMember] = await sql`
-      SELECT u.user_id, u.full_name, u.email, u.mobile_no, u.member_id, u.sponsor_user_id
-      FROM users u
-      WHERE u.user_id = ${Number(team_member_user_id)}
-        AND (
-          u.sponsor_user_id = ${associateId}
-          OR EXISTS (
-            SELECT 1 FROM mlm_tree_closure c
-            WHERE c.ancestor_user_id = ${associateId} AND c.descendant_user_id = u.user_id
-          )
-        )
-      LIMIT 1`;
-
-    if (!teamMember) {
-      return err(res, "Unauthorized: The selected customer is not a member of your authorized downline team.", 403);
-    }
-
-    // ── 2. Verify Plot Availability ──
-    const [plot] = await sql`
-      SELECT p.*, s.site_name, s.city, s.full_address
-      FROM plots p
-      JOIN sites s ON p.site_id = s.site_id
-      WHERE p.plot_id = ${Number(plot_id)} AND p.is_active = TRUE
-      LIMIT 1`;
-
-    if (!plot) {
-      return err(res, "Selected plot was not found or is currently inactive.", 404);
-    }
-
-    if (plot.plot_status !== "Vacant") {
-      return err(res, `Plot ${plot.plot_number} is ${plot.plot_status} and not available for new booking.`, 409);
-    }
-
-    const totalPlotPrice = Number(plot.base_price || (Number(plot.plot_area || 0) * 1000) || 0);
-    let initialPaid = 0;
-
-    if (payment_option === "OneTime") {
-      initialPaid = Number(booking_amount) > 0 ? Number(booking_amount) : totalPlotPrice;
-    } else {
-      // Part-Wise Payment (0% Interest)
-      initialPaid = Number(booking_amount || 0);
-      if (initialPaid <= 0) {
-        return err(res, "Please specify an initial booking amount for Part-Wise Payment.", 400);
-      }
-      if (initialPaid > totalPlotPrice) {
-        return err(res, `Initial payment (₹${initialPaid}) cannot exceed Total Plot Value (₹${totalPlotPrice}).`, 400);
-      }
-    }
-
-    const remainingBalance = Math.max(0, totalPlotPrice - initialPaid);
-
-    // ── 3. Generate Booking Serial ──
-    const [seq] = await sql`
-      SELECT COALESCE(MAX(CAST(SUBSTRING(booking_serial FROM 10) AS INT)), 0) + 1 AS n
-      FROM bookings WHERE booking_serial LIKE 'MMR-' || to_char(NOW(), 'YYYY') || '-%'`;
-    const serial = `MMR-${new Date().getFullYear()}-${String(seq?.n || 1).padStart(5, "0")}`;
-
-    const [associate] = await sql`SELECT user_id, full_name, member_id FROM users WHERE user_id = ${associateId}`;
-
-    // ── 4. Insert Booking (Status: Pending awaiting Admin Approval) ──
-    const [booking] = await sql`
-      INSERT INTO bookings (
-        booking_serial, user_id, plot_id, site_id, payment_type,
-        advance_amount, booking_status, payment_method, notes, created_at, updated_at
-      )
-      VALUES (
-        ${serial}, ${teamMember.user_id}, ${plot.plot_id}, ${plot.site_id},
-        ${payment_option === "OneTime" ? "FullPayment" : "Partial"},
-        ${initialPaid}, 'PaymentPending', ${payment_method || 'Cash / Bank'},
-        ${notes || `Assisted booking by Associate ${associate?.full_name || ''} (${associate?.member_id || associateId})`},
-        NOW(), NOW()
-      )
-      RETURNING booking_id, booking_serial, booking_status, created_at`;
-
-    // ── 5. Reserve Plot Status to InProcess ──
-    await sql`UPDATE plots SET plot_status = 'InProcess', updated_at = NOW() WHERE plot_id = ${plot.plot_id}`;
-    await safeInsertPlotStatusHistory({
-      plot_id: plot.plot_id,
-      old_status: 'Vacant',
-      new_status: 'InProcess',
-      reason: `Booking request submitted by Associate ${associate?.full_name || ''} for ${teamMember.full_name}`
+    // Call shared booking service mapping team_member_user_id to customerId
+    const result = await bookingService.createBooking({
+      actor: req.user,
+      buyerType: 'CUSTOMER',
+      customerId: team_member_user_id,
+      plotId: plot_id,
+      siteId: site_id,
+      paymentType: payment_option === "OneTime" ? "FullPayment" : "Partial",
+      advanceAmount: booking_amount,
+      paymentMethod: payment_method || "Cash / Bank",
+      notes: notes || `Assisted booking by Associate`
     });
 
-    // ── 6. Create Invoice Record (Single Source of Truth) ──
+    const booking = result.booking;
+    const plot = result.plot;
+    const teamMember = result.buyer;
+    const [associate] = await sql`SELECT user_id, full_name, member_id FROM users WHERE user_id = ${associateId}`;
+
+    const totalPlotPrice = Number(plot.sold_price || plot.base_price || (Number(plot.plot_area || 0) * 1000) || 0);
+    const initialPaid = Number(booking.advance_amount || 0);
+    const remainingBalance = Number(booking.remaining_balance || Math.max(0, totalPlotPrice - initialPaid));
+
+    // Create Invoice Record (Single Source of Truth)
     const formattedInvNum = `MMR-INV-${booking.booking_id}`;
     const invData = {
       invoice_number: formattedInvNum,
@@ -8940,19 +9029,10 @@ app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (re
       console.warn("[Associate Booking Invoice non-critical warning]:", invErr.message);
     }
 
-    // ── 7. Audit Log & Customer Notification ──
-    try {
-      await sql`
-        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-        VALUES ('User', ${associateId}, ${associate?.full_name || 'Associate'}, 'PlotBooking', 'BookingInitiated', 'bookings', ${booking.booking_id})`;
-    } catch (auditErr) {
-      console.warn('[associate booking] audit_log warning:', auditErr.message);
-    }
-
     await addUserNotification({
       userId: teamMember.user_id,
       title: "Plot Booking Initiated",
-      message: `Associate ${associate?.full_name || ''} has initiated plot booking (${serial}) for Plot ${plot.plot_number} at ${plot.site_name}. Awaiting admin approval.`
+      message: `Associate ${associate?.full_name || ''} has initiated plot booking (${booking.booking_serial}) for Plot ${plot.plot_number} at ${plot.site_name}. Awaiting admin approval.`
     }).catch(() => {});
 
     return ok(res, {
@@ -8971,7 +9051,7 @@ app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (re
     }, "Plot booking request submitted successfully. Awaiting admin review.", 201);
   } catch (e) {
     console.error("[Associate Plot Booking Error]:", e);
-    return err(res, e.message);
+    return err(res, e.message, e.status || 400);
   }
 });
 
@@ -9764,16 +9844,37 @@ app.post("/api/admin/customers",
       const passwordHash = await bcrypt.hash(password, 12);
       const memberId = await genMemberID("Customer");
 
+      let referredByUserId = null;
+      let referredBySource = "DIRECT_SIGNUP";
+      let referredBySetAt = new Date();
+
+      const rawRefId = req.body.referrer_user_id || req.body.referrer_id || req.body.referred_by_user_id;
+      if (rawRefId) {
+        const [refUser] = await sql`
+          SELECT user_id, user_type, account_status FROM users 
+          WHERE user_id = ${Number(rawRefId)}
+        `;
+        if (!refUser || !["Active", "Approved"].includes(refUser.account_status) || !["Associate", "Team Member"].includes(refUser.user_type)) {
+          return err(res, "Invalid referrer. Referrer must be an active Associate or Team Member.", 400);
+        }
+        referredByUserId = refUser.user_id;
+        referredBySource = "ADMIN_ASSIGNED";
+      }
+
+      const defaultSponsorId = await getDefaultSponsorUserId();
+
       const [customer] = await sql`
         INSERT INTO users (
           user_type, full_name, email, mobile_no, password_hash,
           member_id, account_status, is_otp_verified, email_verified,
-          email_verified_at, is_active, is_verified, approved_by_admin_id, approved_at
+          email_verified_at, is_active, is_verified, approved_by_admin_id, approved_at,
+          sponsor_user_id, referred_by_user_id, referred_by_source, referred_by_set_at
         )
         VALUES (
           'Customer', ${fullName}, ${email}, ${mobileNo}, ${passwordHash},
           ${memberId}, ${accountStatus}, FALSE, FALSE,
-          NULL, TRUE, FALSE, NULL, NULL
+          NULL, TRUE, FALSE, NULL, NULL,
+          ${defaultSponsorId}, ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
         )
         RETURNING user_id, member_id, user_type, full_name, email, mobile_no,
                   account_status, registered_at, updated_at`;
@@ -10508,10 +10609,38 @@ app.post("/api/admin/users/:id/blacklist",
 
 async function ensurePlotAllocationSchema() {
   try {
-    await sql`ALTER TABLE bookings ALTER COLUMN booking_status TYPE VARCHAR(60) USING booking_status::text`.catch(() => {});
-    await sql`ALTER TABLE bookings ALTER COLUMN payment_type TYPE VARCHAR(60) USING payment_type::text`.catch(() => {});
-    await sql`ALTER TABLE bookings ALTER COLUMN payment_method TYPE VARCHAR(60) USING payment_method::text`.catch(() => {});
-    await sql`ALTER TABLE bookings ALTER COLUMN workflow_status TYPE VARCHAR(80) USING workflow_status::text`.catch(() => {});
+    await sql.unsafe(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'bookings' AND column_name = 'booking_status' AND data_type <> 'character varying'
+        ) THEN
+          ALTER TABLE bookings ALTER COLUMN booking_status TYPE VARCHAR(60) USING booking_status::text;
+        END IF;
+
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'bookings' AND column_name = 'payment_type' AND data_type <> 'character varying'
+        ) THEN
+          ALTER TABLE bookings ALTER COLUMN payment_type TYPE VARCHAR(60) USING payment_type::text;
+        END IF;
+
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'bookings' AND column_name = 'payment_method' AND data_type <> 'character varying'
+        ) THEN
+          ALTER TABLE bookings ALTER COLUMN payment_method TYPE VARCHAR(60) USING payment_method::text;
+        END IF;
+
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'bookings' AND column_name = 'workflow_status' AND data_type <> 'character varying'
+        ) THEN
+          ALTER TABLE bookings ALTER COLUMN workflow_status TYPE VARCHAR(80) USING workflow_status::text;
+        END IF;
+      END $$;
+    `).catch(() => {});
     await sql`ALTER TABLE notification_log ALTER COLUMN channel TYPE VARCHAR(60) USING channel::text`.catch(() => {});
     await sql`ALTER TYPE booking_status_enum ADD VALUE IF NOT EXISTS 'Allocated'`.catch(() => {});
     await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'Full'`.catch(() => {});
@@ -10604,6 +10733,13 @@ app.get("/api/admin/bookings",
                COALESCE(b.advance_amount, 0) AS advance_amount,
                COALESCE(b.payment_type::text, 'FullPayment') AS payment_type,
                COALESCE(b.payment_method::text, b.payment_type::text, 'Cash') AS payment_method,
+               b.associate_approval_status,
+               b.booked_by_user_id AS booked_by,
+               b.sold_by_user_id AS sold_by,
+               b.associate_user_id AS associate,
+               COALESCE(b.associate_approval_overridden, FALSE) AS associate_approval_overridden,
+               CASE WHEN b.associate_approval_status = 'Pending' THEN b.created_at ELSE NULL END AS pending_since,
+               CASE WHEN b.associate_approval_status = 'Pending' AND b.created_at < NOW() - INTERVAL '48 hours' THEN TRUE ELSE FALSE END AS is_overdue,
                COALESCE(b.workflow_status::text, 'Booking Initiated') AS workflow_status,
                COALESCE(b.required_booking_amount, 0) AS required_booking_amount,
                COALESCE(b.remaining_balance, 0) AS remaining_balance,
@@ -10624,9 +10760,15 @@ app.get("/api/admin/bookings",
                COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name,
                COALESCE(s.city, s2.city, '') AS city,
                ap.appointment_date, ap.start_time, ap.end_time, ap.status AS appointment_status,
-               proof.file_path AS proof_url
+               proof.file_path AS proof_url,
+               u_booked.full_name AS booked_by_name,
+               u_sold.full_name AS sold_by_name,
+               u_assoc.full_name AS associate_name
         FROM bookings b
         LEFT JOIN users u  ON b.user_id  = u.user_id
+        LEFT JOIN users u_booked ON b.booked_by_user_id = u_booked.user_id
+        LEFT JOIN users u_sold   ON b.sold_by_user_id = u_sold.user_id
+        LEFT JOIN users u_assoc  ON b.associate_user_id = u_assoc.user_id
         LEFT JOIN plots p  ON b.plot_id  = p.plot_id
         LEFT JOIN sites s  ON p.site_id  = s.site_id
         LEFT JOIN sites s2 ON b.site_id  = s2.site_id
@@ -10649,9 +10791,22 @@ app.get("/api/admin/bookings",
           SELECT b.booking_id, b.booking_serial, b.booking_status, b.advance_amount,
                  b.created_at AS booking_date, u.full_name AS customer_name, u.mobile_no,
                  COALESCE(p.plot_number, 'Plot') AS plot_number,
-                 COALESCE(s.site_name, 'Project Site') AS site_name
+                 COALESCE(s.site_name, 'Project Site') AS site_name,
+                 b.associate_approval_status,
+                 b.booked_by_user_id AS booked_by,
+                 b.sold_by_user_id AS sold_by,
+                 b.associate_user_id AS associate,
+                 CASE WHEN b.associate_approval_status = 'Pending' AND b.created_at < NOW() - INTERVAL '48 hours' THEN TRUE ELSE FALSE END AS is_overdue,
+                 CASE WHEN b.associate_approval_status = 'Pending' THEN b.created_at ELSE NULL END AS pending_since,
+                 COALESCE(b.associate_approval_overridden, FALSE) AS associate_approval_overridden,
+                 u_booked.full_name AS booked_by_name,
+                 u_sold.full_name AS sold_by_name,
+                 u_assoc.full_name AS associate_name
           FROM bookings b
           LEFT JOIN users u ON b.user_id = u.user_id
+          LEFT JOIN users u_booked ON b.booked_by_user_id = u_booked.user_id
+          LEFT JOIN users u_sold   ON b.sold_by_user_id = u_sold.user_id
+          LEFT JOIN users u_assoc  ON b.associate_user_id = u_assoc.user_id
           LEFT JOIN plots p ON b.plot_id = p.plot_id
           LEFT JOIN sites s ON p.site_id = s.site_id
           ORDER BY b.created_at DESC LIMIT 50`;
@@ -10748,7 +10903,40 @@ app.get("/api/admin/bookings/:id",
         } catch (_) {}
       }
 
-      return ok(res, { ...booking, payment_proofs, emi_schedule, history, appointment, payments, registry, other_bookings_on_plot });
+      let booked_by_user = null;
+      let sold_by_user = null;
+      let associate_user = null;
+      try {
+        if (booking.booked_by_user_id) {
+          const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${booking.booked_by_user_id}`;
+          booked_by_user = u || null;
+        }
+        if (booking.sold_by_user_id) {
+          const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${booking.sold_by_user_id}`;
+          sold_by_user = u || null;
+        }
+        if (booking.associate_user_id) {
+          const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${booking.associate_user_id}`;
+          associate_user = u || null;
+        }
+      } catch (_) {}
+
+      return ok(res, {
+        ...booking,
+        booked_by: booking.booked_by_user_id,
+        sold_by: booking.sold_by_user_id,
+        associate: booking.associate_user_id,
+        booked_by_user,
+        sold_by_user,
+        associate_user,
+        payment_proofs,
+        emi_schedule,
+        history,
+        appointment,
+        payments,
+        registry,
+        other_bookings_on_plot
+      });
     } catch (e) {
       console.error("[Admin Booking Detail Error]:", e);
       return err(res, e.message);
@@ -10772,6 +10960,8 @@ app.post("/api/admin/bookings/:id/confirm",
       if (!booking) return err(res, "Booking not found", 404);
       if (booking.booking_status === "Confirmed")
         return err(res, "Already confirmed", 400);
+      if (booking.associate_approval_status === "Pending")
+        return err(res, "Cannot confirm booking: Associate approval is pending. Associate must approve or Admin must override.", 409);
 
       const [plot] = await sql`SELECT base_price, monthly_emi, emi_tenure_months, plot_number FROM plots WHERE plot_id = ${booking.plot_id}`;
       if (booking.payment_type === "EMI") {
@@ -10812,7 +11002,7 @@ app.post("/api/admin/bookings/:id/confirm",
         JOIN sites s ON s.site_id = p.site_id
         WHERE b.plot_id = ${booking.plot_id}
           AND b.booking_id != ${bid}
-          AND b.booking_status IN ('Submitted', 'PaymentPending', 'Allocated')
+          AND b.booking_status IN ('Submitted', 'PaymentPending', 'Allocated', 'Pending')
         ORDER BY b.created_at ASC`;
 
       let pos = 1;
@@ -10909,37 +11099,16 @@ app.post("/api/admin/bookings/:id/cancel",
           cancelled_at = NOW(), updated_at = NOW()
         WHERE booking_id = ${req.params.id}`;
 
-      // Set plot to Vacant via helper
+      // Manage plot release or promote waitlist via shared service helper
+      let plotStatusAfter = 'Vacant';
       if (booking.plot_id) {
-        await setPlotStatus(booking.plot_id, 'Vacant', {
+        const releaseResult = await bookingService.releasePlotOrPromoteWaitlist(sql, {
+          plotId: booking.plot_id,
+          cancelledBookingId: req.params.id,
           adminId: req.admin.admin_id,
-          adminName: req.admin.full_name,
-          reason: `Booking Cancelled: ${reason}`
+          reason
         });
-
-        // Notify earliest waitlisted customer
-        const [earliestWaitlisted] = await sql`
-          SELECT b.booking_id, b.user_id, u.full_name, u.email, p.plot_number, s.site_name
-          FROM bookings b
-          JOIN users u ON u.user_id = b.user_id
-          JOIN plots p ON p.plot_id = b.plot_id
-          JOIN sites s ON s.site_id = p.site_id
-          WHERE b.plot_id = ${booking.plot_id}
-            AND b.booking_status = 'Waitlisted'
-          ORDER BY b.queue_position ASC, b.created_at ASC
-          LIMIT 1`;
-
-        if (earliestWaitlisted) {
-          dispatchBookingNotification('plot_available_again', {
-            userId: earliestWaitlisted.user_id,
-            userEmail: earliestWaitlisted.email,
-            userName: earliestWaitlisted.full_name,
-            plotNumber: earliestWaitlisted.plot_number,
-            siteName: earliestWaitlisted.site_name,
-            bookingId: earliestWaitlisted.booking_id,
-            adminId: req.admin.admin_id
-          });
-        }
+        plotStatusAfter = releaseResult.plotStatus || 'Vacant';
       }
 
       await addPlotBookingHistory({
@@ -12973,25 +13142,88 @@ app.get("/api/admin/associates/:id",
 app.post("/api/admin/impersonate/:user_id", verifyAdminToken, role("SuperAdmin", "Admin", "FinanceManager"), async (req, res) => {
   try {
     const { user_id } = req.params;
-    const [user] = await sql`SELECT user_id, full_name, email, user_type, member_id, account_status FROM users WHERE user_id = ${user_id}`;
-    if (!user) return err(res, "User not found", 404);
+    let [user] = await sql`SELECT user_id, full_name, email, user_type, member_id, account_status, mobile_no FROM users WHERE user_id = ${user_id}`;
     
+    // Fallback: If not found in users, check team_members table (read-only query)
+    if (!user) {
+      const isNum = !isNaN(Number(user_id));
+      const [tm] = isNum
+        ? await sql`SELECT * FROM team_members WHERE (id = ${Number(user_id)} OR user_id = ${Number(user_id)}) AND LOWER(status) IN ('approved', 'active') LIMIT 1`
+        : await sql`SELECT * FROM team_members WHERE team_member_uid = ${String(user_id)} AND LOWER(status) IN ('approved', 'active') LIMIT 1`;
+      
+      if (tm && tm.user_id) {
+        [user] = await sql`SELECT user_id, full_name, email, user_type, member_id, account_status, mobile_no FROM users WHERE user_id = ${tm.user_id}`;
+      }
+    }
+
+    if (!user) return err(res, "User not found", 404);
+
+    // READ-ONLY check: Target account_status must be Active or Approved
+    if (user.account_status !== "Active" && user.account_status !== "Approved") {
+      return err(res, `Account cannot be accessed because status is '${user.account_status}'.`, 400);
+    }
+
+    // C1: Strict match only on user_id AND status in ('approved', 'active'). Zero mobile_no / member_id matching.
+    const [tmRecord] = await sql`
+      SELECT id, team_member_uid, full_name, status, associate_id, associate_name 
+      FROM team_members 
+      WHERE user_id = ${user.user_id} 
+        AND LOWER(status) IN ('approved', 'active')
+      LIMIT 1
+    `;
+
+    const isTmMembership = Boolean(tmRecord);
+    const dbRole = user.user_type || 'Customer';
+    const isRoleConflict = isTmMembership && (dbRole === 'Associate' || dbRole === 'Customer');
+
+    // Acting panel and redirect determination
+    let redirect_url = '/customer/dashboard';
+    let acting_panel = null;
+    const normDbRole = String(dbRole).toLowerCase().trim();
+
+    if (normDbRole === 'team member' || normDbRole === 'teammember') {
+      redirect_url = '/team-member/dashboard';
+    } else if (isTmMembership) {
+      // Impersonating from Team Member perspective without mutating database
+      redirect_url = '/team-member/dashboard';
+      acting_panel = 'team-member';
+    } else if (normDbRole === 'associate') {
+      redirect_url = '/associate/dashboard';
+    } else if (normDbRole === 'investor') {
+      redirect_url = '/investor/dashboard';
+    }
+
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) return err(res, "JWT_SECRET is not configured", 500);
     const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
-    
+
+    // Token user_type comes strictly from DB users.user_type.
+    // Explicit impersonation scope is provided via impersonated_by_admin_id and acting_panel.
     const payload = {
       user_id: user.user_id,
-      user_type: user.user_type,
-      role: user.user_type,
+      user_type: dbRole,
+      role: dbRole,
       email: user.email,
       member_id: user.member_id,
+      full_name: user.full_name,
+      impersonated_by_admin_id: req.admin?.admin_id || req.admin?.id || 1,
+      ...(acting_panel ? { acting_panel } : {})
     };
-    
+
     const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || "30d" });
     const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "60d" });
-    
-    return ok(res, { token, refreshToken, user }, "Impersonated successfully");
+
+    return ok(res, {
+      token,
+      refreshToken,
+      user: {
+        ...user,
+        role_conflict: isRoleConflict,
+        acting_panel: acting_panel || undefined
+      },
+      role_conflict: isRoleConflict,
+      redirect_url
+    }, "Impersonated successfully");
   } catch (e) {
     return err(res, "Failed to impersonate: " + e.message);
   }
@@ -15824,8 +16056,9 @@ process.on("unhandledRejection", (reason) => {
 });
 
 if (shouldStartServer) {
-  try {
-    startBackupScheduler({
+  if (process.env.NODE_ENV !== "test" && process.env.DB_BACKUP_SCHEDULER_DISABLED !== "true") {
+    try {
+      startBackupScheduler({
       logAudit: async (action, backup) => {
         try {
           await sql`
@@ -15835,8 +16068,9 @@ if (shouldStartServer) {
         } catch { }
       },
     });
-  } catch (schedErr) {
-    console.warn("[MMR API] Backup scheduler init warning:", schedErr.message);
+    } catch (schedErr) {
+      console.warn("[MMR API] Backup scheduler init warning:", schedErr.message);
+    }
   }
 
   const server = app.listen(PORT, "0.0.0.0", async () => {

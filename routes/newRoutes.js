@@ -215,6 +215,9 @@ router.post('/auth/register', async (req, res) => {
 
 async function resolveEnrollmentStatus(u, userType) {
   try {
+    const rawType = String(userType || u?.user_type || '').toLowerCase();
+    if (rawType.includes('team member') || rawType === 'teammember') return 'completed';
+
     const raw = String(u.enrollment_status || '').toLowerCase();
     if (raw === 'completed' || raw === 'approved') return 'completed';
     if (raw === 'rejected') return 'rejected';
@@ -364,14 +367,80 @@ router.post('/auth/login', async (req, res) => {
     if (!valid)
       return res.status(401).json({ success: false, message: 'Email ya password galat hai' });
 
-    const userEnrollmentStatus = await resolveEnrollmentStatus(user, user.user_type);
+    // Role Resolution & Role Conflict Check (Read-Only; ZERO writes to users or team_members)
+    // C1: Strict match only on user_id AND status in ('approved', 'active'). Zero mobile_no / member_id matching.
+    const [tm] = await sql`
+      SELECT id, team_member_uid, status, associate_id FROM team_members 
+      WHERE user_id = ${user.user_id} 
+        AND LOWER(status) IN ('approved', 'active')
+      LIMIT 1
+    `;
+    const isTmMembership = Boolean(tm);
+    const dbRole = user.user_type || 'Customer';
+    const isRoleConflict = isTmMembership && (dbRole === 'Associate' || dbRole === 'Customer');
+
+    if (isRoleConflict) {
+      console.log(`[AuthLogin] Role conflict detected for user_id=${user.user_id}: DB user_type='${dbRole}', but user is enrolled in team_members as '${tm?.team_member_uid}'.`);
+    }
+
+    // Role resolution mode: default is 'db'.
+    const roleResolutionMode = (process.env.ROLE_RESOLUTION_MODE || 'db').toLowerCase().trim();
+    let effectiveRole = dbRole;
+    if (roleResolutionMode === 'team_membership_wins' && isTmMembership) {
+      console.warn(`[AuthLogin] ROLE_RESOLUTION_MODE=team_membership_wins active: overriding token role to 'Team Member'.`);
+      effectiveRole = 'Team Member';
+    } else if (roleResolutionMode === 'team_membership_if_no_associate_business' && isTmMembership) {
+      // (a) Tight membership is already verified via isTmMembership (user_id match AND status approved/active)
+      // (b) User's own Associate enrollment is NOT completed
+      const rawEnroll = String(user.enrollment_status || '').toLowerCase().trim();
+      let hasCompletedAssocEnrollment = ['completed', 'approved', 'verified'].includes(rawEnroll);
+      if (!hasCompletedAssocEnrollment) {
+        const [assocSub] = await sql`
+          SELECT id, status FROM associate_enrollment 
+          WHERE (user_id = ${user.user_id} OR id = ${user.member_id || ''})
+            AND LOWER(status) IN ('completed', 'approved')
+          LIMIT 1
+        `.catch(() => [null]);
+        if (assocSub) hasCompletedAssocEnrollment = true;
+      }
+
+      // (c) User has NO own downline / team / customers (sponsor_user_id, referred_by_user_id, or team_members.associate_id)
+      let hasAssociateBusiness = false;
+      const [hasDownline] = await sql`
+        SELECT 1 FROM users 
+        WHERE (sponsor_user_id = ${user.user_id} OR referred_by_user_id = ${user.user_id})
+        LIMIT 1
+      `.catch(() => [null]);
+      if (hasDownline) {
+        hasAssociateBusiness = true;
+      } else {
+        const [hasTeam] = await sql`
+          SELECT 1 FROM team_members 
+          WHERE associate_id = ${user.user_id}
+          LIMIT 1
+        `.catch(() => [null]);
+        if (hasTeam) hasAssociateBusiness = true;
+      }
+
+      if (!hasCompletedAssocEnrollment && !hasAssociateBusiness) {
+        console.warn(`[AuthLogin] ROLE_RESOLUTION_MODE=team_membership_if_no_associate_business: user ${user.user_id} has active team membership and no associate business/enrollment. Elevating effective role to 'Team Member'.`);
+        effectiveRole = 'Team Member';
+      } else {
+        console.log(`[AuthLogin] ROLE_RESOLUTION_MODE=team_membership_if_no_associate_business: user ${user.user_id} has associate business or completed enrollment (enrollment=${hasCompletedAssocEnrollment}, business=${hasAssociateBusiness}). Retaining DB role '${dbRole}'.`);
+      }
+    }
+
+    const isTmEffective = String(effectiveRole).toLowerCase().includes('team member') || String(effectiveRole).toLowerCase().trim() === 'teammember';
+    const userEnrollmentStatus = isTmEffective ? 'completed' : await resolveEnrollmentStatus(user, effectiveRole);
 
     const payload = {
       user_id: user.user_id,
-      user_type: user.user_type,
+      user_type: effectiveRole,
+      role: effectiveRole,
       member_id: user.member_id,
       mobile_no: user.mobile_no,
       email: user.email,
+      full_name: user.full_name,
     };
     const token = jwt.sign(payload, process.env.JWT_SECRET, {
       expiresIn: process.env.JWT_EXPIRES_IN || '30d',
@@ -386,15 +455,18 @@ router.post('/auth/login', async (req, res) => {
       data: {
         token,
         refresh_token: refreshToken,
+        role_conflict: isRoleConflict,
         user: {
           user_id: user.user_id,
           full_name: user.full_name,
           email: user.email,
           mobile_no: user.mobile_no,
-          user_type: user.user_type,
+          user_type: effectiveRole,
+          role: effectiveRole,
           member_id: user.member_id,
           invitation_code: user.invitation_code,
           account_status: user.account_status,
+          role_conflict: isRoleConflict,
           enrollment_status: userEnrollmentStatus
         },
       },

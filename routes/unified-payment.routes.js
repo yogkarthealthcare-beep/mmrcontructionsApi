@@ -121,7 +121,7 @@ async function triggerMlmCommission(req, bookingId, sourceType, sourceId, amount
         return { generated: 0, reason: "Seller inactive", event_id: event.event_id };
       }
 
-      const [tmSellerRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} LIMIT 1`;
+      const [tmSellerRow] = await db`SELECT associate_id FROM team_members WHERE user_id = ${sellerUserId} AND LOWER(status) IN ('approved', 'active') LIMIT 1`;
       const isTeamMemberSeller = Boolean(tmSellerRow);
       let leaderUserId = isTeamMemberSeller
         ? Number(tmSellerRow?.associate_id || seller.sponsor_user_id || 0)

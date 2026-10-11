@@ -71,6 +71,10 @@ export async function sendEmail(toOrOptions, maybeSubject, maybeHtml) {
     html = maybeHtml;
   }
 
+  if (process.env.NODE_ENV === 'test' || process.env.DISABLE_EXTERNAL_SERVICES === 'true') {
+    return { messageId: 'mock-test-email-' + Date.now(), accepted: [to], rejected: [] };
+  }
+
   const config = await getSmtpConfig();
 
   if (!['smtp', 'brevo-smtp', 'gmail'].includes(String(config.provider).toLowerCase())) {

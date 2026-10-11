@@ -78,6 +78,24 @@ export async function ensureTeamMembersTable(): Promise<void> {
 }
 
 export async function syncExistingTeamMembersFromUsers(): Promise<void> {
+  // CRITICAL PRODUCTION SAFEGUARD:
+  // Startup auto-sync is READ-ONLY by default. Zero writes to users or team_members.
+  // Auto-mutation is strictly disabled unless TEAM_MEMBER_AUTOHEAL is explicitly 'true'.
+  if (process.env.TEAM_MEMBER_AUTOHEAL !== 'true' && process.env.NODE_ENV !== 'test') {
+    try {
+      const [mismatch] = await sql`
+        SELECT COUNT(*) AS mismatch_count
+        FROM team_members tm
+        JOIN users u ON u.user_id = tm.user_id
+        WHERE (u.user_type != 'Team Member' OR tm.team_member_uid ILIKE 'MMR-ASC-%')
+          AND LOWER(tm.status) IN ('approved', 'active')
+      `.catch(() => [null]);
+      if (mismatch && Number(mismatch.mismatch_count) > 0) {
+        console.log(`[SyncTeamMembers] Detected ${mismatch.mismatch_count} user/team_member role mismatch rows. TEAM_MEMBER_AUTOHEAL is OFF; leaving production data completely unchanged.`);
+      }
+    } catch (_) {}
+    return;
+  }
   try {
     // 1. Resolve Root/Default Associate Suraj Kumar Verma (user_id = 1)
     let [suraj] = await sql`
@@ -266,6 +284,46 @@ export async function syncExistingTeamMembersFromUsers(): Promise<void> {
         )
         ON CONFLICT (team_member_uid) DO NOTHING
       `.catch(() => {});
+    }
+
+    // 6. Role Consistency Check (READ-ONLY by default; NO automatic writes to users or team_members)
+    // Automatic mutation is strictly guarded behind TEAM_MEMBER_AUTOHEAL flag (default OFF).
+    const autoHealEnabled = process.env.TEAM_MEMBER_AUTOHEAL === 'true';
+    if (autoHealEnabled) {
+      console.warn("[SyncTeamMembers] CAUTION: TEAM_MEMBER_AUTOHEAL is explicitly enabled via environment variable.");
+      // Normalize team_members UIDs if flag is explicitly ON
+      await sql`
+        UPDATE team_members
+        SET team_member_uid = REGEXP_REPLACE(team_member_uid, '^(MMR-)?ASC-', 'MMR-TM-', 'i'),
+            updated_at = NOW()
+        WHERE team_member_uid ILIKE 'MMR-ASC-%' OR team_member_uid ILIKE 'ASC-%'
+      `.catch(() => {});
+
+      await sql`
+        UPDATE team_members tm
+        SET user_id = u.user_id,
+            updated_at = NOW()
+        FROM users u
+        WHERE tm.user_id IS NULL
+          AND (
+            u.mobile_no = tm.mobile_no 
+            OR u.member_id = tm.team_member_uid
+          )
+      `.catch(() => {});
+    } else {
+      // READ-ONLY DIAGNOSTIC LOG (Zero writes, zero updates)
+      try {
+        const [mismatch] = await sql`
+          SELECT COUNT(*) AS mismatch_count
+          FROM team_members tm
+          JOIN users u ON u.user_id = tm.user_id
+          WHERE u.user_type != 'Team Member'
+             OR tm.team_member_uid ILIKE 'MMR-ASC-%'
+        `;
+        if (mismatch && Number(mismatch.mismatch_count) > 0) {
+          console.log(`[SyncTeamMembers] Detected ${mismatch.mismatch_count} user/team_member role mismatch rows. TEAM_MEMBER_AUTOHEAL is OFF; leaving production data unchanged.`);
+        }
+      } catch (_) {}
     }
   } catch (err) {
     console.warn("[SyncTeamMembers] Sync warning:", err.message);
@@ -583,8 +641,26 @@ export async function createTeamMemberRecord(
       throw new Error("This Associate (Team Lead) has reached the maximum limit of 10 direct Team Members (11 total team size). No available slots.");
     }
 
-    // Generate unique Team Member ID if not already present
-    const uid = existingTm?.team_member_uid || existingUser?.member_id || await generateTeamMemberUid(tx);
+    // Generate unique Team Member ID if not already present with MMR-TM- prefix
+    let uid = existingTm?.team_member_uid;
+    if (!uid || uid.toUpperCase().startsWith('MMR-ASC-') || uid.toUpperCase().startsWith('ASC-')) {
+      if (existingUser?.member_id && existingUser.member_id.toUpperCase().startsWith('MMR-TM-')) {
+        uid = existingUser.member_id;
+      } else {
+        uid = await generateTeamMemberUid(tx);
+      }
+    }
+
+    if (existingUser) {
+      await tx`
+        UPDATE users
+        SET user_type = 'Team Member',
+            member_id = ${uid},
+            sponsor_user_id = COALESCE(sponsor_user_id, ${data.associateId}),
+            updated_at = NOW()
+        WHERE user_id = ${userId}
+      `;
+    }
 
     if (!existingUser) {
       const [newUser] = await tx`
@@ -1048,11 +1124,11 @@ export async function updateTeamMemberStatus(
       await tx`
         UPDATE users
         SET
-          user_type = COALESCE(user_type, 'Associate'),
+          user_type = 'Team Member',
           sponsor_user_id = COALESCE(sponsor_user_id, ${current.associate_id}),
           account_status = ${targetAccountStatus},
           is_active = ${targetIsActive},
-          member_id = COALESCE(member_id, ${current.team_member_uid}),
+          member_id = COALESCE(${current.team_member_uid}, member_id),
           updated_at = NOW()
         WHERE user_id = ${userId}
       `;
@@ -1328,9 +1404,11 @@ export async function approveTeamMemberByAssociate(
       const [updUser] = await tx`
         UPDATE users
         SET
+          user_type = 'Team Member',
           account_status = 'Active',
           is_active = true,
           sponsor_user_id = COALESCE(sponsor_user_id, ${associateId}),
+          member_id = COALESCE(NULLIF(${tmRow?.team_member_uid || ''}, ''), member_id),
           updated_at = NOW()
         WHERE user_id = ${userId}
         RETURNING *

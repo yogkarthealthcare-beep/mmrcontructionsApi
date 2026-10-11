@@ -1,0 +1,323 @@
+{
+  "info": {
+    "_postman_id": "a897b209-64db-4f81-a621-mmrphase2b001",
+    "name": "MMR Constructions — Booking & Sales Attribution Phase 2/2B",
+    "description": "Integration test collection for Phase 2/2B booking creation, approval workflows, 409 confirmation guards, sales reports, leaderboards, and bulk referral resolution.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:5000", "type": "string" },
+    { "key": "adminToken", "value": "{{adminToken}}", "type": "string" },
+    { "key": "assocToken", "value": "{{assocToken}}", "type": "string" },
+    { "key": "tmToken", "value": "{{tmToken}}", "type": "string" },
+    { "key": "custToken", "value": "{{custToken}}", "type": "string" },
+    { "key": "bookingId", "value": "1", "type": "string" },
+    { "key": "plotId", "value": "101", "type": "string" },
+    { "key": "tmId", "value": "201", "type": "string" },
+    { "key": "assocId", "value": "101", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "1. Booking Creation (Scenarios A-G)",
+      "item": [
+        {
+          "name": "Scenario A: Customer Direct Self-Booking",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{custToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plot_id\": {{plotId}},\n  \"buyer_type\": \"SELF\",\n  \"payment_type\": \"FullPayment\",\n  \"advance_amount\": 1000000\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/bookings", "host": ["{{baseUrl}}"], "path": ["api", "bookings"] }
+          }
+        },
+        {
+          "name": "Scenario B: Customer with TM Referrer Self-Booking",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{custToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plot_id\": {{plotId}},\n  \"payment_type\": \"OneTime\",\n  \"advance_amount\": 1000000\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/bookings", "host": ["{{baseUrl}}"], "path": ["api", "bookings"] }
+          }
+        },
+        {
+          "name": "Scenario B2: Customer On-Behalf Attempt (Expect 403)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{custToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plot_id\": {{plotId}},\n  \"buyer_type\": \"CUSTOMER\",\n  \"customer_id\": 341,\n  \"payment_type\": \"FullPayment\",\n  \"advance_amount\": 1000000\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/bookings", "host": ["{{baseUrl}}"], "path": ["api", "bookings"] }
+          }
+        },
+        {
+          "name": "Scenario C: Team Member Self-Purchase (Expect Pending)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{tmToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plot_id\": {{plotId}},\n  \"buyer_type\": \"SELF\",\n  \"payment_type\": \"DownPayment\",\n  \"advance_amount\": 500000\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/bookings", "host": ["{{baseUrl}}"], "path": ["api", "bookings"] }
+          }
+        },
+        {
+          "name": "Scenario D: Team Member On-Behalf via /team-members/bookings",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{tmToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customer_id\": 311,\n  \"plot_id\": {{plotId}},\n  \"payment_type\": \"PartWise\",\n  \"advance_amount\": 250000\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/team-members/bookings", "host": ["{{baseUrl}}"], "path": ["api", "team-members", "bookings"] }
+          }
+        },
+        {
+          "name": "Scenario F: Associate Self-Purchase (Expect AutoApproved)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{assocToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plot_id\": {{plotId}},\n  \"buyer_type\": \"SELF\",\n  \"payment_type\": \"FullPayment\",\n  \"advance_amount\": 1000000\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/bookings", "host": ["{{baseUrl}}"], "path": ["api", "bookings"] }
+          }
+        },
+        {
+          "name": "Scenario G: Associate On-Behalf Booking",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{assocToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"team_member_user_id\": 311,\n  \"plot_id\": {{plotId}},\n  \"payment_option\": \"PartWise\",\n  \"booking_amount\": 200000\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/associate/bookings", "host": ["{{baseUrl}}"], "path": ["api", "associate", "bookings"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Approvals & Confirmation Lifecycle",
+      "item": [
+        {
+          "name": "Path 1 Guard: Admin Confirm on Pending (Expect 409)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{adminToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"notes\": \"Attempting confirmation while associate approval is pending\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/admin/bookings/{{bookingId}}/confirm", "host": ["{{baseUrl}}"], "path": ["api", "admin", "bookings", "{{bookingId}}", "confirm"] }
+          }
+        },
+        {
+          "name": "Path 2 Guard: Offline Approve on Pending (Expect 409)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{adminToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reference_no\": \"REF-OFFLINE-TEST\",\n  \"remarks\": \"Testing 409 guard on offline approval\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/admin/bookings/{{bookingId}}/offline/approve", "host": ["{{baseUrl}}"], "path": ["api", "admin", "bookings", "{{bookingId}}", "offline", "approve"] }
+          }
+        },
+        {
+          "name": "Associate Approves Booking",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{assocToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Approved after document verification\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/associate/booking-approvals/{{bookingId}}/approve", "host": ["{{baseUrl}}"], "path": ["api", "associate", "booking-approvals", "{{bookingId}}", "approve"] }
+          }
+        },
+        {
+          "name": "Admin Confirms Booking After Approval (Expect 200)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{adminToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"notes\": \"Final approval received; plot marked Booked\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/admin/bookings/{{bookingId}}/confirm", "host": ["{{baseUrl}}"], "path": ["api", "admin", "bookings", "{{bookingId}}", "confirm"] }
+          }
+        },
+        {
+          "name": "Admin Cancel Booking (Waitlist Promotion)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{adminToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Customer requested cancellation; promotes waitlist\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/admin/bookings/{{bookingId}}/cancel", "host": ["{{baseUrl}}"], "path": ["api", "admin", "bookings", "{{bookingId}}", "cancel"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Sales Reports & Leaderboards",
+      "item": [
+        {
+          "name": "Team Member Sales Summary",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{tmToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/team-members/{{tmId}}/sales-summary", "host": ["{{baseUrl}}"], "path": ["api", "team-members", "{{tmId}}", "sales-summary"] }
+          }
+        },
+        {
+          "name": "Team Member Customer-Wise Sales",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{tmToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/team-members/{{tmId}}/customers-sales?page=1&limit=10", "host": ["{{baseUrl}}"], "path": ["api", "team-members", "{{tmId}}", "customers-sales"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "10" }] }
+          }
+        },
+        {
+          "name": "Associate Team Sales",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{assocToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/associates/{{assocId}}/team-sales", "host": ["{{baseUrl}}"], "path": ["api", "associates", "{{assocId}}", "team-sales"] }
+          }
+        },
+        {
+          "name": "Associate Team Sales CSV Export",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{assocToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/associates/{{assocId}}/team-sales/export", "host": ["{{baseUrl}}"], "path": ["api", "associates", "{{assocId}}", "team-sales", "export"] }
+          }
+        },
+        {
+          "name": "Admin Leaderboard: Team Members",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/leaderboard/team-members?limit=25", "host": ["{{baseUrl}}"], "path": ["api", "admin", "leaderboard", "team-members"], "query": [{ "key": "limit", "value": "25" }] }
+          }
+        },
+        {
+          "name": "Admin Leaderboard: Associates",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/leaderboard/associates?limit=25", "host": ["{{baseUrl}}"], "path": ["api", "admin", "leaderboard", "associates"], "query": [{ "key": "limit", "value": "25" }] }
+          }
+        },
+        {
+          "name": "Admin Associate Drilldown",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/leaderboard/associates/{{assocId}}/drilldown", "host": ["{{baseUrl}}"], "path": ["api", "admin", "leaderboard", "associates", "{{assocId}}", "drilldown"] }
+          }
+        },
+        {
+          "name": "Admin Unattributed Audit",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/sales-attribution/unattributed?limit=50", "host": ["{{baseUrl}}"], "path": ["api", "admin", "sales-attribution", "unattributed"], "query": [{ "key": "limit", "value": "50" }] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Referral Management & Profile",
+      "item": [
+        {
+          "name": "User Profile (with Referral Link)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{tmToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/profile", "host": ["{{baseUrl}}"], "path": ["api", "profile"] }
+          }
+        },
+        {
+          "name": "Admin Bulk-Resolve (Dry Run)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{adminToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Bulk reconciliation test\",\n  \"dry_run\": true,\n  \"rows\": [\n    {\n      \"customer_member_id\": \"MMR-CUS-00341\",\n      \"referrer_member_id\": \"MMR-TM-00201\"\n    }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/admin/referrals/bulk-resolve", "host": ["{{baseUrl}}"], "path": ["api", "admin", "referrals", "bulk-resolve"] }
+          }
+        },
+        {
+          "name": "Admin Bulk-Resolve (Execute)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{adminToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Approved quarterly alignment\",\n  \"dry_run\": false,\n  \"override\": true,\n  \"rows\": [\n    {\n      \"customer_member_id\": \"MMR-CUS-00341\",\n      \"referrer_member_id\": \"MMR-TM-00201\"\n    }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/admin/referrals/bulk-resolve", "host": ["{{baseUrl}}"], "path": ["api", "admin", "referrals", "bulk-resolve"] }
+          }
+        }
+      ]
+    }
+  ]
+}
