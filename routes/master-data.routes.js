@@ -115,6 +115,7 @@ router.get("/admin/master-data/tables/:tableName", authAdmin, requireAdminRole, 
   const search = req.query.search ? String(req.query.search).trim() : "";
   const sortBy = req.query.sortBy ? String(req.query.sortBy).trim() : null;
   const sortOrder = String(req.query.sortOrder || "DESC").toUpperCase() === "ASC" ? "ASC" : "DESC";
+  const userType = req.query.userType ? String(req.query.userType).trim().toLowerCase() : "";
 
   try {
     // 1. Check if table exists in public schema
@@ -151,19 +152,40 @@ router.get("/admin/master-data/tables/:tableName", authAdmin, requireAdminRole, 
 
     const primaryKeyCol = columns.find((c) => c.is_primary_key)?.column_name || columns[0]?.column_name || "id";
 
-    // 3. Prepare search filter across columns if provided
-    let whereClause = "";
-    const searchParams = [];
-    if (search) {
-      const textColumns = columns
-        .filter((c) => ["character varying", "text", "character", "integer", "bigint"].includes(c.data_type))
-        .map((c) => `CAST("${c.column_name}" AS TEXT) ILIKE $1`);
+    // 3. Prepare WHERE conditions (userType filter + search)
+    const conditions = [];
+    const queryParams = [];
 
-      if (textColumns.length > 0) {
-        whereClause = `WHERE (${textColumns.join(" OR ")})`;
-        searchParams.push(`%${search}%`);
+    // Filter by userType if specified and table has user_type / user_role column
+    if (userType) {
+      const colNames = columns.map((c) => c.column_name.toLowerCase());
+      const typeCol = colNames.includes("user_type") ? "user_type" : (colNames.includes("user_role") ? "user_role" : null);
+      if (typeCol) {
+        let pattern = `%${userType}%`;
+        if (userType === "associate") pattern = "%assoc%";
+        else if (userType === "team_member" || userType === "team member") pattern = "%team%";
+        else if (userType === "customer") pattern = "%cust%";
+        else if (userType === "investor") pattern = "%invest%";
+
+        queryParams.push(pattern);
+        conditions.push(`LOWER(CAST("${typeCol}" AS TEXT)) LIKE $${queryParams.length}`);
       }
     }
+
+    // Filter by search across string/numeric columns
+    if (search) {
+      queryParams.push(`%${search}%`);
+      const searchParamIdx = queryParams.length;
+      const textColumns = columns
+        .filter((c) => ["character varying", "text", "character", "integer", "bigint"].includes(c.data_type))
+        .map((c) => `CAST("${c.column_name}" AS TEXT) ILIKE $${searchParamIdx}`);
+
+      if (textColumns.length > 0) {
+        conditions.push(`(${textColumns.join(" OR ")})`);
+      }
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
     // 4. Determine sorting column
     let orderColumn = primaryKeyCol;
@@ -173,7 +195,7 @@ router.get("/admin/master-data/tables/:tableName", authAdmin, requireAdminRole, 
 
     // 5. Query total count
     const countQuery = `SELECT COUNT(*) AS total FROM "${tableName}" ${whereClause}`;
-    const [countRes] = await sql.unsafe(countQuery, searchParams);
+    const [countRes] = await sql.unsafe(countQuery, queryParams);
     const total = parseInt(countRes?.total || 0, 10);
 
     // 6. Query records
@@ -184,7 +206,7 @@ router.get("/admin/master-data/tables/:tableName", authAdmin, requireAdminRole, 
       ORDER BY "${orderColumn}" ${sortOrder} 
       LIMIT ${limit} OFFSET ${offset}
     `;
-    const records = await sql.unsafe(recordsQuery, searchParams);
+    const records = await sql.unsafe(recordsQuery, queryParams);
 
     const totalPages = Math.ceil(total / limit) || 1;
 
@@ -309,6 +331,7 @@ router.put("/admin/master-data/tables/:tableName/:id", authAdmin, requireAdminRo
  */
 router.delete("/admin/master-data/tables/:tableName/:id", authAdmin, requireAdminRole, async (req, res) => {
   const { tableName, id } = req.params;
+  const cascade = req.query.cascade === "true" || req.body?.cascade === true;
 
   if (!isValidTableName(tableName)) {
     return err(res, "Invalid table name", 400);
@@ -332,7 +355,32 @@ router.delete("/admin/master-data/tables/:tableName/:id", authAdmin, requireAdmi
     `;
     const primaryKey = pkRes?.column_name || "id";
 
-    // 2. Perform deletion
+    // 2. Cascade cleanup of dependent child tables if cascade requested
+    if (cascade) {
+      try {
+        const referencingCols = await sql`
+          SELECT c.table_name, c.column_name 
+          FROM information_schema.columns c
+          JOIN information_schema.tables t ON t.table_name = c.table_name
+          WHERE c.table_schema = 'public' 
+            AND t.table_type = 'BASE TABLE'
+            AND c.table_name != ${tableName}
+            AND (c.column_name = 'user_id' OR c.column_name = ${primaryKey})
+        `;
+        for (const ref of referencingCols) {
+          try {
+            await sql.unsafe(`DELETE FROM "${ref.table_name}" WHERE "${ref.column_name}" = $1`, [id]);
+          } catch (refErr) {
+            // Log & continue silently if table row doesn't match or constraint
+            console.warn(`[MasterData] Cascade row deletion skipped for ${ref.table_name}.${ref.column_name}:`, refErr.message);
+          }
+        }
+      } catch (cascadeErr) {
+        console.warn("[MasterData] Cascade lookup error:", cascadeErr.message);
+      }
+    }
+
+    // 3. Perform deletion on primary table
     const deleteSql = `DELETE FROM "${tableName}" WHERE "${primaryKey}" = $1 RETURNING *`;
     const [deletedRow] = await sql.unsafe(deleteSql, [id]);
 
@@ -343,9 +391,9 @@ router.delete("/admin/master-data/tables/:tableName/:id", authAdmin, requireAdmi
     return ok(res, deletedRow, `Record #${id} successfully deleted from table "${tableName}"`);
   } catch (error) {
     console.error(`[MasterData] Error deleting from ${tableName} row ${id}:`, error);
-    // If foreign key constraint blocks deletion, give clear helpful message
+    // If foreign key constraint blocks deletion, give clear helpful message with cascade option
     if (error.code === "23503") {
-      return err(res, `Cannot delete record: It is referenced by other records in related tables (${error.detail || error.message})`, 409);
+      return err(res, `Cannot delete record: It is referenced by other records in related tables (${error.detail || error.message}). Enable 'Force Cascade Delete' to remove related records.`, 409);
     }
     return err(res, `Failed to delete record: ` + error.message);
   }

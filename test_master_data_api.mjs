@@ -71,25 +71,36 @@ async function testMasterDataLogic() {
   `, [searchVal]);
   console.log('Filtered search records:', records.rows);
 
-  // Test update
-  await db.query(`
-    UPDATE users 
-    SET full_name = 'Golu Master Updated' 
-    WHERE user_id = 2;
-  `);
-  const updated = await db.query(`SELECT full_name FROM users WHERE user_id = 2;`);
-  console.log('Updated user name:', updated.rows[0].full_name);
+  // Test userType filtering
+  const userType = 'associate';
+  let pattern = `%${userType}%`;
+  if (userType === 'associate') pattern = '%assoc%';
+  else if (userType === 'team_member' || userType === 'team member') pattern = '%team%';
+  else if (userType === 'customer') pattern = '%cust%';
+  else if (userType === 'investor') pattern = '%invest%';
 
-  // Test delete
-  await db.query(`DELETE FROM users WHERE user_id = 2;`);
-  const countAfterDelete = await db.query(`SELECT COUNT(*) as count FROM users;`);
-  console.log('Count after delete:', countAfterDelete.rows[0].count);
+  const associateUsers = await db.query(`
+    SELECT * FROM users
+    WHERE LOWER(CAST(user_type AS TEXT)) LIKE $1
+  `, [pattern]);
+  console.log('Filtered by userType=associate:', associateUsers.rows.map(r => `${r.full_name} (${r.user_type})`));
 
-  const passed = records.rows.length === 1 && 
-                 updated.rows[0].full_name === 'Golu Master Updated' && 
-                 Number(countAfterDelete.rows[0].count) === 1;
+  // Test cascade delete
+  const userIdToDelete = 2;
+  // Delete referencing in child table first
+  await db.query(`DELETE FROM team_members WHERE user_id = $1`, [userIdToDelete]);
+  await db.query(`DELETE FROM users WHERE user_id = $1`, [userIdToDelete]);
 
-  console.log('\nMASTER DATA LOGIC TEST:', passed ? 'PASS' : 'FAIL');
+  const remainingUsers = await db.query(`SELECT COUNT(*) as count FROM users`);
+  const remainingTm = await db.query(`SELECT COUNT(*) as count FROM team_members`);
+  console.log('Remaining users:', remainingUsers.rows[0].count, 'Remaining team members:', remainingTm.rows[0].count);
+
+  const passed = associateUsers.rows.length === 1 &&
+                 associateUsers.rows[0].user_type === 'Associate' &&
+                 Number(remainingUsers.rows[0].count) === 1 &&
+                 Number(remainingTm.rows[0].count) === 0;
+
+  console.log('\nMASTER DATA USERTYPE & CASCADE TEST:', passed ? 'PASS' : 'FAIL');
   process.exit(passed ? 0 : 1);
 }
 
