@@ -320,6 +320,133 @@ router.get('/associates/:id/team-sales', verifyUserToken, (req, res) => handleAs
 router.get('/associates/:id/team-sales/export', verifyUserToken, (req, res) => handleAssociateTeamSales(req, res, true));
 
 /**
+ * Unified Admin Leaderboards Handler
+ * Handles both GET /api/admin/leaderboards and GET /api/admin/leaderboards/export
+ * Query params: type ('team-members' | 'associates'), period ('all' | 'month' | 'quarter' | 'year')
+ */
+async function handleLeaderboards(req, res, isExport = false) {
+  try {
+    const type = req.query.type === 'associates' ? 'associates' : 'team-members';
+    const period = String(req.query.period || 'all').toLowerCase();
+    const { start_date, end_date, site_id, payment_type, associate_id, limit = 100, page = 1 } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(200, Math.max(1, Number(limit)));
+    const offset = (pageNum - 1) * limitNum;
+
+    const conditions = [
+      sql`b.is_confirmed_sale = TRUE`,
+      sql`b.is_self_purchase = FALSE`
+    ];
+
+    if (type === 'associates') {
+      conditions.push(sql`b.associate_user_id IS NOT NULL`);
+    } else {
+      conditions.push(sql`b.sold_by_user_type = 'Team Member'`);
+      if (associate_id) {
+        conditions.push(sql`b.associate_user_id = ${Number(associate_id)}`);
+      }
+    }
+
+    if (period === 'month') {
+      conditions.push(sql`COALESCE(b.confirmed_at, b.booking_date) >= DATE_TRUNC('month', CURRENT_TIMESTAMP)`);
+    } else if (period === 'quarter') {
+      conditions.push(sql`COALESCE(b.confirmed_at, b.booking_date) >= DATE_TRUNC('quarter', CURRENT_TIMESTAMP)`);
+    } else if (period === 'year') {
+      conditions.push(sql`COALESCE(b.confirmed_at, b.booking_date) >= DATE_TRUNC('year', CURRENT_TIMESTAMP)`);
+    }
+
+    if (start_date) conditions.push(sql`COALESCE(b.confirmed_at, b.booking_date) >= ${start_date}`);
+    if (end_date) conditions.push(sql`COALESCE(b.confirmed_at, b.booking_date) <= ${end_date}`);
+    if (site_id) conditions.push(sql`b.site_id = ${Number(site_id)}`);
+    if (payment_type) conditions.push(sql`b.payment_type = ${payment_type}`);
+
+    const whereSql = conditions.reduce((acc, curr) => sql`${acc} AND ${curr}`);
+
+    let rows = [];
+    if (type === 'associates') {
+      rows = await sql`
+        SELECT
+          b.associate_user_id AS user_id,
+          COALESCE(b.associate_name, 'Unknown Associate') AS full_name,
+          COALESCE(b.associate_member_id, '') AS member_id,
+          b.associate_mobile AS mobile_no,
+          COALESCE(SUM(b.plot_area), 0)::NUMERIC AS total_gaj_sold,
+          COUNT(*)::INT AS plots_sold_count,
+          COALESCE(SUM(b.sale_value), 0)::NUMERIC AS total_sales_value,
+          MIN(COALESCE(b.confirmed_at, b.booking_date)) AS earliest_confirmed_sale,
+          DENSE_RANK() OVER (ORDER BY COUNT(*) DESC, SUM(b.sale_value) DESC, MIN(COALESCE(b.confirmed_at, b.booking_date)) ASC)::INT AS rank
+        FROM vw_sales_attribution b
+        WHERE ${whereSql}
+        GROUP BY b.associate_user_id, b.associate_name, b.associate_member_id, b.associate_mobile
+        ORDER BY rank ASC
+        ${isExport ? sql`` : sql`LIMIT ${limitNum} OFFSET ${offset}`}
+      `;
+    } else {
+      rows = await sql`
+        SELECT
+          b.sold_by_user_id AS user_id,
+          COALESCE(b.sold_by_name, 'Unknown Team Member') AS full_name,
+          COALESCE(b.sold_by_member_id, '') AS member_id,
+          b.sold_by_mobile AS mobile_no,
+          b.associate_user_id,
+          b.associate_name,
+          COALESCE(SUM(b.plot_area), 0)::NUMERIC AS total_gaj_sold,
+          COUNT(*)::INT AS plots_sold_count,
+          COALESCE(SUM(b.sale_value), 0)::NUMERIC AS total_sales_value,
+          MIN(COALESCE(b.confirmed_at, b.booking_date)) AS earliest_confirmed_sale,
+          DENSE_RANK() OVER (ORDER BY COUNT(*) DESC, SUM(b.sale_value) DESC, MIN(COALESCE(b.confirmed_at, b.booking_date)) ASC)::INT AS rank
+        FROM vw_sales_attribution b
+        WHERE ${whereSql}
+        GROUP BY b.sold_by_user_id, b.sold_by_name, b.sold_by_member_id, b.sold_by_mobile, b.associate_user_id, b.associate_name
+        ORDER BY rank ASC
+        ${isExport ? sql`` : sql`LIMIT ${limitNum} OFFSET ${offset}`}
+      `;
+    }
+
+    if (isExport) {
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="leaderboard_${type}_${period}.csv"`);
+      let csv = 'Rank,Member Code,Full Name,Mobile,Total Gaj Sold,Plots Sold,Total Revenue (INR)\n';
+      for (const r of rows) {
+        csv += [
+          r.rank,
+          escapeCsvCell(r.member_id),
+          escapeCsvCell(r.full_name),
+          escapeCsvCell(r.mobile_no || ''),
+          r.total_gaj_sold || 0,
+          r.plots_sold_count || 0,
+          r.total_sales_value || 0
+        ].join(',') + '\n';
+      }
+      return res.status(200).send(csv);
+    }
+
+    const formattedRows = rows.map((r, idx) => ({
+      rank: Number(r.rank || idx + 1),
+      user_id: Number(r.user_id),
+      full_name: r.full_name,
+      member_id: r.member_id,
+      mobile_no: r.mobile_no || '',
+      total_gaj_sold: Number(r.total_gaj_sold || 0),
+      plots_sold_count: Number(r.plots_sold_count || 0),
+      total_sales_value: Number(r.total_sales_value || 0),
+      associate_user_id: r.associate_user_id ? Number(r.associate_user_id) : undefined,
+      associate_name: r.associate_name || undefined
+    }));
+
+    return ok(res, formattedRows, 'Leaderboard rankings retrieved successfully.');
+  } catch (e) {
+    return err(res, e.message);
+  }
+}
+
+router.get('/admin/leaderboards', verifyAdminToken, role('SuperAdmin', 'FinanceManager', 'SiteManager'), (req, res) => handleLeaderboards(req, res, false));
+router.get('/admin/leaderboards/export', verifyAdminToken, role('SuperAdmin', 'FinanceManager', 'SiteManager'), (req, res) => handleLeaderboards(req, res, true));
+router.get('/admin/leaderboard', verifyAdminToken, role('SuperAdmin', 'FinanceManager', 'SiteManager'), (req, res) => handleLeaderboards(req, res, false));
+router.get('/admin/leaderboard/export', verifyAdminToken, role('SuperAdmin', 'FinanceManager', 'SiteManager'), (req, res) => handleLeaderboards(req, res, true));
+
+/**
  * 5. GET /api/admin/leaderboard/team-members
  * Team Members ranking: plots sold desc -> total value desc -> earliest confirmed sale asc
  * Excludes self-purchases and Company Direct!

@@ -56,6 +56,7 @@ import commissionService from "./services/commissionService.js";
 import installmentPlansRoutes from "./routes/installment-plans.routes.js";
 import installmentService from "./services/installmentService.js";
 import emiManagementRoutes from "./routes/emi-management.routes.js";
+import { ensureSalesAttributionSchema } from "./services/salesAttributionSchema.service.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -293,6 +294,7 @@ app.use('/api', masterDataRoutes);
 app.use('/api', installmentPlansRoutes);
 app.use('/api', emiManagementRoutes);
 installmentService.ensureInstallmentSchema(sql).catch(err => console.error("[InstallmentSchema] Initialization error:", err));
+ensureSalesAttributionSchema(sql).catch(err => console.error("[SalesAttributionSchema] Initialization error:", err));
 
 export async function ensurePlotManagementSchema() {
   try {

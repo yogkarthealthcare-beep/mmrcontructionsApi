@@ -1,5 +1,6 @@
 import sql from "../db.js";
 import bcrypt from "bcryptjs";
+import { ensureSalesAttributionSchema } from "../services/salesAttributionSchema.service.js";
 
 async function verifyOrCreateAdminTables() {
   try {
@@ -194,6 +195,14 @@ async function verifyOrCreateAdminTables() {
     console.log(`Active SuperAdmin Email: ${defaultEmail}`);
     console.log(`Active SuperAdmin Password: ${defaultPassword}`);
     console.log("-----------------------------------------------------");
+
+    try {
+      console.log("=== SYNCHRONIZING SALES ATTRIBUTION SCHEMA ===");
+      await ensureSalesAttributionSchema(sql);
+      console.log("Sales attribution schema synchronized successfully ✅");
+    } catch (schemaErr) {
+      console.warn("Sales attribution schema sync warning:", schemaErr.message);
+    }
 
     process.exit(0);
   } catch (err) {
