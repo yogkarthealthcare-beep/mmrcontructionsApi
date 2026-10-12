@@ -56,27 +56,79 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
       )`;
   } catch (_) {}
 
-  // 2. Query users and associate links matching code
-  const [referrer] = await sql`
-    SELECT u.user_id, u.full_name, u.member_id, u.invitation_code, u.user_type, u.account_status, u.email, u.mobile_no
+  // 2. Query users, associate links, and team members matching code
+  let referrer = null;
+  const [userReferrer] = await sql`
+    SELECT u.user_id,
+           COALESCE(NULLIF(TRIM(tm.full_name), ''), u.full_name) AS full_name,
+           COALESCE(NULLIF(TRIM(tm.team_member_uid), ''), u.member_id) AS member_id,
+           COALESCE(NULLIF(TRIM(u.invitation_code), ''), NULLIF(TRIM(tm.team_member_uid), ''), u.member_id) AS invitation_code,
+           CASE WHEN tm.id IS NOT NULL THEN 'Team Member' ELSE u.user_type END AS user_type,
+           COALESCE(u.account_status, tm.status, 'Active') AS account_status,
+           u.email, u.mobile_no,
+           tm.team_member_uid, tm.status AS tm_status
     FROM users u
     LEFT JOIN associate_referral_links l
       ON l.associate_user_id = u.user_id AND l.is_active = TRUE
+    LEFT JOIN team_members tm
+      ON tm.user_id = u.user_id AND LOWER(COALESCE(tm.status, '')) IN ('active', 'approved')
     WHERE (
       UPPER(COALESCE(u.invitation_code, '')) = ${code}
       OR UPPER(COALESCE(u.member_id, '')) = ${code}
       OR UPPER(COALESCE(u.legacy_member_id, '')) = ${code}
+      OR UPPER(COALESCE(tm.team_member_uid, '')) = ${code}
       OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-(ASC|CUS|TM|[ACTM])-', 'MMR')) = ${code}
+      OR UPPER(regexp_replace(COALESCE(tm.team_member_uid, ''), '^MMR-(ASC|CUS|TM|[ACTM])-', 'MMR')) = ${code}
       OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-[ACTM]-', 'MMR')) = ${code}
       OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-[AC]-', 'MMR')) = ${code}
       OR UPPER(COALESCE(l.invite_code, '')) = ${code}
+      OR UPPER(COALESCE(regexp_replace(COALESCE(u.member_id, ''), '^MMR-TM-0*', 'MMR-TM-'), '')) = ${code}
+      OR UPPER(COALESCE(regexp_replace(COALESCE(tm.team_member_uid, ''), '^MMR-TM-0*', 'MMR-TM-'), '')) = ${code}
+      OR UPPER(COALESCE(regexp_replace(COALESCE(u.member_id, ''), '^MMR-0*', 'MMR'), '')) = ${code}
     )
     LIMIT 1`;
+
+  referrer = userReferrer || null;
+
+  // 2b. Direct team_members lookup if not resolved via users join
+  if (!referrer) {
+    const [tmDirect] = await sql`
+      SELECT tm.id as tm_id, tm.user_id, tm.full_name, tm.team_member_uid,
+             tm.status as tm_status, tm.email_id as email, tm.mobile_no,
+             tm.associate_id
+      FROM team_members tm
+      WHERE LOWER(COALESCE(tm.status, 'approved')) IN ('active', 'approved')
+        AND (
+          UPPER(COALESCE(tm.team_member_uid, '')) = ${code}
+          OR UPPER(regexp_replace(COALESCE(tm.team_member_uid, ''), '^MMR-(ASC|CUS|TM|[ACTM])-', 'MMR')) = ${code}
+          OR UPPER(COALESCE(regexp_replace(COALESCE(tm.team_member_uid, ''), '^MMR-TM-0*', 'MMR-TM-'), '')) = ${code}
+        )
+      LIMIT 1`.catch(() => []);
+
+    if (tmDirect) {
+      let uRow = null;
+      if (tmDirect.user_id) {
+        [uRow] = await sql`SELECT user_id, full_name, email, mobile_no, account_status, user_type FROM users WHERE user_id = ${tmDirect.user_id}`.catch(() => []);
+      }
+      referrer = {
+        user_id: tmDirect.user_id || uRow?.user_id,
+        full_name: tmDirect.full_name || uRow?.full_name || 'Team Member',
+        member_id: tmDirect.team_member_uid,
+        invitation_code: tmDirect.team_member_uid,
+        user_type: 'Team Member',
+        account_status: uRow?.account_status || tmDirect.tm_status || 'Active',
+        email: tmDirect.email || uRow?.email,
+        mobile_no: tmDirect.mobile_no || uRow?.mobile_no,
+        team_member_uid: tmDirect.team_member_uid
+      };
+    }
+  }
 
   // 3. Referrer found in database
   if (referrer) {
     // Customer cannot refer
-    if (String(referrer.user_type).toLowerCase() === 'customer') {
+    const roleLower = String(referrer.user_type || '').toLowerCase();
+    if (roleLower === 'customer') {
       return {
         valid: false,
         error: 'Customers cannot refer. Only Associates and Team Members can refer.',
@@ -86,18 +138,19 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
     }
 
     // Must be active and either Associate or Team Member
-    const isEligibleRole = ['Associate', 'Team Member'].includes(referrer.user_type);
-    const isActive = ['Active', 'Approved'].includes(referrer.account_status);
+    const isEligibleRole = ['associate', 'team member'].includes(roleLower) || Boolean(referrer.team_member_uid);
+    const statusLower = String(referrer.account_status || referrer.tm_status || 'active').toLowerCase();
+    const isActive = ['active', 'approved'].includes(statusLower);
 
     if (isEligibleRole && isActive) {
       return {
         valid: true,
         referrer,
         userId: referrer.user_id,
-        memberId: referrer.member_id,
+        memberId: referrer.team_member_uid || referrer.member_id,
         fullName: referrer.full_name,
-        invitationCode: referrer.invitation_code || referrer.member_id,
-        userType: referrer.user_type,
+        invitationCode: referrer.team_member_uid || referrer.invitation_code || referrer.member_id,
+        userType: referrer.team_member_uid ? 'Team Member' : (referrer.user_type || 'Associate'),
         source: 'REGISTRATION_CODE'
       };
     }

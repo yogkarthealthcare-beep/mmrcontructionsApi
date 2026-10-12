@@ -13,6 +13,7 @@
 
 import sql from '../db.js';
 import { bookingApprovalConfig } from '../config/bookingApproval.js';
+import installmentService from './installmentService.js';
 
 /**
  * Custom Error helper with HTTP status code
@@ -110,6 +111,8 @@ export async function createBooking({
   minimumBookingAmount = null,
   firstEmiAmount = null,
   lockMinutes = null,
+  installmentPlanId = null,
+  installment_plan_id = null,
   customDb = null
 }) {
   const runner = customDb || sql;
@@ -352,10 +355,48 @@ export async function createBooking({
     `;
     const serialNumber = `MMR-${new Date().getFullYear()}-${String(seqRow?.n || 1).padStart(5, '0')}`;
 
-    // 5f. Compute Pricing & Balances
+    // 5f. Compute Pricing, Installment Plans & Balances
     const plotPrice = Number(plot.sold_price || plot.base_price || 0);
-    const initialAdvance = normalizedAdvance > 0 ? normalizedAdvance : (normPaymentType === 'FullPayment' ? plotPrice : 0);
-    const remainingBalance = Math.max(0, plotPrice - initialAdvance);
+
+    let selectedPlan = null;
+    let planSnapshot = null;
+    const resolvedPlanId = Number(installmentPlanId || installment_plan_id || 0);
+
+    if (normPaymentType === 'EMI') {
+      if (resolvedPlanId > 0) {
+        selectedPlan = await installmentService.getInstallmentPlanById(tx, resolvedPlanId);
+        if (!selectedPlan) {
+          throw createBookingError(`Selected installment plan (ID ${resolvedPlanId}) not found.`, 404);
+        }
+        if (!selectedPlan.is_active) {
+          throw createBookingError(`Selected installment plan (${selectedPlan.tenure_months} months) is currently inactive.`, 400);
+        }
+        planSnapshot = installmentService.calculateInstallmentPlan({
+          price: plotPrice,
+          tenure: selectedPlan.tenure_months,
+          interestPercent: selectedPlan.interest_percent,
+          downPaymentPercent: selectedPlan.down_payment_percent,
+        });
+      }
+    }
+
+    // Part-wise deadline calculation
+    let partWiseDeadlineAt = null;
+    if (normPaymentType === 'Partial' || normPaymentType === 'PartWise') {
+      const [settings] = await tx`
+        SELECT COALESCE(part_wise_deadline_months, 3) AS months FROM booking_workflow_settings WHERE id = 1
+      `.catch(() => [{ months: 3 }]);
+      const deadlineMonths = Number(settings?.months || 3);
+      const d = new Date();
+      d.setMonth(d.getMonth() + deadlineMonths);
+      partWiseDeadlineAt = d;
+    }
+
+    let initialAdvance = normalizedAdvance > 0 ? normalizedAdvance : (normPaymentType === 'FullPayment' ? plotPrice : 0);
+    if (planSnapshot) {
+      initialAdvance = planSnapshot.down_payment_amount;
+    }
+    const remainingBalance = planSnapshot ? planSnapshot.installment_base_amount : Math.max(0, plotPrice - initialAdvance);
 
     const initialBookingStatus = bookingStatus || (normPaymentType === 'FullPayment' ? 'Submitted' : 'PaymentPending');
     const initWorkflow = workflowStatus || (normPaymentType === 'FullPayment' ? 'Booking Initiated' : 'Payment Pending');
@@ -368,7 +409,8 @@ export async function createBooking({
         booking_status, workflow_status, payment_method, notes, queue_position,
         booked_by_user_id, sold_by_user_id, associate_user_id, booking_type,
         associate_approval_status, associate_approved_by, associate_approved_at,
-        required_booking_amount, remaining_balance, booking_date, created_at, updated_at
+        required_booking_amount, remaining_balance, booking_date, created_at, updated_at,
+        installment_plan_id, plan_snapshot, part_wise_deadline_at
       ) VALUES (
         ${serialNumber}, ${derivedBuyerUserId}, ${normalizedPlotId}, ${siteId || plot.site_id},
         ${normPaymentType}, ${initialAdvance}, ${initialBookingStatus}, ${initWorkflow},
@@ -377,7 +419,8 @@ export async function createBooking({
         ${derivedApprovalStatus},
         ${autoApproved ? derivedBookedByUserId : null},
         ${autoApproved ? new Date() : null},
-        ${requiredBookingAmount || initialAdvance}, ${remainingBalance}, CURRENT_DATE, NOW(), NOW()
+        ${requiredBookingAmount || initialAdvance}, ${remainingBalance}, CURRENT_DATE, NOW(), NOW(),
+        ${selectedPlan ? selectedPlan.id : null}, ${planSnapshot ? tx.json(planSnapshot) : null}, ${partWiseDeadlineAt}
       )
       RETURNING *
     `;
@@ -404,14 +447,34 @@ export async function createBooking({
     if (normPaymentType === 'EMI') {
       const start = new Date();
       start.setMonth(start.getMonth() + 1);
-      const tenure = Number(plot.emi_tenure_months || 60);
-      for (let i = 1; i <= tenure; i++) {
-        const due = new Date(start);
-        due.setMonth(due.getMonth() + (i - 1));
-        await tx`
-          INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
-          VALUES (${booking.booking_id}, ${derivedBuyerUserId}, ${i}, ${due.toISOString().split('T')[0]}, ${plot.monthly_emi || 0})
-        `.catch(() => {});
+
+      if (planSnapshot && Array.isArray(planSnapshot.schedule) && planSnapshot.schedule.length > 0) {
+        for (const item of planSnapshot.schedule) {
+          const due = new Date(start);
+          due.setMonth(due.getMonth() + (item.installment_no - 1));
+          await tx`
+            INSERT INTO emi_schedules (
+              booking_id, user_id, installment_no, due_date, emi_amount,
+              late_fee_amount, total_due, paid_amount, emi_status,
+              principal_component, interest_component, created_at, updated_at
+            ) VALUES (
+              ${booking.booking_id}, ${derivedBuyerUserId}, ${item.installment_no},
+              ${due.toISOString().split('T')[0]}, ${item.emi_amount},
+              0.00, ${item.emi_amount}, 0.00, 'Pending',
+              ${item.principal_component}, ${item.interest_component}, NOW(), NOW()
+            )
+          `.catch(() => {});
+        }
+      } else {
+        const tenure = Number(plot.emi_tenure_months || 60);
+        for (let i = 1; i <= tenure; i++) {
+          const due = new Date(start);
+          due.setMonth(due.getMonth() + (i - 1));
+          await tx`
+            INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
+            VALUES (${booking.booking_id}, ${derivedBuyerUserId}, ${i}, ${due.toISOString().split('T')[0]}, ${plot.monthly_emi || 0})
+          `.catch(() => {});
+        }
       }
     }
 
@@ -728,6 +791,244 @@ export async function overrideAssociateApproval({ bookingId, adminId, reason, cu
   });
 }
 
+/**
+ * Helper to mask phone number (Decision D5): 98******10
+ */
+export function maskPhoneNumber(phone) {
+  if (!phone) return '';
+  const clean = String(phone).replace(/\D/g, '');
+  if (clean.length < 6) return '******';
+  const prefix = clean.slice(0, 2);
+  const suffix = clean.slice(-2);
+  return `${prefix}${'*'.repeat(Math.max(4, clean.length - 4))}${suffix}`;
+}
+
+/**
+ * M3: Role-Wise Booking Detail Provider
+ * Scopes data based on whether requesting user is Admin, Buyer, Seller, or Associate Downline.
+ */
+export async function getBookingDetailByRole(db = sql, bookingId, user = {}) {
+  const normBookingId = Number(bookingId);
+  if (!normBookingId || isNaN(normBookingId)) {
+    throw createBookingError('Valid booking ID is required.', 400);
+  }
+
+  // 1. Fetch booking with joined buyer, seller, plot, and site details
+  const [booking] = await db`
+    SELECT b.*,
+           -- Buyer user details
+           bu.full_name AS buyer_name,
+           bu.mobile_no AS buyer_mobile,
+           bu.email AS buyer_email,
+           bu.member_id AS buyer_member_id,
+           bu.user_type AS buyer_user_type,
+           ua.city AS buyer_city,
+           ua.state AS buyer_state,
+           -- Seller user details
+           su.full_name AS seller_name,
+           su.mobile_no AS seller_mobile,
+           su.member_id AS seller_member_id,
+           su.user_type AS seller_user_type,
+           -- Associate supervisor details
+           au.full_name AS associate_name,
+           au.member_id AS associate_member_id,
+           -- Plot details
+           COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+           COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+           COALESCE(p.plot_category::text, 'Residential') AS plot_category,
+           COALESCE(b.base_price, p.base_price, 0) AS base_price,
+           COALESCE(p.down_payment, 0) AS default_down_payment,
+           COALESCE(p.monthly_emi, 0) AS default_monthly_emi,
+           COALESCE(p.emi_tenure_months, 60) AS default_emi_tenure_months,
+           COALESCE(p.plot_status, 'Booked') AS plot_status,
+           -- Site details
+           COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name,
+           COALESCE(s.city, s2.city, 'Lucknow') AS site_city,
+           COALESCE(s.full_address, s2.full_address, '') AS site_address
+    FROM bookings b
+    LEFT JOIN users bu ON bu.user_id = b.user_id
+    LEFT JOIN user_addresses ua ON ua.user_id = b.user_id AND ua.address_type = 'Permanent'
+    LEFT JOIN users su ON su.user_id = b.sold_by_user_id
+    LEFT JOIN users au ON au.user_id = b.associate_user_id
+    LEFT JOIN plots p  ON b.plot_id = p.plot_id
+    LEFT JOIN sites s  ON p.site_id = s.site_id
+    LEFT JOIN sites s2 ON b.site_id = s2.site_id
+    WHERE b.booking_id = ${normBookingId}
+  `;
+
+  if (!booking) {
+    throw createBookingError('Booking not found.', 404);
+  }
+
+  // 2. Determine requesting actor role & permissions
+  const reqUserId = Number(user.user_id || user.id || 0);
+  const userRole = String(user.role || user.user_type || '').trim().toLowerCase();
+  const isAdmin = ['superadmin', 'admin', 'financemanager', 'sitemanager'].includes(userRole);
+  const isBuyer = reqUserId > 0 && Number(booking.user_id) === reqUserId;
+  const isSeller = reqUserId > 0 && Number(booking.sold_by_user_id) === reqUserId;
+  const isAssociateSupervisor = reqUserId > 0 && Number(booking.associate_user_id) === reqUserId;
+
+  // Check if user has commission entries for this booking (team pool or associate payout)
+  let hasCommissionEntry = false;
+  if (!isAdmin && !isBuyer && !isSeller && !isAssociateSupervisor && reqUserId > 0) {
+    const [commRow] = await db`
+      SELECT 1 FROM commission_transactions
+      WHERE booking_id = ${normBookingId} AND recipient_user_id = ${reqUserId}
+      LIMIT 1
+    `;
+    hasCommissionEntry = !!commRow;
+  }
+
+  if (!isAdmin && !isBuyer && !isSeller && !isAssociateSupervisor && !hasCommissionEntry) {
+    throw createBookingError('You do not have permission to view this booking.', 403);
+  }
+
+  // 3. Fetch EMI Schedules
+  let emiSchedule = [];
+  try {
+    emiSchedule = await db`
+      SELECT emi_id, installment_no, due_date, emi_amount, principal_component, interest_component,
+             late_fee_amount, total_due, paid_amount, paid_date, emi_status, payment_mode, utr_number
+      FROM emi_schedules
+      WHERE booking_id = ${normBookingId}
+      ORDER BY installment_no
+    `;
+  } catch (_) {}
+
+  // 4. Fetch Payment Proofs (Admin and Buyer only; excluded for Seller/Associate to prevent privacy leaks)
+  let paymentProofs = [];
+  if (isAdmin || isBuyer) {
+    try {
+      paymentProofs = await db`
+        SELECT proof_id, file_url, payment_mode, amount, transaction_reference, status, created_at
+        FROM booking_payment_proofs
+        WHERE booking_id = ${normBookingId}
+        ORDER BY created_at DESC
+      `;
+    } catch (_) {}
+  }
+
+  // 5. Fetch Commission Data (Scoped strictly by role)
+  let commissions = [];
+  if (isAdmin) {
+    try {
+      commissions = await db`
+        SELECT ct.commission_id, ct.recipient_user_id, u.full_name AS recipient_name,
+               u.member_id AS recipient_member_id, ct.distribution_role, ct.commission_percentage,
+               ct.commission_amount, ct.net_amount, ct.commission_status, ct.payment_reference,
+               ct.paid_at, ct.needs_review, ct.review_reason
+        FROM commission_transactions ct
+        LEFT JOIN users u ON u.user_id = ct.recipient_user_id
+        WHERE ct.booking_id = ${normBookingId}
+        ORDER BY ct.commission_id ASC
+      `;
+    } catch (_) {}
+  } else if (isSeller || isAssociateSupervisor || hasCommissionEntry) {
+    try {
+      commissions = await db`
+        SELECT ct.commission_id, ct.recipient_user_id, ct.distribution_role,
+               ct.commission_percentage, ct.commission_amount, ct.net_amount,
+               ct.commission_status, ct.payment_reference, ct.paid_at
+        FROM commission_transactions ct
+        WHERE ct.booking_id = ${normBookingId} AND ct.recipient_user_id = ${reqUserId}
+      `;
+    } catch (_) {}
+  }
+
+  // 6. Financial Calculations & Part-Wise Deadline Math
+  const totalPrice = Number(booking.total_amount || booking.base_price || 0);
+  const advanceAmount = Number(booking.advance_amount || 0);
+  const paidEmisTotal = emiSchedule
+    .filter(e => e.emi_status === 'Paid')
+    .reduce((sum, e) => sum + Number(e.paid_amount || e.emi_amount || 0), 0);
+  const confirmedPaid = Math.max(advanceAmount + paidEmisTotal, Number(booking.total_paid || 0), advanceAmount);
+  const unpaidBalance = Math.max(0, totalPrice - confirmedPaid);
+
+  const isPartWise = (booking.payment_type === 'PartWise' || booking.payment_type === 'Partial');
+  let partWiseOverdue = false;
+  let partWiseDaysRemaining = 0;
+  let partWiseDeadlineAt = booking.part_wise_deadline_at || null;
+
+  if (isPartWise) {
+    if (!partWiseDeadlineAt && (booking.booking_date || booking.created_at)) {
+      const d = new Date(booking.booking_date || booking.created_at);
+      d.setMonth(d.getMonth() + 3);
+      partWiseDeadlineAt = d.toISOString();
+    }
+    if (partWiseDeadlineAt) {
+      const diffMs = new Date(partWiseDeadlineAt).getTime() - Date.now();
+      partWiseDaysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+      partWiseOverdue = (diffMs < 0 && unpaidBalance > 0);
+    }
+  }
+
+  // 7. Role-Specific Data Projection
+  // Privacy rule (Decision D5): Mask customer phone for Seller / Associate / Team Member
+  const shouldMaskCustomerPhone = !isAdmin && !isBuyer;
+  const roleView = isAdmin ? 'Admin' : isBuyer ? 'Customer' : isSeller ? 'Seller' : 'Associate';
+
+  return {
+    booking_id: booking.booking_id,
+    booking_serial: booking.booking_serial,
+    booking_status: booking.booking_status,
+    booking_date: booking.booking_date || booking.created_at,
+    role_view: roleView,
+    plot: {
+      plot_id: booking.plot_id,
+      plot_number: booking.plot_number,
+      plot_area: booking.plot_area,
+      plot_category: booking.plot_category,
+      plot_status: booking.plot_status,
+      base_price: booking.base_price,
+      registry_status: booking.registry_status,
+      registry_date: booking.registry_date
+    },
+    site: {
+      site_id: booking.site_id,
+      site_name: booking.site_name,
+      city: booking.site_city,
+      address: booking.site_address
+    },
+    customer: {
+      user_id: booking.user_id,
+      name: booking.buyer_name || 'Customer',
+      member_id: booking.buyer_member_id || '',
+      city: booking.buyer_city || '',
+      state: booking.buyer_state || '',
+      mobile_no: shouldMaskCustomerPhone ? maskPhoneNumber(booking.buyer_mobile) : (booking.buyer_mobile || ''),
+      email: shouldMaskCustomerPhone ? '—' : (booking.buyer_email || ''),
+      is_masked: shouldMaskCustomerPhone
+    },
+    seller: {
+      user_id: booking.sold_by_user_id,
+      name: booking.seller_name || 'MMR Associate',
+      member_id: booking.seller_member_id || '',
+      user_type: booking.seller_user_type || 'Associate'
+    },
+    financials: {
+      total_price: totalPrice,
+      advance_amount: advanceAmount,
+      confirmed_paid: confirmedPaid,
+      unpaid_balance: unpaidBalance,
+      payment_type: booking.payment_type || 'Full',
+      part_wise: {
+        is_part_wise: isPartWise,
+        deadline_at: partWiseDeadlineAt,
+        days_remaining: partWiseDaysRemaining,
+        is_overdue: partWiseOverdue
+      },
+      installment_plan_id: booking.installment_plan_id,
+      plan_snapshot: booking.plan_snapshot || null
+    },
+    emi_schedule: emiSchedule,
+    payment_proofs: paymentProofs,
+    commissions: commissions,
+    notes: booking.notes || null,
+    created_at: booking.created_at,
+    updated_at: booking.updated_at
+  };
+}
+
 export default {
   createBooking,
   approveBooking,
@@ -735,5 +1036,8 @@ export default {
   overrideAssociateApproval,
   resolveAssociate,
   releasePlotOrPromoteWaitlist,
-  recordBookingAudit
+  recordBookingAudit,
+  getBookingDetailByRole,
+  maskPhoneNumber
 };
+

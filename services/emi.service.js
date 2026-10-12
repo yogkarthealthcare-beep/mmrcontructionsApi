@@ -28,33 +28,60 @@ export async function ensureEmiSchedulesForBooking(db, booking) {
 
   if (remainingBalance <= 0) return;
 
-  const tenure = Number(booking.emi_tenure_months) > 0 ? Number(booking.emi_tenure_months) : 60;
-  let monthlyEmi = Number(booking.monthly_emi || 0);
-  if (monthlyEmi <= 0) {
-    monthlyEmi = Math.round(remainingBalance / tenure);
+  let snapshot = null;
+  if (booking.plan_snapshot) {
+    snapshot = typeof booking.plan_snapshot === 'string' ? JSON.parse(booking.plan_snapshot) : booking.plan_snapshot;
   }
 
   const startDate = booking.created_at ? new Date(booking.created_at) : new Date();
   startDate.setMonth(startDate.getMonth() + 1);
 
-  for (let i = 1; i <= tenure; i++) {
-    const due = new Date(startDate);
-    due.setMonth(due.getMonth() + (i - 1));
-    const isLast = i === tenure;
-    const emiAmount = isLast ? (remainingBalance - (monthlyEmi * (tenure - 1))) : monthlyEmi;
+  if (snapshot && Array.isArray(snapshot.schedule) && snapshot.schedule.length > 0) {
+    for (const item of snapshot.schedule) {
+      const due = new Date(startDate);
+      due.setMonth(due.getMonth() + (item.installment_no - 1));
+      try {
+        await db`
+          INSERT INTO emi_schedules (
+            booking_id, user_id, installment_no, due_date, emi_amount,
+            late_fee_amount, total_due, paid_amount, emi_status,
+            principal_component, interest_component, created_at, updated_at
+          ) VALUES (
+            ${bookingId}, ${userId}, ${item.installment_no}, ${due.toISOString().split("T")[0]}, ${Math.max(0, item.emi_amount)},
+            0.00, ${Math.max(0, item.emi_amount)}, 0.00, 'Pending',
+            ${item.principal_component}, ${item.interest_component}, NOW(), NOW()
+          )
+        `;
+      } catch (emiErr) {
+        console.warn(`[MMR API] EMI schedule insert notice (installment ${item.installment_no}):`, emiErr?.message);
+      }
+    }
+  } else {
+    const tenure = Number(booking.emi_tenure_months) > 0 ? Number(booking.emi_tenure_months) : 60;
+    let monthlyEmi = Number(booking.monthly_emi || 0);
+    if (monthlyEmi <= 0) {
+      monthlyEmi = Math.round(remainingBalance / tenure);
+    }
 
-    try {
-      await db`
-        INSERT INTO emi_schedules (
-          booking_id, user_id, installment_no, due_date, emi_amount,
-          late_fee_amount, total_due, paid_amount, emi_status, created_at, updated_at
-        ) VALUES (
-          ${bookingId}, ${userId}, ${i}, ${due.toISOString().split("T")[0]}, ${Math.max(0, emiAmount)},
-          0.00, ${Math.max(0, emiAmount)}, 0.00, 'Pending', NOW(), NOW()
-        )
-      `;
-    } catch (emiErr) {
-      console.warn(`[MMR API] EMI schedule insert notice (installment ${i}):`, emiErr?.message);
+    for (let i = 1; i <= tenure; i++) {
+      const due = new Date(startDate);
+      due.setMonth(due.getMonth() + (i - 1));
+      const isLast = i === tenure;
+      const emiAmount = isLast ? (remainingBalance - (monthlyEmi * (tenure - 1))) : monthlyEmi;
+
+      try {
+        await db`
+          INSERT INTO emi_schedules (
+            booking_id, user_id, installment_no, due_date, emi_amount,
+            late_fee_amount, total_due, paid_amount, emi_status, created_at, updated_at
+          ) VALUES (
+            ${bookingId}, ${userId}, ${i}, ${due.toISOString().split("T")[0]}, ${Math.max(0, emiAmount)},
+            0.00, ${Math.max(0, emiAmount)}, 0.00, 'Pending', NOW(), NOW()
+          )
+        `;
+      } catch (emiErr) {
+        console.warn(`[MMR API] EMI schedule insert notice (installment ${i}):`, emiErr?.message);
+      }
     }
   }
 }

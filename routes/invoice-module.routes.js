@@ -164,34 +164,84 @@ async function canAccessInvoice(reqUser = {}, invoice = {}) {
   if (isAdmin) return true;
 
   const currentUserId = reqUser.user_id || reqUser.id || 0;
+  if (!currentUserId) return false;
+
   if (invoice.user_id && invoice.user_id === currentUserId) return true;
   if (invoice.associate_id && invoice.associate_id === currentUserId) return true;
 
+  // Check booking attribution
+  const bookingId = invoice.booking_id || (invoice.invoice_data && invoice.invoice_data.booking_id);
+  if (bookingId) {
+    try {
+      const [bk] = await sql`
+        SELECT user_id, associate_id, sold_by_user_id, referred_by_user_id, booked_by_user_id
+        FROM bookings WHERE booking_id = ${bookingId} LIMIT 1
+      `;
+      if (bk) {
+        if (bk.user_id === currentUserId ||
+            bk.associate_id === currentUserId ||
+            bk.sold_by_user_id === currentUserId ||
+            bk.referred_by_user_id === currentUserId ||
+            bk.booked_by_user_id === currentUserId) {
+          return true;
+        }
+      }
+    } catch (_) {}
+  }
+
+  // Check if team member
+  const isTeamMember = Boolean(
+    String(reqUser.role || "").toLowerCase() === "team member" ||
+    String(reqUser.user_type || "").toLowerCase() === "team member" ||
+    reqUser.team_member_id
+  );
+  if (isTeamMember) {
+    if (bookingId) {
+      try {
+        const [tmBk] = await sql`
+          SELECT 1 FROM bookings
+          WHERE booking_id = ${bookingId}
+            AND (sold_by_user_id = ${currentUserId} OR referred_by_user_id = ${currentUserId} OR user_id = ${currentUserId})
+        `;
+        if (tmBk) return true;
+      } catch (_) {}
+    }
+    if (invoice.user_id) {
+      try {
+        const [tmCust] = await sql`
+          SELECT 1 FROM team_member_customer_mapping
+          WHERE team_member_id = ${currentUserId} AND customer_id = ${invoice.user_id}
+        `;
+        if (tmCust) return true;
+      } catch (_) {}
+    }
+  }
+
+  // Check associate downline / referral
   const isAssociate = Boolean(
     reqUser.is_associate ||
     String(reqUser.role || "").toLowerCase() === "associate" ||
     String(reqUser.user_type || "").toLowerCase() === "associate"
   );
+  if (isAssociate && invoice.user_id) {
+    try {
+      const [ref] = await sql`
+        SELECT 1 FROM referral_registrations
+        WHERE sponsor_user_id = ${currentUserId} AND referred_user_id = ${invoice.user_id}`;
+      if (ref) return true;
 
-  if (isAssociate && currentUserId) {
-    // Check if customer was referred by this associate
-    const [ref] = await sql`
-      SELECT 1 FROM referral_registrations
-      WHERE sponsor_user_id = ${currentUserId} AND referred_user_id = ${invoice.user_id}`;
-    if (ref) return true;
+      const [u] = await sql`
+        SELECT 1 FROM users
+        WHERE user_id = ${invoice.user_id} AND sponsor_user_id = ${currentUserId}`;
+      if (u) return true;
 
-    // Check direct sponsor in users table
-    const [u] = await sql`
-      SELECT 1 FROM users
-      WHERE user_id = ${invoice.user_id} AND sponsor_user_id = ${currentUserId}`;
-    if (u) return true;
-
-    // Check downline in MLM tree closure
-    const [closure] = await sql`
-      SELECT 1 FROM mlm_tree_closure
-      WHERE ancestor_user_id = ${currentUserId} AND descendant_user_id = ${invoice.user_id}`;
-    if (closure) return true;
+      const [closure] = await sql`
+        SELECT 1 FROM mlm_tree_closure
+        WHERE ancestor_user_id = ${currentUserId} AND descendant_user_id = ${invoice.user_id}`;
+      if (closure) return true;
+    } catch (_) {}
   }
+
   return false;
 }
 
@@ -201,20 +251,118 @@ async function canAccessInvoice(reqUser = {}, invoice = {}) {
 router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
   try {
     const { invoiceNumber } = req.params;
-    const cleanNum = String(invoiceNumber || "").replace(/^MMR-INV-/i, "").replace(/^BK-/i, "").replace(/^INV-/i, "").trim();
+    const isEmiQuery = String(invoiceNumber || "").toUpperCase().startsWith("EMI-") || 
+                       String(invoiceNumber || "").toUpperCase().includes("-EMI-") ||
+                       req.query.type === 'emi';
+
+    const cleanNum = String(invoiceNumber || "")
+      .replace(/^MMR-INV-EMI-/i, "")
+      .replace(/^MMR-INV-/i, "")
+      .replace(/^MMR-RC-/i, "")
+      .replace(/^BK-/i, "")
+      .replace(/^INV-/i, "")
+      .replace(/^EMI-/i, "")
+      .trim();
     const cleanId = !isNaN(Number(cleanNum)) && cleanNum.length > 0 ? Number(cleanNum) : null;
 
     let [invoice] = await sql`
       SELECT * FROM invoices
       WHERE LOWER(invoice_number) = LOWER(${invoiceNumber})
          OR LOWER(order_id) = LOWER(${invoiceNumber})
-         OR (CASE WHEN ${cleanId !== null} THEN invoice_id = ${cleanId} OR booking_id = ${cleanId} ELSE false END)
+         OR (CASE WHEN ${cleanId !== null && !isEmiQuery} THEN invoice_id = ${cleanId} OR booking_id = ${cleanId} ELSE false END)
          OR (invoice_data->>'booking_id')::text = ${cleanNum}
+         OR (invoice_data->>'emi_id')::text = ${cleanNum}
          OR (invoice_data->>'invoice_number') ILIKE ${'%' + invoiceNumber + '%'}
          OR invoice_number ILIKE ${'%' + invoiceNumber + '%'}
       ORDER BY invoice_id ASC
       LIMIT 1
     `;
+
+    // If specific EMI installment requested and no invoice record found yet:
+    if (!invoice && (isEmiQuery || String(invoiceNumber).toUpperCase().startsWith("EMI-")) && cleanId !== null) {
+      const [emiRow] = await sql`
+        SELECT e.*, b.booking_serial, b.plot_id, b.site_id, b.advance_amount, b.total_amount,
+               b.base_price, b.created_at AS booking_created_at,
+               COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+               COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+               COALESCE(s.site_name, 'MMR City') AS site_name,
+               u.full_name, u.mobile_no, u.email, u.father_name, u.address,
+               assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile, assoc.user_id AS associate_user_id
+        FROM emi_schedules e
+        JOIN bookings b ON e.booking_id = b.booking_id
+        LEFT JOIN plots p ON b.plot_id = p.plot_id
+        LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
+        JOIN users u ON e.user_id = u.user_id
+        LEFT JOIN users assoc ON b.associate_id = assoc.user_id
+        WHERE e.emi_id = ${cleanId}
+        LIMIT 1
+      `;
+
+      if (emiRow) {
+        const formattedInvNum = `MMR-INV-EMI-${emiRow.emi_id}`;
+        const totalPlotPrice = Number(emiRow.total_amount || emiRow.base_price || (Number(emiRow.plot_area || 0) * 1000) || 0);
+        const emiAmt = Number(emiRow.paid_amount || emiRow.emi_amount || 0);
+
+        const [paidSumRow] = await sql`
+          SELECT COALESCE(SUM(paid_amount), 0)::numeric AS sum 
+          FROM emi_schedules 
+          WHERE booking_id = ${emiRow.booking_id} AND emi_status = 'Paid'
+        `;
+        const totalPaidTillDate = Number(emiRow.advance_amount || 0) + Number(paidSumRow?.sum || 0);
+        const remainingBal = Math.max(0, totalPlotPrice - totalPaidTillDate);
+
+        const invData = {
+          invoice_number: formattedInvNum,
+          invoice_type: "EMI Installment Payment",
+          emi_id: emiRow.emi_id,
+          installment_no: emiRow.installment_no,
+          booking_id: emiRow.booking_id,
+          booking_serial: emiRow.booking_serial || `BK-${emiRow.booking_id}`,
+          customer_name: emiRow.full_name || "Valued Customer",
+          mobile_no: emiRow.mobile_no || "",
+          email: emiRow.email || "",
+          father_name: emiRow.father_name || "",
+          address: emiRow.address || "",
+          associate_name: emiRow.associate_name || "",
+          associate_mobile: emiRow.associate_mobile || "",
+          associate_id: emiRow.associate_user_id || "",
+          site_name: emiRow.site_name || "MMR City",
+          plot_number: emiRow.plot_number || "Plot",
+          plot_size: `${emiRow.plot_area || ''} Sq.Yd.`.trim(),
+          total_plot_price: totalPlotPrice,
+          down_payment: Number(emiRow.advance_amount || 0),
+          emi_amount: emiAmt,
+          grand_total: emiAmt,
+          paid_amount: emiAmt,
+          total_paid_till_date: totalPaidTillDate,
+          balance_amount: remainingBal,
+          payment_method: emiRow.payment_mode || "Online / Bank",
+          payment_type: "EMI",
+          is_emi: true,
+          payment_date: emiRow.paid_date ? new Date(emiRow.paid_date).toISOString().split('T')[0] : (emiRow.due_date ? new Date(emiRow.due_date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]),
+          due_date: emiRow.due_date,
+          transaction_id: emiRow.transaction_reference || `EMI-${emiRow.emi_id}`,
+          payment_status: emiRow.emi_status === 'Paid' ? 'Paid' : 'Pending',
+          order_status: "Completed"
+        };
+
+        invoice = {
+          invoice_id: emiRow.emi_id,
+          invoice_number: formattedInvNum,
+          order_id: `EMI-${emiRow.emi_id}`,
+          user_id: emiRow.user_id,
+          booking_id: emiRow.booking_id,
+          invoice_date: emiRow.paid_date || emiRow.due_date || emiRow.created_at || new Date(),
+          grand_total: emiAmt,
+          paid_amount: emiAmt,
+          balance_amount: remainingBal,
+          payment_method: emiRow.payment_mode || 'Online / Bank',
+          payment_status: emiRow.emi_status === 'Paid' ? 'Paid' : 'Pending',
+          order_status: 'Completed',
+          invoice_data: invData
+        };
+      }
+    }
 
     // If no existing invoice found in invoices table, auto-generate for the booking if cleanId is valid
     if (!invoice && cleanId !== null) {
@@ -223,45 +371,94 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
                COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
                COALESCE(p.plot_category::text, 'Residential') AS plot_type,
                COALESCE(p.plot_category::text, 'Residential') AS plot_category,
+               COALESCE(p.base_price, b.total_amount, b.base_price, (Number(b.plot_area || 0) * 1000)) AS calc_price,
                COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
-               u.full_name, u.mobile_no, u.email
+               u.full_name, u.mobile_no, u.email, u.father_name, u.address,
+               assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile, assoc.user_id AS associate_user_id
         FROM bookings b
         LEFT JOIN plots p ON b.plot_id = p.plot_id
         LEFT JOIN sites s ON p.site_id = s.site_id
         LEFT JOIN sites s2 ON b.site_id = s2.site_id
         JOIN users u ON b.user_id = u.user_id
+        LEFT JOIN users assoc ON b.associate_id = assoc.user_id
         WHERE b.booking_id = ${cleanId}
         LIMIT 1
       `;
 
       if (booking) {
-        const totalPlotPrice = Number(booking.base_price || (Number(booking.plot_area || 0) * 1000) || 0);
+        const totalPlotPrice = Number(booking.calc_price || booking.base_price || booking.total_amount || (Number(booking.plot_area || 0) * 1000) || 0);
         const downPayment = Number(booking.advance_amount || booking.required_booking_amount || 0);
-        const remainingBal = Math.max(0, totalPlotPrice - downPayment);
+        
+        const payType = String(booking.payment_type || booking.payment_method || '').toLowerCase();
+        const isOneTime = payType.includes('full') || payType.includes('onetime') || payType.includes('one time') || payType === 'one_time';
+        const isPartWise = payType.includes('part') || payType.includes('downpayment') || payType.includes('down_payment');
+        const isEmi = payType.includes('emi') || payType.includes('installment');
+
+        // Payment method logic: One-time payment => zero due amount!
+        let remainingBal = 0;
+        let paidAmount = downPayment;
+        let grandTotal = totalPlotPrice;
+        let paymentStatus = "Paid";
+
+        if (isOneTime) {
+          remainingBal = 0;
+          paidAmount = totalPlotPrice;
+          grandTotal = totalPlotPrice;
+          paymentStatus = "Paid in Full";
+        } else if (isPartWise) {
+          remainingBal = Math.max(0, totalPlotPrice - downPayment);
+          paidAmount = downPayment;
+          grandTotal = totalPlotPrice;
+          paymentStatus = remainingBal === 0 ? "Paid in Full" : "Partially Paid";
+        } else {
+          remainingBal = Math.max(0, totalPlotPrice - downPayment);
+          grandTotal = totalPlotPrice;
+        }
+
+        // Next due date for part-wise payment
+        let deadlineDate = booking.part_wise_deadline_at;
+        if (!deadlineDate && booking.created_at) {
+          const bDate = new Date(booking.created_at);
+          bDate.setMonth(bDate.getMonth() + 3);
+          deadlineDate = bDate.toISOString();
+        }
+
         const formattedInvNum = `MMR-INV-${booking.booking_id}`;
 
         const invData = {
           invoice_number: formattedInvNum,
-          invoice_type: "Plot Booking Advance",
+          invoice_type: isOneTime ? "Plot Full Purchase Invoice" : (isPartWise ? "Plot Part Payment Invoice" : "Plot Booking Advance"),
           booking_id: booking.booking_id,
           booking_serial: booking.booking_serial || `BK-${booking.booking_id}`,
           customer_name: booking.full_name || "Valued Customer",
           mobile_no: booking.mobile_no || "",
           email: booking.email || "",
+          father_name: booking.father_name || "",
+          address: booking.address || "",
+          associate_name: booking.associate_name || "",
+          associate_mobile: booking.associate_mobile || "",
+          associate_id: booking.associate_user_id || "",
           site_name: booking.site_name || "MMR City",
           plot_number: booking.plot_number || "Plot",
           plot_size: `${booking.plot_area || ''} Sq.Yd.`.trim(),
           total_plot_price: totalPlotPrice,
           down_payment: downPayment,
           emi_amount: downPayment,
-          grand_total: downPayment,
-          paid_amount: downPayment,
-          total_paid_till_date: downPayment,
+          grand_total: grandTotal,
+          paid_amount: paidAmount,
+          total_paid_till_date: paidAmount,
           balance_amount: remainingBal,
-          payment_method: booking.payment_method || booking.payment_type || "Cash / Bank",
+          payment_method: isOneTime ? "One Time / Full Payment" : (booking.payment_method || booking.payment_type || "Cash / Bank"),
+          payment_type: booking.payment_type || (isOneTime ? "FullPayment" : (isPartWise ? "PartWise" : "EMI")),
+          is_one_time: isOneTime,
+          is_part_wise: isPartWise,
+          is_emi: isEmi,
+          part_wise_deadline_at: deadlineDate,
+          tenure_months: booking.emi_tenure_months || 60,
+          monthly_emi: booking.monthly_emi || 0,
           payment_date: booking.created_at ? new Date(booking.created_at).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
           transaction_id: booking.booking_serial || `BK-${booking.booking_id}`,
-          payment_status: "Paid",
+          payment_status: paymentStatus,
           order_status: "Completed"
         };
 
@@ -274,8 +471,8 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
               invoice_data, created_at, updated_at
             ) VALUES (
               ${formattedInvNum}, ${booking.booking_serial || `BK-${booking.booking_id}`}, ${booking.user_id}, ${booking.booking_id},
-              ${booking.created_at || new Date()}, ${downPayment}, 0.00, 0.00, 0.00, 0.00, ${downPayment}, ${downPayment},
-              ${remainingBal}, ${booking.payment_method || 'Cash / Bank'}, 'Paid', 'Completed',
+              ${booking.created_at || new Date()}, ${totalPlotPrice}, 0.00, 0.00, 0.00, 0.00, ${grandTotal}, ${paidAmount},
+              ${remainingBal}, ${invData.payment_method}, ${paymentStatus}, 'Completed',
               ${JSON.stringify(invData)}::jsonb, NOW(), NOW()
             ) RETURNING *
           `;
@@ -288,11 +485,11 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
             user_id: booking.user_id,
             booking_id: booking.booking_id,
             invoice_date: booking.created_at || new Date(),
-            grand_total: downPayment,
-            paid_amount: downPayment,
+            grand_total: grandTotal,
+            paid_amount: paidAmount,
             balance_amount: remainingBal,
-            payment_method: booking.payment_method || 'Cash / Bank',
-            payment_status: 'Paid',
+            payment_method: invData.payment_method,
+            payment_status: paymentStatus,
             order_status: 'Completed',
             invoice_data: invData
           };
@@ -304,6 +501,78 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
 
     const hasAccess = await canAccessInvoice(req.user, invoice);
     if (!hasAccess) return fail(res, "Unauthorized to access this invoice.", 403);
+
+    // Fetch and sync underlying booking data & EMI schedules
+    const targetBookingId = invoice.booking_id || (invoice.invoice_data && invoice.invoice_data.booking_id);
+    if (targetBookingId) {
+      try {
+        const [targetBooking] = await sql`
+          SELECT b.*, COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+                 COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+                 COALESCE(p.base_price, b.total_amount, b.base_price, (Number(b.plot_area || 0) * 1000)) AS calc_price,
+                 COALESCE(s.site_name, 'MMR City') AS site_name,
+                 u.father_name, u.address,
+                 assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile, assoc.user_id AS associate_user_id
+          FROM bookings b
+          LEFT JOIN plots p ON b.plot_id = p.plot_id
+          LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
+          JOIN users u ON b.user_id = u.user_id
+          LEFT JOIN users assoc ON b.associate_id = assoc.user_id
+          WHERE b.booking_id = ${targetBookingId}
+          LIMIT 1
+        `;
+
+        if (targetBooking) {
+          const payType = String(targetBooking.payment_type || invoice.payment_method || invoice.invoice_data?.payment_method || '').toLowerCase();
+          const isOneTime = payType.includes('full') || payType.includes('onetime') || payType.includes('one time') || payType === 'one_time';
+          const isPartWise = payType.includes('part') || payType.includes('downpayment') || payType.includes('down_payment');
+          const isEmi = payType.includes('emi') || payType.includes('installment');
+
+          let deadlineDate = targetBooking.part_wise_deadline_at;
+          if (!deadlineDate && targetBooking.created_at) {
+            const bDate = new Date(targetBooking.created_at);
+            bDate.setMonth(bDate.getMonth() + 3);
+            deadlineDate = bDate.toISOString();
+          }
+
+          const emiSchedules = await sql`
+            SELECT * FROM emi_schedules
+            WHERE booking_id = ${targetBookingId}
+            ORDER BY installment_no ASC
+          `;
+
+          // Ensure invoice_data is an object
+          invoice.invoice_data = typeof invoice.invoice_data === 'string' ? JSON.parse(invoice.invoice_data) : (invoice.invoice_data || {});
+          
+          if (isOneTime) {
+            invoice.balance_amount = 0;
+            invoice.payment_status = "Paid in Full";
+            invoice.invoice_data.balance_amount = 0;
+            invoice.invoice_data.payment_status = "Paid in Full";
+            invoice.invoice_data.is_one_time = true;
+          }
+
+          if (isPartWise) {
+            invoice.invoice_data.is_part_wise = true;
+            invoice.invoice_data.part_wise_deadline_at = deadlineDate;
+            invoice.part_wise_deadline_at = deadlineDate;
+          }
+
+          invoice.invoice_data.father_name = invoice.invoice_data.father_name || targetBooking.father_name || "";
+          invoice.invoice_data.address = invoice.invoice_data.address || targetBooking.address || "";
+          invoice.invoice_data.associate_name = invoice.invoice_data.associate_name || targetBooking.associate_name || "";
+          invoice.invoice_data.associate_mobile = invoice.invoice_data.associate_mobile || targetBooking.associate_mobile || "";
+          invoice.invoice_data.associate_id = invoice.invoice_data.associate_id || targetBooking.associate_user_id || "";
+          invoice.invoice_data.is_emi = isEmi || (emiSchedules.length > 0);
+          invoice.invoice_data.tenure_months = targetBooking.emi_tenure_months || 60;
+          invoice.invoice_data.monthly_emi = targetBooking.monthly_emi || 0;
+          invoice.invoice_data.emi_schedules = emiSchedules;
+          invoice.emi_schedules = emiSchedules;
+        }
+      } catch (syncErr) {
+        console.warn("Invoice data sync notice:", syncErr.message);
+      }
+    }
 
     // Fetch Invoice Settings
     const [settings] = await sql`SELECT * FROM invoice_settings WHERE id = 1`;
@@ -551,20 +820,36 @@ router.get("/invoice/:invoiceNumber/pdf", userAuth, async (req, res) => {
     doc.fillColor("#14532d").fontSize(12).text("FINANCIAL SUMMARY & PAYMENT STATUS", 40, y);
     y += 18;
 
+    const payType = String(data.payment_type || invoice.payment_method || '').toLowerCase();
+    const isOneTime = Boolean(data.is_one_time || payType.includes('full') || payType.includes('onetime') || payType.includes('one time'));
+    const isPartWise = Boolean(data.is_part_wise || payType.includes('part') || (!isOneTime && Number(invoice.balance_amount || 0) > 0 && !data.is_emi));
+    const isEmi = Boolean(data.is_emi || payType.includes('emi') || payType.includes('installment'));
+
     const summaryItems = [
       ["Subtotal Plot Cost", `INR ${Number(data.total_plot_price || invoice.subtotal || 0).toLocaleString("en-IN")}`],
       ["Discount", `INR ${Number(data.discount || invoice.discount || 0).toLocaleString("en-IN")}`],
       ["Registration / Statutory Charges", `INR ${Number(data.registration_charges || invoice.registration_charges || 0).toLocaleString("en-IN")}`],
       ["Other / Development Charges", `INR ${Number(data.other_charges || invoice.other_charges || 0).toLocaleString("en-IN")}`],
       ["Grand Total Payable", `INR ${Number(invoice.grand_total || 0).toLocaleString("en-IN")}`],
-      ["Amount Paid Till Date", `INR ${Number(invoice.paid_amount || 0).toLocaleString("en-IN")}`],
-      ["Remaining Balance Amount", `INR ${Number(invoice.balance_amount || 0).toLocaleString("en-IN")}`],
-      ["Payment Method", invoice.payment_method || "Online"],
-      ["Payment & Order Status", `${invoice.payment_status} / ${invoice.order_status}`],
+      ["Amount Paid Till Date", `INR ${Number(isOneTime ? (invoice.grand_total || data.total_plot_price || invoice.paid_amount) : (invoice.paid_amount || 0)).toLocaleString("en-IN")}`],
+      ["Remaining Balance Amount", isOneTime ? "INR 0 (Paid in Full)" : `INR ${Number(invoice.balance_amount || 0).toLocaleString("en-IN")}`],
+      ["Payment Method", isOneTime ? "One Time / Full Payment" : (invoice.payment_method || "Online")],
+      ["Payment & Order Status", `${isOneTime ? "Paid in Full" : invoice.payment_status} / ${invoice.order_status}`],
     ];
 
+    if (isPartWise && (data.part_wise_deadline_at || invoice.part_wise_deadline_at)) {
+      summaryItems.push(["Remaining Payment Due Date", new Date(data.part_wise_deadline_at || invoice.part_wise_deadline_at).toLocaleDateString("en-IN")]);
+    }
+    if (isEmi && (data.installment_no || data.tenure_months)) {
+      if (data.installment_no) {
+        summaryItems.push(["EMI Installment Number", `#${data.installment_no} of ${data.tenure_months || 60}`]);
+      } else {
+        summaryItems.push(["EMI Plan Tenure", `${data.tenure_months || 60} Months`]);
+      }
+    }
+
     for (const [lbl, val] of summaryItems) {
-      const isBold = lbl.includes("Grand Total") || lbl.includes("Amount Paid") || lbl.includes("Balance");
+      const isBold = lbl.includes("Grand Total") || lbl.includes("Amount Paid") || lbl.includes("Balance") || lbl.includes("Due Date");
       doc.fontSize(9).fillColor(isBold ? "#14532d" : "#64748b").text(lbl, 40, y, { width: 180 });
       doc.fontSize(9).fillColor(isBold ? "#14532d" : "#0f172a").text(String(val), 220, y, { width: 330 });
       y += 14;

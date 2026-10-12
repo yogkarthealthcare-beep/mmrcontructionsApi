@@ -256,7 +256,7 @@ router.get('/verify-sponsor/:code', async (req, res) => {
     if (!sponsor) {
       return res.status(404).json({
         success: false,
-        message: 'Invalid sponsor code. No active associate found with this code.',
+        message: 'Invalid sponsor code. No active associate or team member found with this code.',
       });
     }
     return ok(res, {
