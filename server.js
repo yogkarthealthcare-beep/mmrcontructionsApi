@@ -55,6 +55,7 @@ import { bookingApprovalConfig } from "./config/bookingApproval.js";
 import commissionService from "./services/commissionService.js";
 import installmentPlansRoutes from "./routes/installment-plans.routes.js";
 import installmentService from "./services/installmentService.js";
+import emiManagementRoutes from "./routes/emi-management.routes.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -284,11 +285,13 @@ ensureUnifiedPaymentSchema().then(() => {
 }).catch(err => console.error("[UnifiedPayment] Initialization error:", err));
 
 // Phase 2 Routes: Sales Attribution Reports, Booking Approvals & Bookable Customers
+app.use('/api', adminNetworkTreeRoutes);
 app.use('/api', salesAttributionReportsRoutes);
 app.use('/api', bookingApprovalsRoutes);
 app.use('/api', adminAttributionRoutes);
 app.use('/api', masterDataRoutes);
 app.use('/api', installmentPlansRoutes);
+app.use('/api', emiManagementRoutes);
 installmentService.ensureInstallmentSchema(sql).catch(err => console.error("[InstallmentSchema] Initialization error:", err));
 
 export async function ensurePlotManagementSchema() {
