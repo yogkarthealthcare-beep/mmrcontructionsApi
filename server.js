@@ -5657,6 +5657,361 @@ app.post(["/api/admin/login-as-user", "/api/admin/auth/impersonate", "/api/admin
   }
 });
 
+/* =========================================================================
+   SECURE ADMIN IMPERSONATION TICKET SYSTEM (Admin Network Tree & Portals)
+   1. Admin issues short-lived (60s) single-use cryptographically secure ticket.
+   2. Target tab exchanges ticket via POST body without token in URL or referrer.
+   3. Atomic consumption prevents replay, timeout prevents persistence.
+   4. Fully recorded in database audit_log and admin_impersonation_tickets.
+   ========================================================================= */
+
+const memoryImpersonationTickets = new Map();
+
+async function ensureImpersonationTicketsTable() {
+  try {
+    await sql`
+      CREATE TABLE IF NOT EXISTS admin_impersonation_tickets (
+        ticket VARCHAR(128) PRIMARY KEY,
+        admin_id INTEGER NOT NULL,
+        admin_email VARCHAR(255),
+        target_user_id INTEGER NOT NULL,
+        target_user_type VARCHAR(64) NOT NULL,
+        target_role VARCHAR(64),
+        acting_panel VARCHAR(64),
+        redirect_url VARCHAR(255) NOT NULL,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        is_consumed BOOLEAN DEFAULT FALSE,
+        consumed_at TIMESTAMP WITH TIME ZONE,
+        ip_address VARCHAR(128),
+        user_agent TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+    `;
+  } catch (schemaErr) {
+    console.warn("[Impersonation Tickets Schema Warning]:", schemaErr.message);
+  }
+}
+
+// 1. ISSUE TICKET (Admin Only)
+app.post(["/api/admin/impersonate-ticket", "/api/admin/network-tree/impersonate-ticket"], verifyAdminToken, async (req, res) => {
+  try {
+    const rawUserId = req.body.user_id || req.body.id || req.body.userId;
+    const rawUserType = req.body.user_type || req.body.role || req.body.type;
+    if (!rawUserId) {
+      return err(res, "user_id is required", 400);
+    }
+
+    const cleanUserId = Number(rawUserId);
+    if (!cleanUserId || isNaN(cleanUserId)) {
+      return err(res, "Valid user_id is required", 400);
+    }
+
+    const normalizedType = String(rawUserType || "").trim();
+
+    // Verify target user in DB
+    let targetUser = null;
+    let redirectUrl = "";
+    let dbRole = "";
+    let actingPanel = null;
+
+    if (normalizedType.toLowerCase() === "investor") {
+      const [investor] = await sql`
+        SELECT id, full_name, email, mobile_number, status, is_verified
+        FROM investor_users
+        WHERE id = ${cleanUserId} AND deleted_at IS NULL`;
+
+      if (!investor) return err(res, "Investor account not found", 404);
+
+      const invStatus = String(investor.status || "").toLowerCase();
+      if (invStatus !== "active" && invStatus !== "approved") {
+        return err(res, `Investor account is not active (status: ${investor.status}).`, 400);
+      }
+
+      dbRole = "Investor";
+      redirectUrl = "/investor/dashboard";
+      targetUser = {
+        id: investor.id,
+        user_id: investor.id,
+        full_name: investor.full_name,
+        email: investor.email,
+        mobile_no: investor.mobile_number,
+        user_type: "Investor",
+        role: "Investor",
+        account_status: investor.status
+      };
+    } else {
+      let [user] = await sql`
+        SELECT user_id, full_name, email, mobile_no, user_type, account_status, member_id, invitation_code
+        FROM users
+        WHERE user_id = ${cleanUserId}`;
+
+      if (!user) {
+        const [tm] = await sql`SELECT * FROM team_members WHERE (id = ${cleanUserId} OR user_id = ${cleanUserId}) AND LOWER(status) IN ('approved', 'active') LIMIT 1`;
+        if (tm && tm.user_id) {
+          [user] = await sql`SELECT user_id, full_name, email, mobile_no, user_type, account_status, member_id, invitation_code FROM users WHERE user_id = ${tm.user_id}`;
+        }
+      }
+
+      if (!user) return err(res, "User account not found", 404);
+
+      if (user.account_status !== "Active" && user.account_status !== "Approved") {
+        return err(res, `Account cannot be accessed because status is '${user.account_status}'.`, 400);
+      }
+
+      const [tmRecord] = await sql`
+        SELECT id, team_member_uid, status FROM team_members 
+        WHERE user_id = ${user.user_id} 
+          AND LOWER(status) IN ('approved', 'active')
+        LIMIT 1
+      `;
+      const isTmMembership = Boolean(tmRecord);
+      const isRequestedTm = normalizedType.toLowerCase().includes("team member") || normalizedType.toLowerCase() === "teammember";
+      dbRole = user.user_type || "Customer";
+      const isRoleConflict = isTmMembership && (dbRole === "Associate" || dbRole === "Customer");
+
+      if (isRequestedTm || String(dbRole).toLowerCase().includes("team member")) {
+        redirectUrl = "/team-member/dashboard";
+        if (dbRole !== "Team Member") {
+          actingPanel = "team-member";
+        }
+      } else if (dbRole === "Associate") {
+        redirectUrl = "/associate/dashboard";
+      } else {
+        redirectUrl = "/customer/dashboard";
+      }
+
+      targetUser = {
+        ...user,
+        role_conflict: isRoleConflict,
+        acting_panel: actingPanel || undefined
+      };
+    }
+
+    // Generate cryptographically secure single-use ticket (64 hex chars)
+    const ticket = crypto.randomBytes(32).toString("hex");
+    const adminId = req.admin?.admin_id || req.admin?.id || 1;
+    const adminEmail = req.admin?.email || "admin@mmrconstructions.in";
+    const expiresAt = new Date(Date.now() + 60000); // 60 seconds TTL
+
+    const ticketData = {
+      ticket,
+      admin_id: adminId,
+      admin_email: adminEmail,
+      target_user_id: targetUser.user_id || targetUser.id,
+      target_user_type: dbRole,
+      acting_panel: actingPanel,
+      redirect_url: redirectUrl,
+      expires_at: expiresAt.getTime(),
+      is_consumed: false
+    };
+
+    // Store in memory Map with 65-second cleanup
+    memoryImpersonationTickets.set(ticket, ticketData);
+    setTimeout(() => {
+      memoryImpersonationTickets.delete(ticket);
+    }, 65000);
+
+    // Persist to DB asynchronously
+    ensureImpersonationTicketsTable().then(async () => {
+      try {
+        await sql`
+          INSERT INTO admin_impersonation_tickets (
+            ticket, admin_id, admin_email, target_user_id, target_user_type, target_role,
+            acting_panel, redirect_url, expires_at, is_consumed, ip_address, user_agent
+          ) VALUES (
+            ${ticket}, ${adminId}, ${adminEmail}, ${ticketData.target_user_id}, ${dbRole}, ${dbRole},
+            ${actingPanel || null}, ${redirectUrl}, ${expiresAt}, false, ${req.ip || null}, ${req.headers["user-agent"] || null}
+          )
+        `;
+      } catch (insertErr) {
+        console.warn("[Ticket DB Insert Warning]:", insertErr.message);
+      }
+    });
+
+    // Record audit log
+    try {
+      const adminName = req.admin?.full_name || req.admin?.name || "Admin";
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+        VALUES ('Admin', ${adminId}, ${adminName},
+                'AdminImpersonation', 'IssueTicket',
+                ${dbRole === 'Investor' ? 'investor_users' : 'users'},
+                ${cleanUserId},
+                ${JSON.stringify({ ticket_id: ticket.substring(0, 10) + '...', target_name: targetUser.full_name, target_role: dbRole, redirect_url: redirectUrl, ip: req.ip })})
+      `;
+    } catch (auditErr) {
+      console.warn("[Audit Log Warning]:", auditErr.message);
+    }
+
+    return ok(res, {
+      ticket,
+      redirect_url: redirectUrl,
+      target_user: {
+        user_id: targetUser.user_id || targetUser.id,
+        full_name: targetUser.full_name,
+        user_type: dbRole,
+        member_id: targetUser.member_id || null
+      }
+    }, `Impersonation ticket generated successfully for ${targetUser.full_name}`);
+  } catch (e) {
+    console.error("[Issue Impersonation Ticket Error]:", e);
+    return res.status(400).json({ success: false, message: e.message || "Failed to generate impersonation ticket" });
+  }
+});
+
+// 2. CONSUME TICKET (New Tab Exchange)
+app.post(["/api/auth/consume-impersonate-ticket", "/api/impersonate/consume-ticket"], async (req, res) => {
+  try {
+    const { ticket } = req.body;
+    if (!ticket || typeof ticket !== "string" || ticket.length < 16) {
+      return err(res, "Valid impersonation ticket is required", 400);
+    }
+
+    // Atomic verification in memory store
+    let ticketRecord = memoryImpersonationTickets.get(ticket);
+
+    // If not in memory, check database table
+    if (!ticketRecord) {
+      try {
+        const [dbTicket] = await sql`
+          SELECT * FROM admin_impersonation_tickets WHERE ticket = ${ticket} LIMIT 1
+        `;
+        if (dbTicket) {
+          ticketRecord = {
+            ticket: dbTicket.ticket,
+            admin_id: dbTicket.admin_id,
+            admin_email: dbTicket.admin_email,
+            target_user_id: dbTicket.target_user_id,
+            target_user_type: dbTicket.target_user_type,
+            acting_panel: dbTicket.acting_panel,
+            redirect_url: dbTicket.redirect_url,
+            expires_at: new Date(dbTicket.expires_at).getTime(),
+            is_consumed: dbTicket.is_consumed
+          };
+        }
+      } catch {}
+    }
+
+    if (!ticketRecord) {
+      return err(res, "Invalid impersonation ticket. Please initiate login again from Admin Network Tree.", 403);
+    }
+
+    if (ticketRecord.is_consumed) {
+      return err(res, "This impersonation ticket has already been used. Single-use policy enforced.", 403);
+    }
+
+    if (Date.now() > ticketRecord.expires_at) {
+      memoryImpersonationTickets.delete(ticket);
+      return err(res, "This impersonation ticket has expired. Please initiate login again.", 403);
+    }
+
+    // Atomic single-use consumption: mark consumed IMMEDIATELY
+    ticketRecord.is_consumed = true;
+    memoryImpersonationTickets.set(ticket, ticketRecord);
+
+    try {
+      await sql`
+        UPDATE admin_impersonation_tickets
+        SET is_consumed = TRUE, consumed_at = NOW(), ip_address = ${req.ip || null}
+        WHERE ticket = ${ticket}
+      `;
+    } catch {}
+
+    // Fetch latest user details from database
+    const userId = ticketRecord.target_user_id;
+    let targetUser = null;
+    let payload = {};
+
+    if (ticketRecord.target_user_type === "Investor") {
+      const [investor] = await sql`
+        SELECT id, full_name, email, mobile_number, status, is_verified
+        FROM investor_users
+        WHERE id = ${userId} AND deleted_at IS NULL`;
+
+      if (!investor) return err(res, "Target investor account not found", 404);
+
+      targetUser = {
+        id: investor.id,
+        user_id: investor.id,
+        full_name: investor.full_name,
+        email: investor.email,
+        mobile_no: investor.mobile_number,
+        user_type: "Investor",
+        role: "Investor",
+        account_status: investor.status
+      };
+
+      payload = {
+        id: investor.id,
+        user_id: investor.id,
+        user_type: "Investor",
+        role: "Investor",
+        email: investor.email,
+        full_name: investor.full_name,
+        impersonated_by_admin_id: ticketRecord.admin_id
+      };
+    } else {
+      const [user] = await sql`
+        SELECT user_id, full_name, email, mobile_no, user_type, account_status, member_id, invitation_code
+        FROM users
+        WHERE user_id = ${userId}`;
+
+      if (!user) return err(res, "Target user account not found", 404);
+
+      const dbRole = user.user_type || "Customer";
+      const actingPanel = ticketRecord.acting_panel || (ticketRecord.target_user_type === "Team Member" && dbRole !== "Team Member" ? "team-member" : null);
+
+      targetUser = {
+        ...user,
+        acting_panel: actingPanel || undefined
+      };
+
+      payload = {
+        user_id: user.user_id,
+        user_type: dbRole,
+        role: dbRole,
+        member_id: user.member_id,
+        mobile_no: user.mobile_no,
+        email: user.email,
+        full_name: user.full_name,
+        impersonated_by_admin_id: ticketRecord.admin_id,
+        ...(actingPanel ? { acting_panel: actingPanel } : {})
+      };
+    }
+
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) throw new Error("JWT_SECRET is not configured");
+    const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
+
+    const token = jwt.sign(payload, jwtSecret, { expiresIn: "30d" });
+    const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: "60d" });
+
+    // Record consumption in audit_log
+    try {
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
+        VALUES ('Admin', ${ticketRecord.admin_id}, ${ticketRecord.admin_email || 'Admin'},
+                'AdminImpersonation', 'ConsumeTicket',
+                ${ticketRecord.target_user_type === 'Investor' ? 'investor_users' : 'users'},
+                ${userId},
+                ${JSON.stringify({ target_name: targetUser.full_name, ip: req.ip, user_agent: req.headers["user-agent"] })})
+      `;
+    } catch (auditErr) {
+      console.warn("[Audit Log Warning]:", auditErr.message);
+    }
+
+    return ok(res, {
+      token,
+      refresh_token: refreshToken,
+      user: targetUser,
+      redirect_url: ticketRecord.redirect_url
+    }, `Session authenticated successfully for ${targetUser.full_name}`);
+  } catch (e) {
+    console.error("[Consume Impersonation Ticket Error]:", e);
+    return res.status(400).json({ success: false, message: e.message || "Failed to exchange impersonation ticket" });
+  }
+});
+
 /* ==========================
    ─────────────────────────
    USER PROFILE  (JWT protected)
