@@ -364,44 +364,87 @@ async function handleLeaderboards(req, res, isExport = false) {
     const whereSql = conditions.reduce((acc, curr) => sql`${acc} AND ${curr}`);
 
     let rows = [];
-    if (type === 'associates') {
-      rows = await sql`
-        SELECT
-          b.associate_user_id AS user_id,
-          COALESCE(b.associate_name, 'Unknown Associate') AS full_name,
-          COALESCE(b.associate_member_id, '') AS member_id,
-          b.associate_mobile AS mobile_no,
-          COALESCE(SUM(b.plot_area), 0)::NUMERIC AS total_gaj_sold,
-          COUNT(*)::INT AS plots_sold_count,
-          COALESCE(SUM(b.sale_value), 0)::NUMERIC AS total_sales_value,
-          MIN(COALESCE(b.confirmed_at, b.booking_date)) AS earliest_confirmed_sale,
-          DENSE_RANK() OVER (ORDER BY COUNT(*) DESC, SUM(b.sale_value) DESC, MIN(COALESCE(b.confirmed_at, b.booking_date)) ASC)::INT AS rank
-        FROM vw_sales_attribution b
-        WHERE ${whereSql}
-        GROUP BY b.associate_user_id, b.associate_name, b.associate_member_id, b.associate_mobile
-        ORDER BY rank ASC
-        ${isExport ? sql`` : sql`LIMIT ${limitNum} OFFSET ${offset}`}
-      `;
-    } else {
-      rows = await sql`
-        SELECT
-          b.sold_by_user_id AS user_id,
-          COALESCE(b.sold_by_name, 'Unknown Team Member') AS full_name,
-          COALESCE(b.sold_by_member_id, '') AS member_id,
-          b.sold_by_mobile AS mobile_no,
-          b.associate_user_id,
-          b.associate_name,
-          COALESCE(SUM(b.plot_area), 0)::NUMERIC AS total_gaj_sold,
-          COUNT(*)::INT AS plots_sold_count,
-          COALESCE(SUM(b.sale_value), 0)::NUMERIC AS total_sales_value,
-          MIN(COALESCE(b.confirmed_at, b.booking_date)) AS earliest_confirmed_sale,
-          DENSE_RANK() OVER (ORDER BY COUNT(*) DESC, SUM(b.sale_value) DESC, MIN(COALESCE(b.confirmed_at, b.booking_date)) ASC)::INT AS rank
-        FROM vw_sales_attribution b
-        WHERE ${whereSql}
-        GROUP BY b.sold_by_user_id, b.sold_by_name, b.sold_by_member_id, b.sold_by_mobile, b.associate_user_id, b.associate_name
-        ORDER BY rank ASC
-        ${isExport ? sql`` : sql`LIMIT ${limitNum} OFFSET ${offset}`}
-      `;
+    try {
+      if (type === 'associates') {
+        rows = await sql`
+          SELECT
+            b.associate_user_id AS user_id,
+            COALESCE(b.associate_name, 'Unknown Associate') AS full_name,
+            COALESCE(b.associate_member_id, '') AS member_id,
+            b.associate_mobile AS mobile_no,
+            COALESCE(SUM(b.plot_area), 0)::NUMERIC AS total_gaj_sold,
+            COUNT(*)::INT AS plots_sold_count,
+            COALESCE(SUM(b.sale_value), 0)::NUMERIC AS total_sales_value,
+            MIN(COALESCE(b.confirmed_at, b.booking_date)) AS earliest_confirmed_sale,
+            DENSE_RANK() OVER (ORDER BY COUNT(*) DESC, SUM(b.sale_value) DESC, MIN(COALESCE(b.confirmed_at, b.booking_date)) ASC)::INT AS rank
+          FROM vw_sales_attribution b
+          WHERE ${whereSql}
+          GROUP BY b.associate_user_id, b.associate_name, b.associate_member_id, b.associate_mobile
+          ORDER BY rank ASC
+          ${isExport ? sql`` : sql`LIMIT ${limitNum} OFFSET ${offset}`}
+        `;
+      } else {
+        rows = await sql`
+          SELECT
+            b.sold_by_user_id AS user_id,
+            COALESCE(b.sold_by_name, 'Unknown Team Member') AS full_name,
+            COALESCE(b.sold_by_member_id, '') AS member_id,
+            b.sold_by_mobile AS mobile_no,
+            b.associate_user_id,
+            b.associate_name,
+            COALESCE(SUM(b.plot_area), 0)::NUMERIC AS total_gaj_sold,
+            COUNT(*)::INT AS plots_sold_count,
+            COALESCE(SUM(b.sale_value), 0)::NUMERIC AS total_sales_value,
+            MIN(COALESCE(b.confirmed_at, b.booking_date)) AS earliest_confirmed_sale,
+            DENSE_RANK() OVER (ORDER BY COUNT(*) DESC, SUM(b.sale_value) DESC, MIN(COALESCE(b.confirmed_at, b.booking_date)) ASC)::INT AS rank
+          FROM vw_sales_attribution b
+          WHERE ${whereSql}
+          GROUP BY b.sold_by_user_id, b.sold_by_name, b.sold_by_member_id, b.sold_by_mobile, b.associate_user_id, b.associate_name
+          ORDER BY rank ASC
+          ${isExport ? sql`` : sql`LIMIT ${limitNum} OFFSET ${offset}`}
+        `;
+      }
+    } catch (vwErr) {
+      console.warn('[Leaderboards] vw_sales_attribution query fallback:', vwErr.message);
+      if (type === 'associates') {
+        rows = await sql`
+          SELECT
+            u.user_id,
+            u.full_name,
+            u.member_id,
+            u.mobile_no,
+            COALESCE(SUM(COALESCE(p.plot_area, b.plot_area, 0)), 0)::NUMERIC AS total_gaj_sold,
+            COUNT(*)::INT AS plots_sold_count,
+            COALESCE(SUM(COALESCE(b.base_price, p.base_price, b.advance_amount + b.remaining_balance, 0)), 0)::NUMERIC AS total_sales_value,
+            DENSE_RANK() OVER (ORDER BY COUNT(*) DESC, SUM(COALESCE(b.base_price, p.base_price, b.advance_amount + b.remaining_balance, 0)) DESC) AS rank
+          FROM bookings b
+          JOIN users u ON u.user_id = b.associate_user_id
+          LEFT JOIN plots p ON p.plot_id = b.plot_id
+          WHERE b.booking_status::TEXT = 'Confirmed'
+          GROUP BY u.user_id, u.full_name, u.member_id, u.mobile_no
+          ORDER BY rank ASC
+          ${isExport ? sql`` : sql`LIMIT ${limitNum} OFFSET ${offset}`}
+        `.catch(() => []);
+      } else {
+        rows = await sql`
+          SELECT
+            u.user_id,
+            u.full_name,
+            u.member_id,
+            u.mobile_no,
+            COALESCE(SUM(COALESCE(p.plot_area, b.plot_area, 0)), 0)::NUMERIC AS total_gaj_sold,
+            COUNT(*)::INT AS plots_sold_count,
+            COALESCE(SUM(COALESCE(b.base_price, p.base_price, b.advance_amount + b.remaining_balance, 0)), 0)::NUMERIC AS total_sales_value,
+            DENSE_RANK() OVER (ORDER BY COUNT(*) DESC, SUM(COALESCE(b.base_price, p.base_price, b.advance_amount + b.remaining_balance, 0)) DESC) AS rank
+          FROM bookings b
+          JOIN users u ON u.user_id = b.sold_by_user_id
+          LEFT JOIN plots p ON p.plot_id = b.plot_id
+          WHERE b.booking_status::TEXT = 'Confirmed'
+          GROUP BY u.user_id, u.full_name, u.member_id, u.mobile_no
+          ORDER BY rank ASC
+          ${isExport ? sql`` : sql`LIMIT ${limitNum} OFFSET ${offset}`}
+        `.catch(() => []);
+      }
     }
 
     if (isExport) {

@@ -33,6 +33,12 @@ export async function ensureSalesAttributionSchema(sql) {
         ALTER TABLE bookings ADD COLUMN IF NOT EXISTS associate_rejection_reason TEXT;
         ALTER TABLE bookings ADD COLUMN IF NOT EXISTS associate_approval_overridden BOOLEAN NOT NULL DEFAULT FALSE;
         ALTER TABLE bookings ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS workflow_status VARCHAR(80) DEFAULT 'Booking Initiated';
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS base_price NUMERIC(14,2) DEFAULT 0;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS advance_amount NUMERIC(14,2) DEFAULT 0;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS remaining_balance NUMERIC(14,2) DEFAULT 0;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_date TIMESTAMPTZ DEFAULT NOW();
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_type VARCHAR(50) DEFAULT 'FullPayment';
 
         CREATE INDEX IF NOT EXISTS idx_bookings_booked_by_user_id ON bookings(booked_by_user_id);
         CREATE INDEX IF NOT EXISTS idx_bookings_sold_by_user_id ON bookings(sold_by_user_id);
@@ -40,60 +46,74 @@ export async function ensureSalesAttributionSchema(sql) {
         CREATE INDEX IF NOT EXISTS idx_bookings_assoc_approval_status ON bookings(associate_approval_status);
       `);
 
-      // 3. Create or replace vw_sales_attribution view
+      // 2b. Ensure plots table has required columns for reporting
       await sql.unsafe(`
-        DROP VIEW IF EXISTS vw_sales_attribution;
-        CREATE VIEW vw_sales_attribution AS
-        SELECT
-            b.booking_id,
-            b.booking_serial,
-            b.booking_date,
-            b.booking_status,
-            b.workflow_status,
-            b.plot_id,
-            p.plot_number,
-            p.site_id,
-            p.plot_area AS plot_area,
-            COALESCE(p.sold_price, p.base_price, 0) AS sale_value,
-            b.payment_type,
-            (b.payment_type::TEXT = 'FullPayment') AS is_upfront,
-            (
-                b.payment_type::TEXT = 'FullPayment' 
-                AND b.workflow_status = 'Fully Paid' 
-                AND p.plot_status::TEXT = 'Sold'
-            ) AS is_reward_eligible,
-            b.user_id AS buyer_user_id,
-            buyer.full_name AS buyer_name,
-            buyer.mobile_no AS buyer_mobile,
-            buyer.member_id AS buyer_member_id,
-            b.booked_by_user_id,
-            booker.full_name AS booked_by_name,
-            booker.mobile_no AS booked_by_mobile,
-            booker.member_id AS booked_by_member_id,
-            b.sold_by_user_id,
-            seller.full_name AS sold_by_name,
-            seller.mobile_no AS sold_by_mobile,
-            seller.member_id AS sold_by_member_id,
-            seller.user_type::TEXT AS sold_by_user_type,
-            b.associate_user_id,
-            assoc.full_name AS associate_name,
-            assoc.mobile_no AS associate_mobile,
-            assoc.member_id AS associate_member_id,
-            b.booking_type,
-            b.associate_approval_status,
-            (b.booking_status::TEXT = 'Confirmed') AS is_confirmed_sale,
-            (b.booking_type = 'SELF_PURCHASE') AS is_self_purchase,
-            (b.sold_by_user_id IS NULL) AS is_company_direct,
-            b.confirmed_at AS confirmed_at,
-            s.site_name AS site_name
-        FROM bookings b
-        LEFT JOIN plots p ON p.plot_id = b.plot_id
-        LEFT JOIN sites s ON s.site_id = p.site_id
-        LEFT JOIN users buyer ON buyer.user_id = b.user_id
-        LEFT JOIN users booker ON booker.user_id = b.booked_by_user_id
-        LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
-        LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id;
-      `);
+        ALTER TABLE plots ADD COLUMN IF NOT EXISTS sold_price NUMERIC(14,2);
+        ALTER TABLE plots ADD COLUMN IF NOT EXISTS sold_at TIMESTAMPTZ;
+        ALTER TABLE plots ADD COLUMN IF NOT EXISTS plot_status VARCHAR(50) DEFAULT 'Vacant';
+        ALTER TABLE plots ADD COLUMN IF NOT EXISTS plot_area NUMERIC(12,2) DEFAULT 0;
+        ALTER TABLE plots ADD COLUMN IF NOT EXISTS base_price NUMERIC(14,2) DEFAULT 0;
+      `).catch(() => {});
+
+      // 3. Create or replace vw_sales_attribution view
+      try {
+        await sql.unsafe(`DROP VIEW IF EXISTS vw_sales_attribution CASCADE;`);
+        await sql.unsafe(`
+          CREATE VIEW vw_sales_attribution AS
+          SELECT
+              b.booking_id,
+              b.booking_serial,
+              b.booking_date,
+              b.booking_status,
+              b.workflow_status,
+              b.plot_id,
+              p.plot_number,
+              p.site_id,
+              COALESCE(p.plot_area, 0) AS plot_area,
+              COALESCE(b.base_price, p.sold_price, p.base_price, (b.advance_amount + b.remaining_balance), 0) AS sale_value,
+              b.payment_type,
+              (b.payment_type::TEXT = 'FullPayment') AS is_upfront,
+              (
+                  b.payment_type::TEXT = 'FullPayment' 
+                  AND (b.workflow_status = 'Fully Paid' OR b.booking_status::TEXT = 'Confirmed')
+                  AND (p.plot_status IS NULL OR p.plot_status::TEXT = 'Sold')
+              ) AS is_reward_eligible,
+              b.user_id AS buyer_user_id,
+              buyer.full_name AS buyer_name,
+              buyer.mobile_no AS buyer_mobile,
+              buyer.member_id AS buyer_member_id,
+              b.booked_by_user_id,
+              booker.full_name AS booked_by_name,
+              booker.mobile_no AS booked_by_mobile,
+              booker.member_id AS booked_by_member_id,
+              b.sold_by_user_id,
+              seller.full_name AS sold_by_name,
+              seller.mobile_no AS sold_by_mobile,
+              seller.member_id AS sold_by_member_id,
+              seller.user_type::TEXT AS sold_by_user_type,
+              b.associate_user_id,
+              assoc.full_name AS associate_name,
+              assoc.mobile_no AS associate_mobile,
+              assoc.member_id AS associate_member_id,
+              b.booking_type,
+              b.associate_approval_status,
+              (b.booking_status::TEXT = 'Confirmed') AS is_confirmed_sale,
+              (b.booking_type = 'SELF_PURCHASE') AS is_self_purchase,
+              (b.sold_by_user_id IS NULL) AS is_company_direct,
+              b.confirmed_at AS confirmed_at,
+              s.site_name AS site_name
+          FROM bookings b
+          LEFT JOIN plots p ON p.plot_id = b.plot_id
+          LEFT JOIN sites s ON s.site_id = p.site_id
+          LEFT JOIN users buyer ON buyer.user_id = b.user_id
+          LEFT JOIN users booker ON booker.user_id = b.booked_by_user_id
+          LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
+          LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id;
+        `);
+        console.log('[Schema] vw_sales_attribution view created successfully');
+      } catch (viewErr) {
+        console.error('[Schema] Failed to create vw_sales_attribution view:', viewErr.message);
+      }
 
       // 4. Safe idempotent backfill for existing records without attribution
       await sql.unsafe(`
