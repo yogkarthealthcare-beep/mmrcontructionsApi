@@ -485,12 +485,20 @@ async function validateSignupInput(body) {
     }
 
     if (userType === 'Team Member') {
-      if (!res.referrer || res.referrer.user_type !== 'Associate') {
-        return { error: 'Team Member sponsor must be an active Associate.', status: 400 };
+      let targetAssociateId = null;
+      if (res.referrer?.user_type === 'Associate') {
+        targetAssociateId = res.userId;
+      } else if (res.referrer?.user_type === 'Team Member' || res.userType === 'Team Member') {
+        targetAssociateId = res.associateId || res.referrer?.associate_id || res.referrer?.sponsor_user_id;
       }
+
+      if (!targetAssociateId) {
+        return { error: 'Team Member sponsor must be an active Associate or linked to an active Associate.', status: 400 };
+      }
+
       const existingMembers = await sql`
         SELECT slot_number FROM team_members
-        WHERE associate_id = ${res.userId} AND status <> 'rejected'
+        WHERE associate_id = ${targetAssociateId} AND status <> 'rejected'
       `;
       const occupiedSlots = new Set(existingMembers.map((m) => Number(m.slot_number)).filter(Boolean));
       if (occupiedSlots.size >= 10) {
@@ -499,7 +507,9 @@ async function validateSignupInput(body) {
     }
 
     if (res.referrer) {
-      sponsorUserId = res.userId;
+      sponsorUserId = (userType === 'Team Member' && (res.referrer.user_type === 'Team Member' || res.userType === 'Team Member'))
+        ? (res.associateId || res.referrer.associate_id || res.referrer.sponsor_user_id || res.userId)
+        : res.userId;
       sponsorInviteCode = res.invitationCode || res.memberId || sponsorCode;
       referredByUserId = res.userId;
       referredBySource = res.source || 'REGISTRATION_CODE';

@@ -28,6 +28,10 @@ export function normalizeReferralCode(code) {
  */
 export async function resolveReferralCode(sql, rawCode, options = {}) {
   const code = normalizeReferralCode(rawCode);
+  const unpaddedTm = code.replace(/^MMR-TM-0*/i, 'MMR-TM-');
+  const unpaddedMmr = code.replace(/^MMR-0*/i, 'MMR');
+  const isPureNumber = /^\d+$/.test(code);
+  const numId = isPureNumber ? Number(code) : -1;
 
   // 1. Empty referral code -> Valid direct signup
   if (!code) {
@@ -63,28 +67,32 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
            COALESCE(NULLIF(TRIM(tm.full_name), ''), u.full_name) AS full_name,
            COALESCE(NULLIF(TRIM(tm.team_member_uid), ''), u.member_id) AS member_id,
            COALESCE(NULLIF(TRIM(u.invitation_code), ''), NULLIF(TRIM(tm.team_member_uid), ''), u.member_id) AS invitation_code,
-           CASE WHEN tm.id IS NOT NULL THEN 'Team Member' ELSE u.user_type END AS user_type,
-           COALESCE(u.account_status, tm.status, 'Active') AS account_status,
+           CASE WHEN tm.id IS NOT NULL THEN 'Team Member' ELSE u.user_type::text END AS user_type,
+           COALESCE(u.account_status::text, tm.status::text, 'Active') AS account_status,
            u.email, u.mobile_no,
-           tm.team_member_uid, tm.status AS tm_status
+           tm.team_member_uid, tm.status AS tm_status,
+           COALESCE(tm.associate_id, u.sponsor_user_id) AS associate_id,
+           u.sponsor_user_id
     FROM users u
     LEFT JOIN associate_referral_links l
       ON l.associate_user_id = u.user_id AND l.is_active = TRUE
     LEFT JOIN team_members tm
-      ON tm.user_id = u.user_id AND LOWER(COALESCE(tm.status, '')) IN ('active', 'approved')
+      ON tm.user_id = u.user_id AND LOWER(COALESCE(tm.status::text, '')) IN ('active', 'approved')
     WHERE (
       UPPER(COALESCE(u.invitation_code, '')) = ${code}
       OR UPPER(COALESCE(u.member_id, '')) = ${code}
       OR UPPER(COALESCE(u.legacy_member_id, '')) = ${code}
       OR UPPER(COALESCE(tm.team_member_uid, '')) = ${code}
+      OR UPPER(COALESCE(tm.team_member_uid, '')) = ${unpaddedTm}
+      OR UPPER(regexp_replace(COALESCE(tm.team_member_uid, ''), '^MMR-TM-0*', 'MMR-TM-')) = ${unpaddedTm}
+      OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-TM-0*', 'MMR-TM-')) = ${unpaddedTm}
       OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-(ASC|CUS|TM|[ACTM])-', 'MMR')) = ${code}
       OR UPPER(regexp_replace(COALESCE(tm.team_member_uid, ''), '^MMR-(ASC|CUS|TM|[ACTM])-', 'MMR')) = ${code}
       OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-[ACTM]-', 'MMR')) = ${code}
       OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-[AC]-', 'MMR')) = ${code}
       OR UPPER(COALESCE(l.invite_code, '')) = ${code}
-      OR UPPER(COALESCE(regexp_replace(COALESCE(u.member_id, ''), '^MMR-TM-0*', 'MMR-TM-'), '')) = ${code}
-      OR UPPER(COALESCE(regexp_replace(COALESCE(tm.team_member_uid, ''), '^MMR-TM-0*', 'MMR-TM-'), '')) = ${code}
-      OR UPPER(COALESCE(regexp_replace(COALESCE(u.member_id, ''), '^MMR-0*', 'MMR'), '')) = ${code}
+      OR UPPER(COALESCE(regexp_replace(COALESCE(u.member_id, ''), '^MMR-0*', 'MMR'), '')) = ${unpaddedMmr}
+      OR (${numId > 0} AND u.user_id = ${numId})
     )
     LIMIT 1`;
 
@@ -97,11 +105,13 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
              tm.status as tm_status, tm.email_id as email, tm.mobile_no,
              tm.associate_id
       FROM team_members tm
-      WHERE LOWER(COALESCE(tm.status, 'approved')) IN ('active', 'approved')
+      WHERE LOWER(COALESCE(tm.status::text, 'approved')) IN ('active', 'approved')
         AND (
           UPPER(COALESCE(tm.team_member_uid, '')) = ${code}
+          OR UPPER(COALESCE(tm.team_member_uid, '')) = ${unpaddedTm}
+          OR UPPER(COALESCE(regexp_replace(COALESCE(tm.team_member_uid, ''), '^MMR-TM-0*', 'MMR-TM-'), '')) = ${unpaddedTm}
           OR UPPER(regexp_replace(COALESCE(tm.team_member_uid, ''), '^MMR-(ASC|CUS|TM|[ACTM])-', 'MMR')) = ${code}
-          OR UPPER(COALESCE(regexp_replace(COALESCE(tm.team_member_uid, ''), '^MMR-TM-0*', 'MMR-TM-'), '')) = ${code}
+          OR (${numId > 0} AND (tm.id = ${numId} OR tm.user_id = ${numId}))
         )
       LIMIT 1`.catch(() => []);
 
@@ -119,7 +129,9 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
         account_status: uRow?.account_status || tmDirect.tm_status || 'Active',
         email: tmDirect.email || uRow?.email,
         mobile_no: tmDirect.mobile_no || uRow?.mobile_no,
-        team_member_uid: tmDirect.team_member_uid
+        team_member_uid: tmDirect.team_member_uid,
+        associate_id: tmDirect.associate_id,
+        sponsor_user_id: tmDirect.associate_id
       };
     }
   }
@@ -151,6 +163,7 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
         fullName: referrer.full_name,
         invitationCode: referrer.team_member_uid || referrer.invitation_code || referrer.member_id,
         userType: referrer.team_member_uid ? 'Team Member' : (referrer.user_type || 'Associate'),
+        associateId: referrer.associate_id || referrer.sponsor_user_id,
         source: 'REGISTRATION_CODE'
       };
     }
