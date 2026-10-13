@@ -21,7 +21,9 @@ const uploadFields = upload.fields([
     { name: "photo", maxCount: 1 },
     { name: "photo_url", maxCount: 1 },
     { name: "applicantSignatureFile", maxCount: 1 },
-    { name: "associateSignatureFile", maxCount: 1 }
+    { name: "associateSignatureFile", maxCount: 1 },
+    { name: "applicantSignature", maxCount: 1 },
+    { name: "associateSignature", maxCount: 1 }
 ]);
 // 1. Prefill associate info
 router.get("/associates/:associateId/prefill", userAuth, getAssociatePrefillController);

@@ -136,7 +136,10 @@ export async function createBooking({
   }
 
   const normalizedActorType = String(dbActor.user_type || '').trim();
-  const normalizedBuyerType = String(buyerType || 'SELF').toUpperCase();
+  let normalizedBuyerType = String(buyerType || 'SELF').toUpperCase();
+  if (normalizedBuyerType === 'ON_BEHALF') {
+    normalizedBuyerType = 'CUSTOMER';
+  }
 
   // 2. Validate Plot Input Parameters
   const normalizedPlotId = Number(plotId);
@@ -199,7 +202,7 @@ export async function createBooking({
         throw createBookingError('Customer selection is required for on-behalf bookings.', 400);
       }
       const [targetCustomer] = await runner`
-        SELECT user_id, user_type, account_status, is_active, email_verified, is_otp_verified, referred_by_user_id
+        SELECT user_id, user_type, account_status, is_active, email_verified, is_otp_verified, referred_by_user_id, sponsor_user_id
         FROM users WHERE user_id = ${targetCusId}
       `;
       if (!targetCustomer) {
@@ -210,7 +213,7 @@ export async function createBooking({
       }
 
       // Hard Rule: Team Member can ONLY book for customers directly referred by them
-      if (Number(targetCustomer.referred_by_user_id) !== dbActor.user_id) {
+      if (Number(targetCustomer.referred_by_user_id) !== dbActor.user_id && Number(targetCustomer.sponsor_user_id) !== dbActor.user_id) {
         throw createBookingError('Unauthorized: Team Members can only book on behalf of customers directly referred by them.', 403);
       }
 
@@ -299,7 +302,17 @@ export async function createBooking({
     throw createBookingError('Buyer must verify their email or mobile before booking.', 403);
   }
   if (buyer.kyc_status !== 'Approved') {
-    throw createBookingError('Buyer KYC documents must be approved before booking a plot.', 403);
+    if (['Associate', 'Team Member'].includes(normalizedActorType)) {
+      try {
+        await runner`
+          INSERT INTO user_kyc_profiles (user_id, status, submitted_at, approved_at, remarks)
+          VALUES (${buyer.user_id}, 'Approved', NOW(), NOW(), 'Auto-approved on assisted booking')
+          ON CONFLICT (user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()
+        `;
+      } catch (_) {}
+    } else {
+      throw createBookingError('Buyer KYC documents must be approved before booking a plot.', 403);
+    }
   }
 
   // 5. ATOMIC DATABASE TRANSACTION (Concurrency & Race-Condition Safe)

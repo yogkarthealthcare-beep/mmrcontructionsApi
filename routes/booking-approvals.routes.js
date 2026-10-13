@@ -239,16 +239,17 @@ router.get('/my-bookable-customers', verifyUserToken, async (req, res) => {
           (COALESCE(c.email_verified, FALSE) OR COALESCE(c.is_otp_verified, FALSE)) AS is_verified,
           COALESCE(k.status, 'Not Submitted') AS kyc_status,
           'DIRECT' AS relationship,
+          u.user_id AS referrer_user_id,
           u.full_name AS referrer_name,
           u.member_id AS referrer_member_id,
           c.mobile_no
         FROM users c
-        JOIN users u ON u.user_id = c.referred_by_user_id
+        LEFT JOIN users u ON u.user_id = COALESCE(c.referred_by_user_id, c.sponsor_user_id)
         LEFT JOIN user_kyc_profiles k ON k.user_id = c.user_id
         WHERE c.user_type = 'Customer'
           AND c.account_status = 'Active'
-          AND c.referred_by_user_id = ${callerId}
-          ${searchPattern ? sql`AND (c.full_name ILIKE ${searchPattern} OR c.member_id ILIKE ${searchPattern})` : sql``}
+          AND (c.referred_by_user_id = ${callerId} OR c.sponsor_user_id = ${callerId})
+          ${searchPattern ? sql`AND (c.full_name ILIKE ${searchPattern} OR c.member_id ILIKE ${searchPattern} OR c.mobile_no ILIKE ${searchPattern})` : sql``}
         ORDER BY c.full_name ASC
         LIMIT ${limitNum} OFFSET ${offset}
       `;
@@ -258,13 +259,15 @@ router.get('/my-bookable-customers', verifyUserToken, async (req, res) => {
         FROM users c
         WHERE c.user_type = 'Customer'
           AND c.account_status = 'Active'
-          AND c.referred_by_user_id = ${callerId}
-          ${searchPattern ? sql`AND (c.full_name ILIKE ${searchPattern} OR c.member_id ILIKE ${searchPattern})` : sql``}
+          AND (c.referred_by_user_id = ${callerId} OR c.sponsor_user_id = ${callerId})
+          ${searchPattern ? sql`AND (c.full_name ILIKE ${searchPattern} OR c.member_id ILIKE ${searchPattern} OR c.mobile_no ILIKE ${searchPattern})` : sql``}
       `;
 
     } else {
       // Associate: directly referred customers OR customers referred by active Team Members in downline
       const searchPattern = search ? `%${String(search).trim()}%` : null;
+      const teamMemberId = req.query.team_member_id ? Number(req.query.team_member_id) : null;
+      const filterType = String(req.query.type || '').trim().toUpperCase(); // 'DIRECT' or 'TEAM_MEMBER'
 
       rows = await sql`
         SELECT 
@@ -275,25 +278,33 @@ router.get('/my-bookable-customers', verifyUserToken, async (req, res) => {
           (COALESCE(c.email_verified, FALSE) OR COALESCE(c.is_otp_verified, FALSE)) AS is_verified,
           COALESCE(k.status, 'Not Submitted') AS kyc_status,
           CASE 
-            WHEN c.referred_by_user_id = ${callerId} THEN 'DIRECT'
+            WHEN c.referred_by_user_id = ${callerId} OR c.sponsor_user_id = ${callerId} THEN 'DIRECT'
             ELSE 'TEAM_MEMBER'
           END AS relationship,
+          ref.user_id AS referrer_user_id,
           ref.full_name AS referrer_name,
           ref.member_id AS referrer_member_id,
           c.mobile_no
         FROM users c
-        JOIN users ref ON ref.user_id = c.referred_by_user_id
+        JOIN users ref ON ref.user_id = COALESCE(c.referred_by_user_id, c.sponsor_user_id)
         LEFT JOIN user_kyc_profiles k ON k.user_id = c.user_id
         WHERE c.user_type = 'Customer'
           AND c.account_status = 'Active'
-          AND (
-            c.referred_by_user_id = ${callerId}
-            OR c.referred_by_user_id IN (
-              SELECT tm.user_id FROM team_members tm 
-              WHERE tm.associate_id = ${callerId} AND tm.status IN ('approved', 'active')
-            )
-          )
-          ${searchPattern ? sql`AND (c.full_name ILIKE ${searchPattern} OR c.member_id ILIKE ${searchPattern})` : sql``}
+          ${teamMemberId ? sql`AND (c.referred_by_user_id = ${teamMemberId} OR c.sponsor_user_id = ${teamMemberId})` : 
+            (filterType === 'DIRECT' ? sql`AND (c.referred_by_user_id = ${callerId} OR c.sponsor_user_id = ${callerId})` :
+            sql`AND (
+              c.referred_by_user_id = ${callerId}
+              OR c.sponsor_user_id = ${callerId}
+              OR c.referred_by_user_id IN (
+                SELECT tm.user_id FROM team_members tm 
+                WHERE tm.associate_id = ${callerId} AND tm.status IN ('approved', 'active')
+              )
+              OR c.sponsor_user_id IN (
+                SELECT tm.user_id FROM team_members tm 
+                WHERE tm.associate_id = ${callerId} AND tm.status IN ('approved', 'active')
+              )
+            )`)}
+          ${searchPattern ? sql`AND (c.full_name ILIKE ${searchPattern} OR c.member_id ILIKE ${searchPattern} OR c.mobile_no ILIKE ${searchPattern})` : sql``}
         ORDER BY relationship ASC, c.full_name ASC
         LIMIT ${limitNum} OFFSET ${offset}
       `;
@@ -303,14 +314,21 @@ router.get('/my-bookable-customers', verifyUserToken, async (req, res) => {
         FROM users c
         WHERE c.user_type = 'Customer'
           AND c.account_status = 'Active'
-          AND (
-            c.referred_by_user_id = ${callerId}
-            OR c.referred_by_user_id IN (
-              SELECT tm.user_id FROM team_members tm 
-              WHERE tm.associate_id = ${callerId} AND tm.status IN ('approved', 'active')
-            )
-          )
-          ${searchPattern ? sql`AND (c.full_name ILIKE ${searchPattern} OR c.member_id ILIKE ${searchPattern})` : sql``}
+          ${teamMemberId ? sql`AND (c.referred_by_user_id = ${teamMemberId} OR c.sponsor_user_id = ${teamMemberId})` : 
+            (filterType === 'DIRECT' ? sql`AND (c.referred_by_user_id = ${callerId} OR c.sponsor_user_id = ${callerId})` :
+            sql`AND (
+              c.referred_by_user_id = ${callerId}
+              OR c.sponsor_user_id = ${callerId}
+              OR c.referred_by_user_id IN (
+                SELECT tm.user_id FROM team_members tm 
+                WHERE tm.associate_id = ${callerId} AND tm.status IN ('approved', 'active')
+              )
+              OR c.sponsor_user_id IN (
+                SELECT tm.user_id FROM team_members tm 
+                WHERE tm.associate_id = ${callerId} AND tm.status IN ('approved', 'active')
+              )
+            )`)}
+          ${searchPattern ? sql`AND (c.full_name ILIKE ${searchPattern} OR c.member_id ILIKE ${searchPattern} OR c.mobile_no ILIKE ${searchPattern})` : sql``}
       `;
     }
 
@@ -319,12 +337,14 @@ router.get('/my-bookable-customers', verifyUserToken, async (req, res) => {
       user_id: r.user_id,
       member_id: r.member_id,
       full_name: r.full_name,
+      mobile_no: r.mobile_no,
       masked_mobile: maskMobile(r.mobile_no),
       account_status: r.account_status,
       is_verified: Boolean(r.is_verified),
       kyc_status: r.kyc_status,
       is_eligible_to_book: (r.account_status === 'Active' && r.is_verified && r.kyc_status === 'Approved'),
       relationship: r.relationship,
+      referrer_user_id: r.referrer_user_id,
       referrer_name: r.referrer_name,
       referrer_member_id: r.referrer_member_id
     }));

@@ -154,7 +154,14 @@ export async function createTeamMemberController(req: Request, res: Response): P
     const validatedData = teamMemberSchema.parse(body);
 
     // Enforce associate isolation
-    if (!authUser?.is_admin && authUserId && Number(validatedData.associateId) !== Number(authUserId)) {
+    const isAdmin = Boolean(
+      authUser?.is_admin || 
+      authUser?.role === "SuperAdmin" || 
+      authUser?.role === "Admin" || 
+      authUser?.user_type === "Admin" ||
+      authUser?.user_type === "SuperAdmin"
+    );
+    if (!isAdmin && authUserId && Number(validatedData.associateId) !== Number(authUserId)) {
       return res.status(403).json({
         success: false,
         message: "Cannot enroll team members on behalf of another associate"
@@ -178,7 +185,7 @@ export async function createTeamMemberController(req: Request, res: Response): P
       photoUrl = upload.url;
     }
 
-    const applicantSigFile = files?.["applicantSignatureFile"]?.[0];
+    const applicantSigFile = files?.["applicantSignatureFile"]?.[0] || files?.["applicantSignature"]?.[0];
     if (applicantSigFile) {
       const upload = await saveFileToVPS(applicantSigFile.buffer, {
         originalName: applicantSigFile.originalname,
@@ -189,7 +196,7 @@ export async function createTeamMemberController(req: Request, res: Response): P
       applicantSigUrl = upload.url;
     }
 
-    const associateSigFile = files?.["associateSignatureFile"]?.[0];
+    const associateSigFile = files?.["associateSignatureFile"]?.[0] || files?.["associateSignature"]?.[0];
     if (associateSigFile) {
       const upload = await saveFileToVPS(associateSigFile.buffer, {
         originalName: associateSigFile.originalname,

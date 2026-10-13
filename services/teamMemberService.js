@@ -526,12 +526,20 @@ export async function getAssociatePrefill(associateId) {
  */
 export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, associateSigUrl) {
     await ensureTeamMembersTable();
-    // If signature data URLs are supplied in the body, save them to storage
+    // If signature data URLs or URLs are supplied in the body, save or preserve them
     if (!applicantSigUrl && data.applicantSignature) {
-        applicantSigUrl = await saveSignatureDataUrl(data.applicantSignature, data.associateId, "applicant");
+        if (data.applicantSignature.startsWith("/uploads/") || data.applicantSignature.startsWith("http")) {
+            applicantSigUrl = data.applicantSignature;
+        } else {
+            applicantSigUrl = await saveSignatureDataUrl(data.applicantSignature, data.associateId, "applicant");
+        }
     }
     if (!associateSigUrl && data.associateSignature) {
-        associateSigUrl = await saveSignatureDataUrl(data.associateSignature, data.associateId, "associate");
+        if (data.associateSignature.startsWith("/uploads/") || data.associateSignature.startsWith("http")) {
+            associateSigUrl = data.associateSignature;
+        } else {
+            associateSigUrl = await saveSignatureDataUrl(data.associateSignature, data.associateId, "associate");
+        }
     }
     let createdRecord = null;
     await sql.begin(async (tx) => {

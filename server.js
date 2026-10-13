@@ -7244,16 +7244,21 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
     const { plot_id, payment_type, advance_amount, notes } = req.body;
     if (!plot_id || !payment_type || !advance_amount)
       return err(res, "plot_id, payment_type, advance_amount required", 400);
-    if (!["EMI", "FullPayment", "DownPayment", "OneTime", "PartWise", "Partial", "Cash", "Online", "Installment"].includes(payment_type))
+    if (!["EMI", "FullPayment", "DownPayment", "OneTime", "PartWise", "Partial", "Cash", "Online", "Installment", "PartPayment"].includes(payment_type))
       return err(res, "Invalid payment_type", 400);
     if (!Number.isFinite(Number(advance_amount)) || Number(advance_amount) <= 0)
       return err(res, "advance_amount must be greater than 0", 400);
 
+    const rawBuyerType = String(req.body.buyer_type || req.body.buyerType || "SELF").toUpperCase();
+    const buyerTypeToUse = (rawBuyerType === "ON_BEHALF" || rawBuyerType === "CUSTOMER") ? "CUSTOMER" : "SELF";
+    const targetCustId = req.body.customer_id || req.body.customerId;
+
     const result = await bookingService.createBooking({
       actor: req.user,
-      buyerType: req.body.buyer_type || req.body.buyerType || "SELF",
-      customerId: req.body.customer_id || req.body.customerId,
+      buyerType: buyerTypeToUse,
+      customerId: targetCustId,
       plotId: plot_id,
+      siteId: req.body.site_id,
       paymentType: payment_type,
       advanceAmount: advance_amount,
       paymentMethod: req.body.payment_method || "Online",
@@ -7263,7 +7268,10 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
     const booking = {
       booking_id: result.booking.booking_id,
       booking_serial: result.serial,
-      booking_status: result.booking.booking_status
+      booking_status: result.booking.booking_status,
+      associate_approval_status: result.booking.associate_approval_status,
+      advance_amount: result.booking.advance_amount,
+      buyer_name: result.buyer?.full_name
     };
 
     await safeInsertPlotStatusHistory({
@@ -8630,20 +8638,26 @@ app.post("/api/associate/payouts/request", verifyUserToken, requireAssociate, as
    ─────────────────────────────────────────────────────────────────────────
 ========================================================================= */
 
-// 1. Associate creates new customer / team member
-app.post("/api/associate/customers", verifyUserToken, requireAssociate, async (req, res) => {
+// 1. Associate or Team Member creates new customer
+app.post(["/api/associate/customers", "/api/team-member/customers"], verifyUserToken, async (req, res) => {
   try {
-    const { full_name, mobile_no, email, password } = req.body || {};
-    if (!full_name || !mobile_no || !email || !password) {
-      return err(res, "Full Name, Mobile Number, Email, and Password are all required.", 400);
+    const callerType = req.user?.user_type || req.user?.role;
+    if (!['Associate', 'Team Member', 'Admin', 'SuperAdmin'].includes(callerType) && !req.user?.is_admin) {
+      return err(res, "Associate or Team Member privileges required.", 403);
     }
 
-    const cleanEmail = String(email).trim().toLowerCase();
-    const cleanMobile = String(mobile_no).replace(/\D/g, "");
+    const { full_name, mobile_no, email, password } = req.body || {};
+    if (!full_name || !mobile_no) {
+      return err(res, "Full Name and Mobile Number are required.", 400);
+    }
 
+    const cleanMobile = String(mobile_no).replace(/\D/g, "");
     if (cleanMobile.length < 10) {
       return err(res, "Please enter a valid 10-digit mobile number.", 400);
     }
+
+    const cleanEmail = (email && String(email).trim()) ? String(email).trim().toLowerCase() : `${cleanMobile}@mmrconstructions.com`;
+    const pwdToUse = (password && String(password).trim().length >= 4) ? String(password).trim() : `Mmr@${cleanMobile.slice(-4)}`;
 
     // Duplicate checks
     const [dupMobile] = await sql`
@@ -8663,17 +8677,34 @@ app.post("/api/associate/customers", verifyUserToken, requireAssociate, async (r
       return err(res, "Email address is already registered in the system.", 409);
     }
 
-    // Sponsor ID is strictly enforced as the logged-in Associate
-    const sponsorUserId = req.user.user_id;
+    // Sponsor ID is either the logged-in Associate / Team Member or a downline Team Member chosen by the Associate
+    let sponsorUserId = req.user.user_id;
+    if (req.body.team_member_user_id) {
+      const tmId = Number(req.body.team_member_user_id);
+      const [validTm] = await sql`
+        SELECT user_id, full_name, member_id 
+        FROM users 
+        WHERE user_id = ${tmId}
+          AND (
+            sponsor_user_id = ${req.user.user_id} 
+            OR referred_by_user_id = ${req.user.user_id} 
+            OR user_id IN (SELECT user_id FROM team_members WHERE associate_id = ${req.user.user_id})
+          )
+        LIMIT 1`;
+      if (validTm) {
+        sponsorUserId = validTm.user_id;
+      }
+    }
+
     const [sponsor] = await sql`
       SELECT user_id, full_name, member_id, invitation_code 
       FROM users 
       WHERE user_id = ${sponsorUserId}`;
     if (!sponsor) {
-      return err(res, "Sponsor Associate profile not found.", 404);
+      return err(res, "Sponsor profile not found.", 404);
     }
 
-    const passwordHash = await bcrypt.hash(password, 12);
+    const passwordHash = await bcrypt.hash(pwdToUse, 12);
 
     const memberId = await genMemberID("Customer");
 
@@ -8699,6 +8730,15 @@ app.post("/api/associate/customers", verifyUserToken, requireAssociate, async (r
     } catch (wErr) {
       console.warn('[associate add-customer] user_wallets warning:', wErr.message);
     };
+
+    try {
+      await sql`
+        INSERT INTO user_kyc_profiles (user_id, status, submitted_at, approved_at, remarks)
+        VALUES (${createdUser.user_id}, 'Approved', NOW(), NOW(), 'Auto-approved on party enrollment')
+        ON CONFLICT (user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
+    } catch (kErr) {
+      console.warn('[associate add-customer] kyc warning:', kErr.message);
+    }
 
     try {
       await sql`
@@ -8953,31 +8993,39 @@ app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (re
     const associateId = req.user.user_id;
     const {
       team_member_user_id,
+      customer_id,
       site_id,
       plot_id,
+      payment_type,
       payment_option = "PartWise", // "OneTime" | "PartWise" | "EMI"
+      advance_amount = 0,
       booking_amount = 0,
       payment_method = "Cash / Bank",
+      buyer_type = "ON_BEHALF",
       notes = ""
     } = req.body || {};
 
-    if (!team_member_user_id || !plot_id) {
-      return err(res, "Team Member and Plot selection are required.", 400);
+    const targetBuyerId = customer_id || team_member_user_id || (buyer_type === 'SELF' ? associateId : null);
+    if (!targetBuyerId || !plot_id) {
+      return err(res, "Buyer (Customer or Team Member) and Plot selection are required.", 400);
     }
 
-    if (payment_option === "EMI" || payment_option === "Installment") {
+    if (payment_option === "EMI" || payment_option === "Installment" || payment_type === "EMI") {
       return err(res, "Installment (EMI) option is currently unavailable. Please choose One-Time or Part-Wise Payment.", 400);
     }
 
-    // Call shared booking service mapping team_member_user_id to customerId
+    const payTypeToUse = payment_type || (payment_option === "OneTime" ? "FullPayment" : "Partial");
+    const amountToUse = Number(advance_amount || booking_amount || 0);
+
+    // Call shared booking service mapping targetBuyerId to customerId
     const result = await bookingService.createBooking({
       actor: req.user,
-      buyerType: 'CUSTOMER',
-      customerId: team_member_user_id,
+      buyerType: buyer_type === 'SELF' ? 'SELF' : 'CUSTOMER',
+      customerId: targetBuyerId,
       plotId: plot_id,
       siteId: site_id,
-      paymentType: payment_option === "OneTime" ? "FullPayment" : "Partial",
-      advanceAmount: booking_amount,
+      paymentType: payTypeToUse,
+      advanceAmount: amountToUse,
       paymentMethod: payment_method || "Cash / Bank",
       notes: notes || `Assisted booking by Associate`
     });
