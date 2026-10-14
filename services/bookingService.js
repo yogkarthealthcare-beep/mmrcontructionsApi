@@ -59,6 +59,15 @@ export async function ensureBookingTableSchema(db = sql) {
 
       CREATE INDEX IF NOT EXISTS idx_bookings_queue_position ON bookings(queue_position);
       CREATE INDEX IF NOT EXISTS idx_bookings_plot_id ON bookings(plot_id);
+
+      DO $$
+      BEGIN
+        BEGIN
+          ALTER TABLE audit_log ALTER COLUMN actor_type TYPE VARCHAR(100);
+        EXCEPTION WHEN OTHERS THEN
+          NULL;
+        END;
+      END $$;
     `);
     bookingTableSchemaEnsured = true;
   } catch (err) {
@@ -126,15 +135,36 @@ export async function recordBookingAudit(db, {
       after: afterState,
       reason,
       is_override: isOverride,
+      actor_role: actorType,
       timestamp: new Date().toISOString()
     };
-    await db`
-      INSERT INTO audit_log (
-        actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value
-      ) VALUES (
-        ${actorType}, ${actorId}, ${actorName}, 'Bookings', ${action}, 'bookings', ${bookingId}, ${JSON.stringify(details)}
-      )
-    `;
+
+    // Normalize actorType to match actor_type_enum ('Admin', 'User', 'System')
+    let safeActorType = 'User';
+    const rawType = String(actorType || '').trim().toLowerCase();
+    if (rawType.includes('admin') || rawType === 'superadmin') {
+      safeActorType = 'Admin';
+    } else if (rawType.includes('system')) {
+      safeActorType = 'System';
+    } else {
+      safeActorType = 'User';
+    }
+
+    const doInsert = async (executor) => {
+      await executor`
+        INSERT INTO audit_log (
+          actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value
+        ) VALUES (
+          ${safeActorType}, ${actorId}, ${actorName}, 'Bookings', ${action}, 'bookings', ${bookingId}, ${JSON.stringify(details)}
+        )
+      `;
+    };
+
+    if (db && typeof db.savepoint === 'function') {
+      await db.savepoint(doInsert);
+    } else {
+      await doInsert(db || sql);
+    }
   } catch (err) {
     console.warn('[Booking Audit Warning]:', err?.message);
   }

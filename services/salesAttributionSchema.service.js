@@ -115,6 +115,18 @@ export async function ensureSalesAttributionSchema(sql) {
         ALTER TABLE plot_status_history ADD COLUMN IF NOT EXISTS admin_name VARCHAR(150);
       `).catch(() => {});
 
+      // 2d. Ensure audit_log actor_type is VARCHAR(100) or flexible
+      await sql.unsafe(`
+        DO $$
+        BEGIN
+          BEGIN
+            ALTER TABLE audit_log ALTER COLUMN actor_type TYPE VARCHAR(100);
+          EXCEPTION WHEN OTHERS THEN
+            NULL;
+          END;
+        END $$;
+      `).catch(() => {});
+
       // 3. Create or replace vw_sales_attribution view
       try {
         await sql.unsafe(`DROP VIEW IF EXISTS vw_sales_attribution CASCADE;`);
