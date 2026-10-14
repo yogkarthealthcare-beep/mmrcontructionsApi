@@ -4515,17 +4515,16 @@ app.post("/api/auth/register-quick", async (req, res) => {
       sponsorUserId = await getDefaultSponsorUserId();
     }
 
-    if (user_type === "Associate" || user_type === "Team Member") {
-      if (sponsor_invite_code && (String(sponsor_invite_code).toUpperCase().startsWith('MMR-TM-') || String(sponsor_invite_code).toUpperCase().startsWith('TM-'))) {
-        return err(res, "Team Member cannot sponsor this registration. Sponsor must be an Associate.", 400);
-      }
-      const [sponsorAssoc] = await sql`SELECT user_id, user_type, full_name FROM users WHERE user_id = ${sponsorUserId} LIMIT 1`;
-      if (!sponsorAssoc || sponsorAssoc.user_type !== "Associate") {
-        return err(res, "Sponsor must be an active Associate.", 400);
+    if (user_type === "Team Member") {
+      let targetAssocId = sponsorUserId;
+      const [sponsorRow] = await sql`SELECT user_id, user_type, full_name FROM users WHERE user_id = ${sponsorUserId} LIMIT 1`;
+      if (sponsorRow && sponsorRow.user_type === 'Team Member') {
+        const [tmRow] = await sql`SELECT associate_id FROM team_members WHERE user_id = ${sponsorUserId} LIMIT 1`;
+        if (tmRow?.associate_id) targetAssocId = tmRow.associate_id;
       }
       const existingMembers = await sql`
         SELECT slot_number FROM team_members
-        WHERE associate_id = ${sponsorUserId} AND status <> 'rejected'
+        WHERE associate_id = ${targetAssocId} AND status <> 'rejected'
       `;
       const occupiedSlots = new Set(existingMembers.map((m) => Number(m.slot_number)).filter(Boolean));
       if (occupiedSlots.size >= 10) {

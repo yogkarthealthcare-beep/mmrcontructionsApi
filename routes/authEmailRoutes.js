@@ -492,34 +492,30 @@ async function validateSignupInput(body) {
       return { error: res.error || 'Invalid referral code', status: res.status || 400 };
     }
 
-    if (userType === 'Associate' || userType === 'Team Member') {
-      const isTmReferrer = (res.referrer?.user_type === 'Team Member' || res.userType === 'Team Member' || Boolean(res.referrer?.team_member_uid));
-      if (isTmReferrer) {
-        return { error: 'Team Member cannot sponsor this registration. Sponsor must be an Associate (e.g. MMR-ASC-0001).', status: 400 };
-      }
-      if (res.referrer && res.referrer.user_type !== 'Associate') {
-        return { error: 'Sponsor must be an active Associate.', status: 400 };
-      }
-    }
-
     if (userType === 'Team Member') {
-      const targetAssociateId = res.userId;
-      if (!targetAssociateId) {
-        return { error: 'Team Member sponsor must be an active Associate.', status: 400 };
+      let targetAssociateId = null;
+      if (res.referrer?.user_type === 'Associate') {
+        targetAssociateId = res.userId;
+      } else if (res.referrer?.user_type === 'Team Member' || res.userType === 'Team Member') {
+        targetAssociateId = res.associateId || res.referrer?.associate_id || res.referrer?.sponsor_user_id || res.userId;
       }
 
-      const existingMembers = await sql`
-        SELECT slot_number FROM team_members
-        WHERE associate_id = ${targetAssociateId} AND status <> 'rejected'
-      `;
-      const occupiedSlots = new Set(existingMembers.map((m) => Number(m.slot_number)).filter(Boolean));
-      if (occupiedSlots.size >= 10) {
-        return { error: 'This Associate has reached the maximum limit of 10 direct Team Members. No available slots.', status: 400 };
+      if (targetAssociateId) {
+        const existingMembers = await sql`
+          SELECT slot_number FROM team_members
+          WHERE associate_id = ${targetAssociateId} AND status <> 'rejected'
+        `;
+        const occupiedSlots = new Set(existingMembers.map((m) => Number(m.slot_number)).filter(Boolean));
+        if (occupiedSlots.size >= 10) {
+          return { error: 'This Associate has reached the maximum limit of 10 direct Team Members. No available slots.', status: 400 };
+        }
       }
     }
 
     if (res.referrer) {
-      sponsorUserId = res.userId;
+      sponsorUserId = (userType === 'Team Member' && (res.referrer.user_type === 'Team Member' || res.userType === 'Team Member'))
+        ? (res.associateId || res.referrer.associate_id || res.referrer.sponsor_user_id || res.userId)
+        : res.userId;
       sponsorInviteCode = res.invitationCode || res.memberId || sponsorCode;
       referredByUserId = res.userId;
       referredBySource = res.source || 'REGISTRATION_CODE';

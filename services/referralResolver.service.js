@@ -29,6 +29,7 @@ export function normalizeReferralCode(code) {
 export async function resolveReferralCode(sql, rawCode, options = {}) {
   const code = normalizeReferralCode(rawCode);
   const unpaddedTm = code.replace(/^MMR-TM-0*/i, 'MMR-TM-');
+  const unpaddedAsc = code.replace(/^MMR-(ASC|A)-0*/i, 'MMR-ASC-');
   const unpaddedMmr = code.replace(/^MMR-0*/i, 'MMR');
   const isPureNumber = /^\d+$/.test(code);
   const numId = isPureNumber ? Number(code) : -1;
@@ -86,6 +87,8 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
       OR UPPER(COALESCE(tm.team_member_uid, '')) = ${unpaddedTm}
       OR UPPER(regexp_replace(COALESCE(tm.team_member_uid, ''), '^MMR-TM-0*', 'MMR-TM-')) = ${unpaddedTm}
       OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-TM-0*', 'MMR-TM-')) = ${unpaddedTm}
+      OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-(ASC|A)-0*', 'MMR-ASC-')) = ${unpaddedAsc}
+      OR UPPER(regexp_replace(COALESCE(u.invitation_code, ''), '^MMR-(ASC|A)-0*', 'MMR-ASC-')) = ${unpaddedAsc}
       OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-(ASC|CUS|TM|[ACTM])-', 'MMR')) = ${code}
       OR UPPER(regexp_replace(COALESCE(tm.team_member_uid, ''), '^MMR-(ASC|CUS|TM|[ACTM])-', 'MMR')) = ${code}
       OR UPPER(regexp_replace(COALESCE(u.member_id, ''), '^MMR-[ACTM]-', 'MMR')) = ${code}
@@ -139,41 +142,14 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
   // 3. Referrer found in database
   if (referrer) {
     const roleLower = String(referrer.user_type || '').toLowerCase();
-    const isTeamMember = roleLower === 'team member' || Boolean(referrer.team_member_uid);
-    const targetUserType = options.userType;
 
-    // Team Member cannot sponsor Associate or Team Member registrations
-    if (isTeamMember && (targetUserType === 'Associate' || targetUserType === 'Team Member')) {
+    // Customer cannot refer
+    if (roleLower === 'customer') {
       return {
         valid: false,
-        error: 'Team Member cannot sponsor an Associate or Team Member registration. Sponsor must be an Associate (e.g. MMR-ASC-0001).',
+        error: 'Customers cannot refer. Only Associates and Team Members can refer.',
         status: 400,
-        isTeamMember: true
-      };
-    }
-
-    // Customer referral rules:
-    // Customers can refer Customers (without commission), but cannot sponsor Associates or Team Members
-    if (roleLower === 'customer') {
-      if (targetUserType === 'Associate' || targetUserType === 'Team Member') {
-        return {
-          valid: false,
-          error: 'Customer cannot sponsor an Associate or Team Member registration. Sponsor must be an Associate.',
-          status: 400,
-          isCustomer: true
-        };
-      }
-      return {
-        valid: true,
-        referrer,
-        userId: referrer.user_id,
-        memberId: referrer.member_id,
-        fullName: referrer.full_name,
-        invitationCode: referrer.invitation_code || referrer.member_id,
-        userType: 'Customer',
-        source: 'REGISTRATION_CODE',
-        isCustomerReferral: true,
-        commissionEligible: false
+        isCustomer: true
       };
     }
 
