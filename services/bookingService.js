@@ -14,6 +14,57 @@
 import sql from '../db.js';
 import { bookingApprovalConfig } from '../config/bookingApproval.js';
 import installmentService from './installmentService.js';
+import { ensureSalesAttributionSchema } from './salesAttributionSchema.service.js';
+
+let bookingTableSchemaEnsured = false;
+
+/**
+ * Proactively ensure bookings table schema and all required columns exist
+ * prior to any booking creation, waitlist query, or transaction.
+ */
+export async function ensureBookingTableSchema(db = sql) {
+  if (bookingTableSchemaEnsured) return;
+  try {
+    if (typeof ensureSalesAttributionSchema === 'function') {
+      await ensureSalesAttributionSchema(db).catch(() => {});
+    }
+    await db.unsafe(`
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS queue_position INTEGER DEFAULT 1;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_method VARCHAR(100) DEFAULT 'Cash / Bank';
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS required_booking_amount NUMERIC(14,2) DEFAULT 0;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS installment_plan_id INTEGER;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plan_snapshot JSONB;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS part_wise_deadline_at TIMESTAMPTZ;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS refund_due BOOLEAN DEFAULT FALSE;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS refund_reason TEXT;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS refund_marked_at TIMESTAMPTZ;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS refund_marked_by_admin_id INTEGER;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booked_by_user_id INTEGER;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS sold_by_user_id INTEGER;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS associate_user_id INTEGER;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_type VARCHAR(40) NOT NULL DEFAULT 'CUSTOMER_SELF';
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS associate_approval_status VARCHAR(40) NOT NULL DEFAULT 'NotRequired';
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS associate_approved_by INTEGER;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS associate_approved_at TIMESTAMPTZ;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS associate_rejection_reason TEXT;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS associate_approval_overridden BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS workflow_status VARCHAR(80) DEFAULT 'Booking Initiated';
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS base_price NUMERIC(14,2) DEFAULT 0;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS advance_amount NUMERIC(14,2) DEFAULT 0;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS remaining_balance NUMERIC(14,2) DEFAULT 0;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_date TIMESTAMPTZ DEFAULT NOW();
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_type VARCHAR(50) DEFAULT 'FullPayment';
+
+      CREATE INDEX IF NOT EXISTS idx_bookings_queue_position ON bookings(queue_position);
+      CREATE INDEX IF NOT EXISTS idx_bookings_plot_id ON bookings(plot_id);
+    `);
+    bookingTableSchemaEnsured = true;
+  } catch (err) {
+    console.warn('[BookingService] ensureBookingTableSchema notice:', err.message);
+  }
+}
 
 /**
  * Custom Error helper with HTTP status code
@@ -116,6 +167,7 @@ export async function createBooking({
   customDb = null
 }) {
   const runner = customDb || sql;
+  await ensureBookingTableSchema(runner);
 
   // 1. Resolve fresh Actor from Database (never rely solely on JWT token claims)
   const resolvedActorId = Number(actor?.user_id || actorId);
@@ -542,6 +594,7 @@ export async function createBooking({
  */
 export async function releasePlotOrPromoteWaitlist(db, { plotId, cancelledBookingId = null, adminId = null, reason = 'Booking cancelled' }) {
   if (!plotId) return { promotedBooking: null, plotStatus: null };
+  await ensureBookingTableSchema(db);
 
   const [earliestWaitlisted] = await db`
     SELECT booking_id, user_id, queue_position 

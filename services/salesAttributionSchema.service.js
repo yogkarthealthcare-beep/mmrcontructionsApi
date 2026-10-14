@@ -39,11 +39,24 @@ export async function ensureSalesAttributionSchema(sql) {
         ALTER TABLE bookings ADD COLUMN IF NOT EXISTS remaining_balance NUMERIC(14,2) DEFAULT 0;
         ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_date TIMESTAMPTZ DEFAULT NOW();
         ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_type VARCHAR(50) DEFAULT 'FullPayment';
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS queue_position INTEGER DEFAULT 1;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_method VARCHAR(100) DEFAULT 'Cash / Bank';
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS required_booking_amount NUMERIC(14,2) DEFAULT 0;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS installment_plan_id INTEGER;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plan_snapshot JSONB;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS part_wise_deadline_at TIMESTAMPTZ;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS refund_due BOOLEAN DEFAULT FALSE;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS refund_reason TEXT;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS refund_marked_at TIMESTAMPTZ;
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS refund_marked_by_admin_id INTEGER;
 
         CREATE INDEX IF NOT EXISTS idx_bookings_booked_by_user_id ON bookings(booked_by_user_id);
         CREATE INDEX IF NOT EXISTS idx_bookings_sold_by_user_id ON bookings(sold_by_user_id);
         CREATE INDEX IF NOT EXISTS idx_bookings_associate_user_id ON bookings(associate_user_id);
         CREATE INDEX IF NOT EXISTS idx_bookings_assoc_approval_status ON bookings(associate_approval_status);
+        CREATE INDEX IF NOT EXISTS idx_bookings_queue_position ON bookings(queue_position);
+        CREATE INDEX IF NOT EXISTS idx_bookings_plot_id ON bookings(plot_id);
       `);
 
       // 2b. Ensure plots table has required columns for reporting
@@ -53,6 +66,53 @@ export async function ensureSalesAttributionSchema(sql) {
         ALTER TABLE plots ADD COLUMN IF NOT EXISTS plot_status VARCHAR(50) DEFAULT 'Vacant';
         ALTER TABLE plots ADD COLUMN IF NOT EXISTS plot_area NUMERIC(12,2) DEFAULT 0;
         ALTER TABLE plots ADD COLUMN IF NOT EXISTS base_price NUMERIC(14,2) DEFAULT 0;
+        ALTER TABLE plots ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+      `).catch(() => {});
+
+      // 2c. Ensure auxiliary workflow tables exist
+      await sql.unsafe(`
+        CREATE TABLE IF NOT EXISTS registry_records (
+          registry_id SERIAL PRIMARY KEY,
+          booking_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          plot_id INTEGER NOT NULL,
+          registry_status VARCHAR(50) DEFAULT 'Completed',
+          registry_no VARCHAR(100),
+          registry_date DATE,
+          mutation_date DATE,
+          possession_date DATE,
+          document_path VARCHAR(500),
+          final_sold_price DECIMAL(14, 2),
+          remarks TEXT,
+          created_by_admin_id INTEGER,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_registry_records_booking_id ON registry_records(booking_id);
+        CREATE INDEX IF NOT EXISTS idx_registry_records_plot_id ON registry_records(plot_id);
+        CREATE INDEX IF NOT EXISTS idx_registry_records_user_id ON registry_records(user_id);
+
+        CREATE TABLE IF NOT EXISTS booking_workflow_settings (
+          id SERIAL PRIMARY KEY,
+          part_wise_deadline_months INTEGER DEFAULT 3,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        INSERT INTO booking_workflow_settings (id, part_wise_deadline_months)
+        VALUES (1, 3)
+        ON CONFLICT (id) DO NOTHING;
+
+        CREATE TABLE IF NOT EXISTS plot_status_history (
+          id SERIAL PRIMARY KEY,
+          plot_id INTEGER NOT NULL,
+          old_status VARCHAR(50),
+          new_status VARCHAR(50),
+          changed_by_user_id INTEGER,
+          admin_name VARCHAR(150),
+          remarks TEXT,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        ALTER TABLE plot_status_history ADD COLUMN IF NOT EXISTS admin_name VARCHAR(150);
       `).catch(() => {});
 
       // 3. Create or replace vw_sales_attribution view
