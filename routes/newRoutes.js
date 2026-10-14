@@ -197,10 +197,12 @@ router.post('/auth/register', async (req, res) => {
     const [newUser] = await sql`
       INSERT INTO users (
         full_name, email, mobile_no, password_hash,
-        user_type, is_email_verified, account_status
+        user_type, is_email_verified, account_status,
+        enrollment_status, is_verified
       ) VALUES (
         ${full_name.trim()}, ${email.toLowerCase()}, ${mobile_no || null},
-        ${password_hash}, ${user_type || 'Customer'}, TRUE, 'Pending'
+        ${password_hash}, ${user_type || 'Customer'}, TRUE, 'Pending',
+        'Pending', FALSE
       ) RETURNING id, full_name, email, user_type`;
 
     // Clean up OTP record

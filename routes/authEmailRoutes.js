@@ -198,7 +198,8 @@ async function findSponsorByCode(code) {
       user_id: resolved.userId,
       full_name: resolved.fullName,
       member_id: resolved.memberId,
-      invitation_code: resolved.invitationCode || resolved.memberId
+      invitation_code: resolved.invitationCode || resolved.memberId,
+      user_type: resolved.userType || resolved.referrer.user_type || 'Associate'
     };
   }
 
@@ -211,7 +212,7 @@ async function findSponsorByCode(code) {
   }
 
   const [invSponsor] = await sql`
-    SELECT id as user_id, full_name, mobile_number as member_id, mobile_number as invitation_code
+    SELECT id as user_id, full_name, mobile_number as member_id, mobile_number as invitation_code, 'Investor' as user_type
     FROM investor_users
     WHERE deleted_at IS NULL
       AND (
@@ -225,10 +226,10 @@ async function findSponsorByCode(code) {
     return invSponsor;
   }
 
-  // Fallback for default corporate sponsor MMR0001 (Suraj Kumar Verma)
-  if (sponsorCode === 'MMR0001' || sponsorCode === 'MMR00001' || sponsorCode === 'MMR3001' || sponsorCode === 'MMR-A-3001' || sponsorCode === 'MMR-C-3001' || sponsorCode === 'MMR-ASC-0001') {
+  // Fallback for default corporate sponsor MMR0001 / MMR-ASC-0001 (Suraj Kumar Verma)
+  if (sponsorCode === 'MMR0001' || sponsorCode === 'MMR00001' || sponsorCode === 'MMR3001' || sponsorCode === 'MMR-A-3001' || sponsorCode === 'MMR-C-3001' || sponsorCode === 'MMR-ASC-0001' || sponsorCode === 'MMR-ASC-00001') {
     const [suraj] = await sql`
-      SELECT user_id, full_name, member_id, invitation_code
+      SELECT user_id, full_name, member_id, invitation_code, 'Associate' as user_type
       FROM users
       WHERE full_name ILIKE '%Suraj%'
          OR LOWER(email) = 'mmrconstructions@hotmail.com'
@@ -240,8 +241,9 @@ async function findSponsorByCode(code) {
       return {
         user_id: suraj.user_id,
         full_name: suraj.full_name || 'Suraj Kumar Verma',
-        member_id: suraj.invitation_code || suraj.member_id || 'MMR0001',
-        invitation_code: suraj.invitation_code || 'MMR0001'
+        member_id: suraj.invitation_code || suraj.member_id || 'MMR-ASC-0001',
+        invitation_code: suraj.invitation_code || 'MMR-ASC-0001',
+        user_type: 'Associate'
       };
     }
   }
@@ -265,6 +267,7 @@ router.get('/verify-sponsor/:code', async (req, res) => {
       full_name: sponsor.full_name,
       member_id: sponsor.member_id,
       invitation_code: sponsor.invitation_code || sponsor.member_id,
+      user_type: sponsor.user_type || 'Associate',
     }, 'Sponsor found');
   } catch (e) {
     console.error('[verify-sponsor]', e);
@@ -288,6 +291,7 @@ router.get('/referral/validate/:code', async (req, res) => {
       full_name: sponsor.full_name,
       member_id: sponsor.member_id,
       invitation_code: sponsor.invitation_code || sponsor.member_id,
+      user_type: sponsor.user_type || 'Associate',
     }, 'Referral code valid');
   } catch (e) {
     console.error('[referral/validate]', e);
@@ -347,12 +351,14 @@ async function createUserWithUniqueMemberId(db, pending) {
         user_type, full_name, mobile_no, email,
         password_hash, sponsor_user_id, member_id,
         account_status, email_verified, email_verified_at, is_otp_verified,
-        referred_by_user_id, referred_by_source, referred_by_set_at
+        referred_by_user_id, referred_by_source, referred_by_set_at,
+        enrollment_status, is_verified
       ) VALUES (
         ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
         ${pending.password_hash}, ${pending.sponsor_user_id || null}, ${memberId},
         ${initialAccountStatus}, TRUE, NOW(), TRUE,
-        ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
+        ${referredByUserId}, ${referredBySource}, ${referredBySetAt},
+        'Pending', FALSE
       )
       RETURNING user_id, full_name, email, mobile_no, user_type, member_id, invitation_code, referred_by_user_id, referred_by_source`;
   } catch (err) {
@@ -362,12 +368,14 @@ async function createUserWithUniqueMemberId(db, pending) {
           user_type, full_name, mobile_no, email,
           password_hash, sponsor_user_id, member_id,
           account_status, email_verified, email_verified_at, is_otp_verified,
-          referred_by_user_id, referred_by_source, referred_by_set_at
+          referred_by_user_id, referred_by_source, referred_by_set_at,
+          enrollment_status, is_verified
         ) VALUES (
           ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
           ${pending.password_hash}, ${pending.sponsor_user_id || null}, ${memberId},
           ${initialAccountStatus}, TRUE, NOW(), TRUE,
-          ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
+          ${referredByUserId}, ${referredBySource}, ${referredBySetAt},
+          'Pending', FALSE
         )
         RETURNING user_id, full_name, email, mobile_no, user_type, member_id, referred_by_user_id, referred_by_source`;
     } else {
@@ -484,16 +492,20 @@ async function validateSignupInput(body) {
       return { error: res.error || 'Invalid referral code', status: res.status || 400 };
     }
 
-    if (userType === 'Team Member') {
-      let targetAssociateId = null;
-      if (res.referrer?.user_type === 'Associate') {
-        targetAssociateId = res.userId;
-      } else if (res.referrer?.user_type === 'Team Member' || res.userType === 'Team Member') {
-        targetAssociateId = res.associateId || res.referrer?.associate_id || res.referrer?.sponsor_user_id;
+    if (userType === 'Associate' || userType === 'Team Member') {
+      const isTmReferrer = (res.referrer?.user_type === 'Team Member' || res.userType === 'Team Member' || Boolean(res.referrer?.team_member_uid));
+      if (isTmReferrer) {
+        return { error: 'Team Member cannot sponsor this registration. Sponsor must be an Associate (e.g. MMR-ASC-0001).', status: 400 };
       }
+      if (res.referrer && res.referrer.user_type !== 'Associate') {
+        return { error: 'Sponsor must be an active Associate.', status: 400 };
+      }
+    }
 
+    if (userType === 'Team Member') {
+      const targetAssociateId = res.userId;
       if (!targetAssociateId) {
-        return { error: 'Team Member sponsor must be an active Associate or linked to an active Associate.', status: 400 };
+        return { error: 'Team Member sponsor must be an active Associate.', status: 400 };
       }
 
       const existingMembers = await sql`
@@ -507,9 +519,7 @@ async function validateSignupInput(body) {
     }
 
     if (res.referrer) {
-      sponsorUserId = (userType === 'Team Member' && (res.referrer.user_type === 'Team Member' || res.userType === 'Team Member'))
-        ? (res.associateId || res.referrer.associate_id || res.referrer.sponsor_user_id || res.userId)
-        : res.userId;
+      sponsorUserId = res.userId;
       sponsorInviteCode = res.invitationCode || res.memberId || sponsorCode;
       referredByUserId = res.userId;
       referredBySource = res.source || 'REGISTRATION_CODE';
@@ -520,12 +530,12 @@ async function validateSignupInput(body) {
       referredBySetAt = new Date();
     }
   } else {
-    // If user is Associate and no sponsor code given, fall back to default sponsor MMR0001 if exists
-    if (userType === 'Associate') {
-      const defaultSponsor = await findSponsorByCode('MMR0001');
+    // If user is Associate or Team Member and no sponsor code given, fall back to default corporate sponsor MMR-ASC-0001
+    if (userType === 'Associate' || userType === 'Team Member') {
+      const defaultSponsor = await findSponsorByCode('MMR-ASC-0001');
       if (defaultSponsor) {
         sponsorUserId = defaultSponsor.user_id;
-        sponsorInviteCode = 'MMR0001';
+        sponsorInviteCode = 'MMR-ASC-0001';
       }
     }
     referredByUserId = null;

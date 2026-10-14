@@ -138,14 +138,42 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
 
   // 3. Referrer found in database
   if (referrer) {
-    // Customer cannot refer
     const roleLower = String(referrer.user_type || '').toLowerCase();
-    if (roleLower === 'customer') {
+    const isTeamMember = roleLower === 'team member' || Boolean(referrer.team_member_uid);
+    const targetUserType = options.userType;
+
+    // Team Member cannot sponsor Associate or Team Member registrations
+    if (isTeamMember && (targetUserType === 'Associate' || targetUserType === 'Team Member')) {
       return {
         valid: false,
-        error: 'Customers cannot refer. Only Associates and Team Members can refer.',
+        error: 'Team Member cannot sponsor an Associate or Team Member registration. Sponsor must be an Associate (e.g. MMR-ASC-0001).',
         status: 400,
-        isCustomer: true
+        isTeamMember: true
+      };
+    }
+
+    // Customer referral rules:
+    // Customers can refer Customers (without commission), but cannot sponsor Associates or Team Members
+    if (roleLower === 'customer') {
+      if (targetUserType === 'Associate' || targetUserType === 'Team Member') {
+        return {
+          valid: false,
+          error: 'Customer cannot sponsor an Associate or Team Member registration. Sponsor must be an Associate.',
+          status: 400,
+          isCustomer: true
+        };
+      }
+      return {
+        valid: true,
+        referrer,
+        userId: referrer.user_id,
+        memberId: referrer.member_id,
+        fullName: referrer.full_name,
+        invitationCode: referrer.invitation_code || referrer.member_id,
+        userType: 'Customer',
+        source: 'REGISTRATION_CODE',
+        isCustomerReferral: true,
+        commissionEligible: false
       };
     }
 
@@ -190,7 +218,8 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
   }
 
   // 4. Fallback for default corporate sponsor if requested or configured
-  if (options.allowDefaultFallback && (code === 'MMR0001' || code === 'MMR00001' || code === 'MMR3001')) {
+  const isDefaultCode = code === 'MMR0001' || code === 'MMR00001' || code === 'MMR3001' || code === 'MMR-ASC-0001' || code === 'MMR-ASC-00001';
+  if ((options.allowDefaultFallback || isDefaultCode) && isDefaultCode) {
     const [defaultSponsor] = await sql`
       SELECT user_id, full_name, member_id, invitation_code, user_type, account_status
       FROM users
@@ -201,10 +230,10 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
         valid: true,
         referrer: defaultSponsor,
         userId: defaultSponsor.user_id,
-        memberId: defaultSponsor.member_id,
-        fullName: defaultSponsor.full_name,
-        invitationCode: defaultSponsor.invitation_code || 'MMR0001',
-        userType: defaultSponsor.user_type,
+        memberId: defaultSponsor.member_id || 'MMR-ASC-0001',
+        fullName: defaultSponsor.full_name || 'Suraj Kumar Verma',
+        invitationCode: defaultSponsor.invitation_code || 'MMR-ASC-0001',
+        userType: defaultSponsor.user_type || 'Associate',
         source: 'REGISTRATION_CODE'
       };
     }

@@ -4503,7 +4503,7 @@ app.post("/api/auth/register-quick", async (req, res) => {
         )
         AND account_status = 'Active'
         LIMIT 1`;
-      if (!sponsor && (cleanSponsor === 'MMR3001' || cleanSponsor === 'MMR00001' || cleanSponsor === 'MMR0001')) {
+      if (!sponsor && (cleanSponsor === 'MMR3001' || cleanSponsor === 'MMR00001' || cleanSponsor === 'MMR0001' || cleanSponsor === 'MMR-ASC-0001')) {
         sponsorUserId = await getDefaultSponsorUserId();
       } else if (sponsor) {
         sponsorUserId = sponsor.user_id;
@@ -4515,13 +4515,13 @@ app.post("/api/auth/register-quick", async (req, res) => {
       sponsorUserId = await getDefaultSponsorUserId();
     }
 
-    if (user_type === "Team Member") {
-      if (!sponsor_invite_code || !sponsorUserId) {
-        return err(res, "Sponsor Associate ID is required for Team Member registration.", 400);
+    if (user_type === "Associate" || user_type === "Team Member") {
+      if (sponsor_invite_code && (String(sponsor_invite_code).toUpperCase().startsWith('MMR-TM-') || String(sponsor_invite_code).toUpperCase().startsWith('TM-'))) {
+        return err(res, "Team Member cannot sponsor this registration. Sponsor must be an Associate.", 400);
       }
       const [sponsorAssoc] = await sql`SELECT user_id, user_type, full_name FROM users WHERE user_id = ${sponsorUserId} LIMIT 1`;
       if (!sponsorAssoc || sponsorAssoc.user_type !== "Associate") {
-        return err(res, "Team Member sponsor must be an active Associate.", 400);
+        return err(res, "Sponsor must be an active Associate.", 400);
       }
       const existingMembers = await sql`
         SELECT slot_number FROM team_members
@@ -13125,7 +13125,8 @@ app.get("/api/admin/associates/:id",
                    END
                  ) AS enrollment_status,
                  CASE 
-                   WHEN LOWER(COALESCE(ae.status, u.enrollment_status, '')) IN ('completed', 'approved') THEN TRUE
+                    WHEN COALESCE(u.is_verified, FALSE) = TRUE THEN TRUE
+                    WHEN ae.id IS NOT NULL AND LOWER(COALESCE(ae.status, '')) IN ('completed', 'approved') THEN TRUE
                    ELSE FALSE
                  END AS is_verified,
                  ae.id AS associate_enrollment_id,
@@ -13368,7 +13369,8 @@ app.get("/api/admin/associates",
                    END
                  ) AS enrollment_status,
                  CASE 
-                   WHEN LOWER(COALESCE(ae.status, u.enrollment_status, '')) IN ('completed', 'approved') THEN TRUE
+                    WHEN COALESCE(u.is_verified, FALSE) = TRUE THEN TRUE
+                    WHEN ae.id IS NOT NULL AND LOWER(COALESCE(ae.status, '')) IN ('completed', 'approved') THEN TRUE
                    ELSE FALSE
                  END AS is_verified,
                  ae.id AS associate_enrollment_id,
@@ -13425,7 +13427,7 @@ app.get("/api/admin/associates",
                  u.invitation_code, u.registered_at, sp.full_name AS sponsor_name,
                  COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
                  CASE 
-                   WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'submitted', 'approved') THEN TRUE
+                    WHEN COALESCE(u.is_verified, FALSE) = TRUE THEN TRUE
                    ELSE FALSE
                  END AS is_verified,
                  NULL AS associate_enrollment_id,
@@ -16328,6 +16330,58 @@ if (shouldStartServer) {
         requireCommissionEngineSchema().catch((e) => console.warn("[MMR API] Commission schema warning:", e.message)),
         ensureAdminUserAccount().catch((e) => console.warn("[MMR API] Admin account ensure warning:", e.message)),
         sql`ALTER TABLE user_documents ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`.catch(() => {}),
+        (async () => {
+          try {
+            await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE`.catch(() => {});
+            await sql`ALTER TABLE users ALTER COLUMN is_verified SET DEFAULT FALSE`.catch(() => {});
+            // 1. Reset unverified associates (who do NOT have an approved enrollment in associate_enrollment)
+            await sql`
+              UPDATE users
+              SET is_verified = FALSE, enrollment_status = 'Pending'
+              WHERE LOWER(user_type::TEXT) = 'associate'
+                AND user_id != 1
+                AND user_id NOT IN (
+                  SELECT DISTINCT ae.user_id 
+                  FROM associate_enrollment ae 
+                  WHERE LOWER(COALESCE(ae.status, '')) IN ('approved', 'completed') AND ae.user_id IS NOT NULL
+                  UNION
+                  SELECT DISTINCT u2.user_id
+                  FROM users u2
+                  JOIN associate_enrollment ae2 ON (
+                    (u2.mobile_no IS NOT NULL AND ae2.contact_no_1 = u2.mobile_no)
+                    OR (u2.email IS NOT NULL AND LOWER(ae2.email) = LOWER(u2.email))
+                    OR (ae2.id = u2.member_id)
+                  )
+                  WHERE LOWER(COALESCE(ae2.status, '')) IN ('approved', 'completed')
+                )
+            `.catch((e) => console.warn("[MMR API] Reconcile unverified associates warning:", e.message));
+            // 2. Set verified for associates who DO have an approved enrollment in associate_enrollment
+            await sql`
+              UPDATE users
+              SET is_verified = TRUE, enrollment_status = 'Completed'
+              WHERE LOWER(user_type::TEXT) = 'associate'
+                AND (
+                  user_id IN (
+                    SELECT DISTINCT ae.user_id 
+                    FROM associate_enrollment ae 
+                    WHERE LOWER(COALESCE(ae.status, '')) IN ('approved', 'completed') AND ae.user_id IS NOT NULL
+                  )
+                  OR user_id IN (
+                    SELECT DISTINCT u2.user_id
+                    FROM users u2
+                    JOIN associate_enrollment ae2 ON (
+                      (u2.mobile_no IS NOT NULL AND ae2.contact_no_1 = u2.mobile_no)
+                      OR (u2.email IS NOT NULL AND LOWER(ae2.email) = LOWER(u2.email))
+                      OR (ae2.id = u2.member_id)
+                    )
+                    WHERE LOWER(COALESCE(ae2.status, '')) IN ('approved', 'completed')
+                  )
+                )
+            `.catch((e) => console.warn("[MMR API] Reconcile verified associates warning:", e.message));
+          } catch (verErr) {
+            console.warn("[MMR API] is_verified column ensure warning:", verErr.message);
+          }
+        })().catch(() => {}),
         (async () => {
           try {
             await sql.unsafe(`

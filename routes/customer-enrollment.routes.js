@@ -998,7 +998,7 @@ const handleAdminCustomerUpdate = async (req, res) => {
       // Also ensure user's enrollment_status in users table is synced
       if (existing.user_id) {
         const uStatus = isApproving ? 'Completed' : ((b.enrollment_status === 'Pending' || b.application_status === 'Pending' || b.applicationStatus === 'Pending') ? 'Pending' : 'Completed');
-        await sql`UPDATE users SET enrollment_status = ${uStatus} WHERE user_id = ${existing.user_id}`;
+        await sql`UPDATE users SET enrollment_status = ${uStatus}, is_verified = ${isApproving ? true : false} WHERE user_id = ${existing.user_id}`;
       }
 
       return ok(res, updated, "Customer enrollment updated successfully.");
