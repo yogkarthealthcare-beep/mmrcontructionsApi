@@ -13,8 +13,8 @@ export const bookingApprovalConfig = {
   // 'silent_company_direct' (aliases: 'fallback_direct', 'direct') -> register as Company Direct (referred_by = null)
   REFERRAL_INVALID_CODE_MODE: (process.env.REFERRAL_INVALID_CODE_MODE || 'reject').toLowerCase().trim(),
 
-  // Allow EMI payment plan for on-behalf bookings (default false)
-  ALLOW_EMI_ON_BEHALF: process.env.ALLOW_EMI_ON_BEHALF === 'true',
+  // Allow EMI payment plan for on-behalf bookings (enabled by default)
+  ALLOW_EMI_ON_BEHALF: process.env.ALLOW_EMI_ON_BEHALF !== 'false',
 
   // Number of hours after which a 'Pending' associate approval is flagged as overdue in admin views
   OVERDUE_HOURS: Number(process.env.BOOKING_APPROVAL_OVERDUE_HOURS) || 48,

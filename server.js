@@ -6637,7 +6637,13 @@ app.get("/api/public/sites/:id/plot-map", publicApiLimiter, async (req, res) => 
         p.plot_id,
         p.plot_number,
         COALESCE(p.unit_type, 'PLOT') AS unit_type,
-        p.plot_status::text AS plot_status,
+        CASE
+          WHEN b.booking_status::text IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status::text, '')) = 'sold' THEN 'Sold'
+          WHEN b.booking_status::text IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status::text, '')) = 'booked' THEN 'Booked'
+          WHEN (b.booking_id IS NOT NULL AND b.booking_status::text NOT IN ('Cancelled', 'Rejected')) 
+               OR LOWER(COALESCE(p.plot_status::text, '')) IN ('inprocess', 'processing', 'paymentpending', 'hold', 'reserved') THEN 'InProcess'
+          ELSE COALESCE(p.plot_status::text, 'Vacant')
+        END AS plot_status,
         p.plot_area,
         p.base_price,
         pc.coordinates AS polygon_coordinates,
@@ -6649,10 +6655,12 @@ app.get("/api/public/sites/:id/plot-map", publicApiLimiter, async (req, res) => 
       LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id
       LEFT JOIN LATERAL (
         SELECT 
+          b.booking_id,
+          b.booking_status,
           COALESCE(b.advance_amount, p.base_price) AS sold_price,
           COALESCE(b.created_at, p.updated_at) AS sold_at
         FROM bookings b
-        WHERE b.plot_id = p.plot_id AND b.booking_status::text NOT IN ('Cancelled')
+        WHERE b.plot_id = p.plot_id AND b.booking_status::text NOT IN ('Cancelled', 'Rejected')
         ORDER BY CASE WHEN b.booking_status::text IN ('Confirmed', 'Booked') THEN 0 ELSE 1 END, b.created_at DESC
         LIMIT 1
       ) b ON TRUE
@@ -6854,7 +6862,15 @@ app.get("/api/sites/:id/map", async (req, res) => {
     const plots = await sql`
       SELECT p.plot_id, p.plot_id AS id, p.plot_number, p.plot_area, p.plot_category,
              p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months,
-             p.file_charge, p.plot_status, p.coordinates_x, p.coordinates_y,
+             p.file_charge,
+             CASE
+               WHEN b.booking_status IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status, '')) = 'sold' THEN 'Sold'
+               WHEN b.booking_status IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status, '')) = 'booked' THEN 'Booked'
+               WHEN (b.booking_id IS NOT NULL AND b.booking_status NOT IN ('Cancelled', 'Rejected')) 
+                    OR LOWER(COALESCE(p.plot_status, '')) IN ('inprocess', 'processing', 'paymentpending', 'hold', 'reserved') THEN 'InProcess'
+               ELSE COALESCE(p.plot_status, 'Vacant')
+             END AS plot_status,
+             p.coordinates_x, p.coordinates_y,
              d.size_label, COALESCE(pc.coordinates, '[]'::jsonb) AS polygon_coordinates,
              pc.label_x, pc.label_y,
              b.booking_id, b.booking_date, b.confirmed_at,
@@ -6866,12 +6882,12 @@ app.get("/api/sites/:id/map", async (req, res) => {
                WHEN b.advance_amount > 0 THEN 'Partial'
                ELSE 'Pending'
              END AS payment_status,
-             CASE p.plot_status
-               WHEN 'Vacant' THEN '#22c55e'
-               WHEN 'InProcess' THEN '#eab308'
-               WHEN 'Booked' THEN '#ef4444'
-               WHEN 'Sold' THEN '#6b7280'
-               ELSE '#6b7280'
+             CASE
+               WHEN b.booking_status IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status, '')) = 'sold' THEN '#dc2626'
+               WHEN b.booking_status IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status, '')) = 'booked' THEN '#dc2626'
+               WHEN (b.booking_id IS NOT NULL AND b.booking_status NOT IN ('Cancelled', 'Rejected')) 
+                    OR LOWER(COALESCE(p.plot_status, '')) IN ('inprocess', 'processing', 'paymentpending', 'hold', 'reserved') THEN '#ec4899'
+               ELSE '#22c55e'
              END AS status_color
       FROM plots p
       LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id
@@ -6879,8 +6895,8 @@ app.get("/api/sites/:id/map", async (req, res) => {
       LEFT JOIN LATERAL (
         SELECT *
         FROM bookings b
-        WHERE b.plot_id = p.plot_id
-        ORDER BY CASE WHEN b.booking_status = 'Cancelled' THEN 1 ELSE 0 END, b.created_at DESC
+        WHERE b.plot_id = p.plot_id AND b.booking_status NOT IN ('Cancelled', 'Rejected')
+        ORDER BY CASE WHEN b.booking_status IN ('Confirmed', 'Sold', 'Booked', 'Approved') THEN 0 ELSE 1 END, b.created_at DESC
         LIMIT 1
       ) b ON TRUE
       LEFT JOIN users u ON u.user_id = b.user_id
@@ -6930,11 +6946,26 @@ app.get("/api/sites/:id/plots", async (req, res) => {
       SELECT p.plot_id, p.plot_number, p.plot_area, p.plot_category,
              COALESCE(p.unit_type, 'PLOT') AS unit_type,
              p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months,
-             p.file_charge, p.plot_status, p.coordinates_x, p.coordinates_y,
+             p.file_charge,
+             CASE
+               WHEN b.booking_status IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status::text, '')) = 'sold' THEN 'Sold'
+               WHEN b.booking_status IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status::text, '')) = 'booked' THEN 'Booked'
+               WHEN (b.booking_id IS NOT NULL AND b.booking_status NOT IN ('Cancelled', 'Rejected')) 
+                    OR LOWER(COALESCE(p.plot_status::text, '')) IN ('inprocess', 'processing', 'paymentpending', 'hold', 'reserved') THEN 'InProcess'
+               ELSE COALESCE(p.plot_status::text, 'Vacant')
+             END AS plot_status,
+             p.coordinates_x, p.coordinates_y,
              COALESCE(pc.coordinates, '[]'::jsonb) AS polygon_coordinates,
              pc.label_x, pc.label_y
       FROM plots p
       LEFT JOIN plot_polygon_coordinates pc ON pc.plot_id = p.plot_id
+      LEFT JOIN LATERAL (
+        SELECT b.booking_id, b.booking_status
+        FROM bookings b
+        WHERE b.plot_id = p.plot_id AND b.booking_status NOT IN ('Cancelled', 'Rejected')
+        ORDER BY CASE WHEN b.booking_status IN ('Confirmed', 'Sold', 'Booked', 'Approved') THEN 0 ELSE 1 END, b.created_at DESC
+        LIMIT 1
+      ) b ON TRUE
       WHERE p.site_id = ${id} AND p.is_active = TRUE
         AND (${statusFilter}::plot_status_enum IS NULL OR p.plot_status = ${statusFilter}::plot_status_enum)
         AND (${categoryFilter}::plot_category_enum IS NULL OR p.plot_category = ${categoryFilter}::plot_category_enum)
@@ -9032,11 +9063,8 @@ app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (re
       return err(res, "Buyer (Customer or Team Member) and Plot selection are required.", 400);
     }
 
-    if (payment_option === "EMI" || payment_option === "Installment" || payment_type === "EMI") {
-      return err(res, "Installment (EMI) option is currently unavailable. Please choose One-Time or Part-Wise Payment.", 400);
-    }
-
-    const payTypeToUse = payment_type || (payment_option === "OneTime" ? "FullPayment" : "Partial");
+    const isEmi = payment_option === "EMI" || payment_option === "Installment" || payment_type === "EMI";
+    const payTypeToUse = isEmi ? "EMI" : (payment_type || (payment_option === "OneTime" ? "FullPayment" : "Partial"));
     const amountToUse = Number(advance_amount || booking_amount || 0);
 
     // Call shared booking service mapping targetBuyerId to customerId
@@ -9047,6 +9075,7 @@ app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (re
       plotId: plot_id,
       siteId: site_id,
       paymentType: payTypeToUse,
+      installmentPlanId: req.body.installment_plan_id || req.body.installmentPlanId,
       advanceAmount: amountToUse,
       paymentMethod: payment_method || "Cash / Bank",
       notes: notes || `Assisted booking by Associate`
@@ -12654,7 +12683,15 @@ app.get("/api/admin/sites/:id/plots",
           p.plot_id, p.site_id, p.plot_number, p.plot_area, p.plot_category,
           COALESCE(p.unit_type, 'PLOT') AS unit_type,
           p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months,
-          p.file_charge, p.plot_status, p.coordinates_x, p.coordinates_y,
+          p.file_charge,
+          CASE
+            WHEN b.booking_status IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status::text, '')) = 'sold' THEN 'Sold'
+            WHEN b.booking_status IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status::text, '')) = 'booked' THEN 'Booked'
+            WHEN (b.booking_id IS NOT NULL AND b.booking_status NOT IN ('Cancelled', 'Rejected')) 
+                 OR LOWER(COALESCE(p.plot_status::text, '')) IN ('inprocess', 'processing', 'paymentpending', 'hold', 'reserved') THEN 'InProcess'
+            ELSE COALESCE(p.plot_status::text, 'Vacant')
+          END AS plot_status,
+          p.coordinates_x, p.coordinates_y,
           COALESCE(pc.coordinates, '[]'::jsonb) AS polygon_coordinates,
           pc.label_x, pc.label_y,
           d.size_label, d.width_ft, d.length_ft, d.facing_direction, d.is_corner_plot,

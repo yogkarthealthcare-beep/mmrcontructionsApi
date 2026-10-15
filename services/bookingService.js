@@ -563,10 +563,10 @@ export async function createBooking({
       RETURNING *
     `;
 
-    // 5h. Mark Plot InProcess if Vacant
-    if (plot.plot_status === 'Vacant') {
-      await tx`UPDATE plots SET plot_status = 'InProcess', updated_at = NOW() WHERE plot_id = ${normalizedPlotId}`;
-    }
+    // 5h. Update Plot Status based on payment type (Full settlement -> Booked, Partial/EMI -> InProcess)
+    const isFullSettlement = normPaymentType === 'FullPayment' || (initialAdvance >= plotPrice && plotPrice > 0);
+    const nextPlotStatus = isFullSettlement ? 'Booked' : 'InProcess';
+    await tx`UPDATE plots SET plot_status = ${nextPlotStatus}, updated_at = NOW() WHERE plot_id = ${normalizedPlotId}`;
 
     // 5i. Plot Booking Lock if requested (for customer checkout workflow)
     let lockToken = null;
