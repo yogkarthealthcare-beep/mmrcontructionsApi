@@ -358,7 +358,7 @@ async function createUserWithUniqueMemberId(db, pending) {
         ${pending.password_hash}, ${pending.sponsor_user_id || null}, ${memberId},
         ${initialAccountStatus}, TRUE, NOW(), TRUE,
         ${referredByUserId}, ${referredBySource}, ${referredBySetAt},
-        'Pending', FALSE
+        '0', FALSE
       )
       RETURNING user_id, full_name, email, mobile_no, user_type, member_id, invitation_code, referred_by_user_id, referred_by_source`;
   } catch (err) {
@@ -375,7 +375,7 @@ async function createUserWithUniqueMemberId(db, pending) {
           ${pending.password_hash}, ${pending.sponsor_user_id || null}, ${memberId},
           ${initialAccountStatus}, TRUE, NOW(), TRUE,
           ${referredByUserId}, ${referredBySource}, ${referredBySetAt},
-          'Pending', FALSE
+          '0', FALSE
         )
         RETURNING user_id, full_name, email, mobile_no, user_type, member_id, referred_by_user_id, referred_by_source`;
     } else {

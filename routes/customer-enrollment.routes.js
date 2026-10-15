@@ -164,8 +164,10 @@ async function ensureSchema() {
     try {
       await sql`ALTER TABLE customer_enrollment_submissions ADD COLUMN IF NOT EXISTS religion VARCHAR(50)`;
       await sql`ALTER TABLE customer_enrollment_submissions ADD COLUMN IF NOT EXISTS is_final_submitted BOOLEAN DEFAULT FALSE`;
-      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS enrollment_status VARCHAR(20) DEFAULT 'Pending'`;
-      await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS enrollment_status VARCHAR(20) DEFAULT 'Pending'`;
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS enrollment_status VARCHAR(20) DEFAULT '0'`;
+      await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS enrollment_status VARCHAR(20) DEFAULT '0'`;
+      await sql`ALTER TABLE users ALTER COLUMN enrollment_status SET DEFAULT '0'`.catch(() => {});
+      await sql`ALTER TABLE investor_users ALTER COLUMN enrollment_status SET DEFAULT '0'`.catch(() => {});
       await sql`ALTER TABLE associate_enrollment ADD COLUMN IF NOT EXISTS user_id INTEGER`;
       await sql`ALTER TABLE associate_enrollment ADD COLUMN IF NOT EXISTS is_final_submitted BOOLEAN DEFAULT FALSE`;
     } catch (colErr) {
@@ -462,7 +464,7 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
               THEN CONCAT('MMR-CUS-', LPAD(user_id::text, 5, '0'))
               ELSE member_id
             END,
-            enrollment_status = COALESCE(enrollment_status, 'Pending'),
+            enrollment_status = ${Boolean(b.isFinalSubmitted || b.is_final_submitted) ? 'Completed' : COALESCE(enrollment_status, 'Pending')},
             gender = COALESCE(${b.gender || null}, gender),
             date_of_birth = COALESCE(${dobVal || null}, date_of_birth),
             pan_number = COALESCE(${b.pan || null}, pan_number),
@@ -643,15 +645,16 @@ router.get("/admin/customer-enrollments", authAdmin, async (req, res) => {
           ces.verified_by,
           COALESCE(
             CASE 
+              WHEN ces.is_final_submitted = TRUE THEN 'Completed'
+              WHEN ces.id IS NOT NULL THEN 'Submitted'
               WHEN LOWER(COALESCE(ces.application_status, '')) IN ('approved', 'completed') THEN 'Completed'
               WHEN LOWER(COALESCE(ces.application_status, '')) IN ('rejected') THEN 'Rejected'
-              WHEN LOWER(COALESCE(ces.application_status, '')) IN ('pending', 'under_review', 'submitted') THEN 'Pending'
               ELSE NULL
             END,
             CASE 
               WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
               WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
-              ELSE 'Pending'
+              ELSE '0'
             END
           ) as enrollment_status
         FROM users u
@@ -707,15 +710,16 @@ router.get("/admin/customer-enrollments", authAdmin, async (req, res) => {
           ces.verified_by,
           COALESCE(
             CASE 
+              WHEN ces.is_final_submitted = TRUE THEN 'Completed'
+              WHEN ces.id IS NOT NULL THEN 'Submitted'
               WHEN LOWER(COALESCE(ces.application_status, '')) IN ('approved', 'completed') THEN 'Completed'
               WHEN LOWER(COALESCE(ces.application_status, '')) IN ('rejected') THEN 'Rejected'
-              WHEN LOWER(COALESCE(ces.application_status, '')) IN ('pending', 'under_review', 'submitted') THEN 'Pending'
               ELSE NULL
             END,
             CASE 
               WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
               WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
-              ELSE 'Pending'
+              ELSE '0'
             END
           ) as enrollment_status
         FROM users u

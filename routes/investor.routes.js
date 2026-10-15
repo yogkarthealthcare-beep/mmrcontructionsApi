@@ -469,12 +469,12 @@ router.post(["/investor/verify-otp", "/investor/auth/verify-otp"], async (req, r
 
     const [newInvestor] = await sql`
       INSERT INTO investor_users (
-        member_id, full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
+        member_id, full_name, mobile_number, email, password_hash, status, is_verified, enrollment_status, created_at, updated_at
       ) VALUES (
         ${memberId}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email}, ${pending.password_hash},
-        'active', true, NOW(), NOW()
+        'active', true, '0', NOW(), NOW()
       )
-      RETURNING id, member_id, full_name, email, mobile_number, status, is_verified, created_at
+      RETURNING id, member_id, full_name, email, mobile_number, status, is_verified, enrollment_status, created_at
     `;
 
     await sql`DELETE FROM pending_registrations WHERE email = ${cleanEmail}`;
@@ -668,8 +668,22 @@ router.get("/investor/dashboard", authInvestor, async (req, res) => {
     const investorId = req.investor.id;
 
     const [user] = await sql`
-      SELECT id, full_name, email, mobile_number, available_balance, total_investment, total_deposits, total_withdrawals, status, is_verified, profile_picture_url, created_at
-      FROM investor_users WHERE id = ${investorId}
+      SELECT iu.id, iu.full_name, iu.email, iu.mobile_number, iu.available_balance, iu.total_investment, iu.total_deposits, iu.total_withdrawals, iu.status,
+             CASE 
+               WHEN ie.id IS NOT NULL AND ie.is_final_submitted = TRUE AND LOWER(COALESCE(ie.app_status, '')) = 'approved' THEN 'Completed' 
+               WHEN ie.id IS NOT NULL THEN 'Submitted' 
+               ELSE '0' 
+             END AS enrollment_status,
+             CASE WHEN ie.id IS NOT NULL AND ie.is_final_submitted = TRUE AND LOWER(COALESCE(ie.app_status, '')) = 'approved' THEN TRUE ELSE FALSE END AS is_verified,
+             iu.profile_picture_url, iu.created_at
+      FROM investor_users iu
+      LEFT JOIN LATERAL (
+        SELECT id, app_status, is_final_submitted
+        FROM investor_enrollments
+        WHERE investor_id = iu.id
+        ORDER BY created_at DESC LIMIT 1
+      ) ie ON true
+      WHERE iu.id = ${investorId}
     `;
 
     if (!user) return err(res, "Investor user not found.", 44);
@@ -707,11 +721,25 @@ router.get("/investor/dashboard", authInvestor, async (req, res) => {
 router.get("/investor/profile", authInvestor, async (req, res) => {
   try {
     const [user] = await sql`
-      SELECT id, full_name, mobile_number, email, address, city, state, country, pincode,
-             pan_number, aadhaar_number, bank_name, account_number, ifsc_code, nominee_name,
-             available_balance, total_investment, total_deposits, total_withdrawals,
-             status, is_verified, profile_picture_url, created_at, updated_at
-      FROM investor_users WHERE id = ${req.investor.id}
+      SELECT iu.id, iu.full_name, iu.mobile_number, iu.email, iu.address, iu.city, iu.state, iu.country, iu.pincode,
+             iu.pan_number, iu.aadhaar_number, iu.bank_name, iu.account_number, iu.ifsc_code, iu.nominee_name,
+             iu.available_balance, iu.total_investment, iu.total_deposits, iu.total_withdrawals,
+             iu.status,
+             CASE 
+               WHEN ie.id IS NOT NULL AND ie.is_final_submitted = TRUE AND LOWER(COALESCE(ie.app_status, '')) = 'approved' THEN 'Completed' 
+               WHEN ie.id IS NOT NULL THEN 'Submitted' 
+               ELSE '0' 
+             END AS enrollment_status,
+             CASE WHEN ie.id IS NOT NULL AND ie.is_final_submitted = TRUE AND LOWER(COALESCE(ie.app_status, '')) = 'approved' THEN TRUE ELSE FALSE END AS is_verified,
+             iu.profile_picture_url, iu.created_at, iu.updated_at
+      FROM investor_users iu
+      LEFT JOIN LATERAL (
+        SELECT id, app_status, is_final_submitted
+        FROM investor_enrollments
+        WHERE investor_id = iu.id
+        ORDER BY created_at DESC LIMIT 1
+      ) ie ON true
+      WHERE iu.id = ${req.investor.id}
     `;
     if (!user) return err(res, "Investor not found.", 404);
     return ok(res, user);
@@ -1236,18 +1264,35 @@ router.get("/admin/investors-portal", authAdmin, async (req, res) => {
     const limitNum = Math.max(1, Math.min(1000, parseInt(limit, 10) || 20));
     const offset = (pageNum - 1) * limitNum;
 
-    let query = sql`SELECT id, full_name, mobile_number, email, city, state, pan_number, bank_name, account_number, ifsc_code, available_balance, total_investment, total_deposits, total_withdrawals, status, is_verified, COALESCE(enrollment_status, 'Pending') AS enrollment_status, profile_picture_url, COALESCE(sponsor_invite_code, 'MMR00001') AS sponsor_invite_code, created_at FROM investor_users WHERE deleted_at IS NULL`;
+    let query = sql`
+      SELECT iu.id, iu.full_name, iu.mobile_number, iu.email, iu.city, iu.state, iu.pan_number, iu.bank_name, iu.account_number, iu.ifsc_code,
+             iu.available_balance, iu.total_investment, iu.total_deposits, iu.total_withdrawals, iu.status,
+             CASE WHEN ie.id IS NOT NULL AND ie.is_final_submitted = TRUE AND LOWER(COALESCE(ie.app_status, '')) = 'approved' THEN TRUE ELSE FALSE END AS is_verified,
+             CASE 
+               WHEN ie.id IS NOT NULL AND ie.is_final_submitted = TRUE AND LOWER(COALESCE(ie.app_status, '')) = 'approved' THEN 'Completed' 
+               WHEN ie.id IS NOT NULL THEN 'Submitted' 
+               ELSE '0' 
+             END AS enrollment_status,
+             iu.profile_picture_url, COALESCE(iu.sponsor_invite_code, 'MMR00001') AS sponsor_invite_code, iu.created_at
+      FROM investor_users iu
+      LEFT JOIN LATERAL (
+        SELECT id, app_status, is_final_submitted
+        FROM investor_enrollments
+        WHERE investor_id = iu.id
+        ORDER BY created_at DESC LIMIT 1
+      ) ie ON true
+      WHERE iu.deleted_at IS NULL`;
 
     if (search) {
       const s = `%${search.trim()}%`;
-      query = sql`${query} AND (full_name ILIKE ${s} OR email ILIKE ${s} OR mobile_number ILIKE ${s} OR pan_number ILIKE ${s} OR sponsor_invite_code ILIKE ${s})`;
+      query = sql`${query} AND (iu.full_name ILIKE ${s} OR iu.email ILIKE ${s} OR iu.mobile_number ILIKE ${s} OR iu.pan_number ILIKE ${s} OR iu.sponsor_invite_code ILIKE ${s})`;
     }
     if (status && status !== "all") {
-      query = sql`${query} AND status = ${status}`;
+      query = sql`${query} AND iu.status = ${status}`;
     }
 
     const [{ count }] = await sql`SELECT COUNT(*) FROM (${query}) AS count_query`;
-    const rows = await sql`${query} ORDER BY created_at DESC LIMIT ${limitNum} OFFSET ${offset}`;
+    const rows = await sql`${query} ORDER BY iu.created_at DESC LIMIT ${limitNum} OFFSET ${offset}`;
 
     return ok(res, {
       items: rows,
@@ -1900,19 +1945,13 @@ router.get(["/admin/investor-enrollment", "/admin/investor-enrollments"], authAd
           e.project_name,
           e.app_status,
           e.created_at as submitted_at,
-          COALESCE(
-            CASE 
-              WHEN LOWER(COALESCE(e.app_status, '')) IN ('approved', 'completed') THEN 'Completed'
-              WHEN LOWER(COALESCE(e.app_status, '')) IN ('rejected') THEN 'Rejected'
-              WHEN LOWER(COALESCE(e.app_status, '')) IN ('pending', 'under_review', 'submitted') THEN 'Pending'
-              ELSE NULL
-            END,
-            CASE 
-              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
-              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
-              ELSE 'Pending'
-            END
-          ) as enrollment_status
+          CASE 
+            WHEN e.id IS NOT NULL AND e.is_final_submitted = TRUE AND LOWER(COALESCE(e.app_status, '')) = 'approved' THEN 'Completed'
+            WHEN e.id IS NOT NULL AND LOWER(COALESCE(e.app_status, '')) IN ('rejected') THEN 'Rejected'
+            WHEN e.id IS NOT NULL THEN 'Pending'
+            ELSE '0'
+          END as enrollment_status,
+          CASE WHEN e.id IS NOT NULL AND e.is_final_submitted = TRUE AND LOWER(COALESCE(e.app_status, '')) = 'approved' THEN TRUE ELSE FALSE END AS is_verified
         FROM investor_users u
         LEFT JOIN investor_enrollments e ON u.id = e.investor_id
         WHERE u.deleted_at IS NULL
@@ -1942,19 +1981,13 @@ router.get(["/admin/investor-enrollment", "/admin/investor-enrollments"], authAd
           e.project_name,
           e.app_status,
           e.created_at as submitted_at,
-          COALESCE(
-            CASE 
-              WHEN LOWER(COALESCE(e.app_status, '')) IN ('approved', 'completed') THEN 'Completed'
-              WHEN LOWER(COALESCE(e.app_status, '')) IN ('rejected') THEN 'Rejected'
-              WHEN LOWER(COALESCE(e.app_status, '')) IN ('pending', 'under_review', 'submitted') THEN 'Pending'
-              ELSE NULL
-            END,
-            CASE 
-              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
-              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
-              ELSE 'Pending'
-            END
-          ) as enrollment_status
+          CASE 
+            WHEN e.id IS NOT NULL AND e.is_final_submitted = TRUE AND LOWER(COALESCE(e.app_status, '')) = 'approved' THEN 'Completed'
+            WHEN e.id IS NOT NULL AND LOWER(COALESCE(e.app_status, '')) IN ('rejected') THEN 'Rejected'
+            WHEN e.id IS NOT NULL THEN 'Pending'
+            ELSE '0'
+          END as enrollment_status,
+          CASE WHEN e.id IS NOT NULL AND e.is_final_submitted = TRUE AND LOWER(COALESCE(e.app_status, '')) = 'approved' THEN TRUE ELSE FALSE END AS is_verified
         FROM investor_users u
         LEFT JOIN investor_enrollments e ON u.id = e.investor_id
         WHERE u.deleted_at IS NULL

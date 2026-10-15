@@ -202,7 +202,7 @@ router.post('/auth/register', async (req, res) => {
       ) VALUES (
         ${full_name.trim()}, ${email.toLowerCase()}, ${mobile_no || null},
         ${password_hash}, ${user_type || 'Customer'}, TRUE, 'Pending',
-        'Pending', FALSE
+        '0', FALSE
       ) RETURNING id, full_name, email, user_type`;
 
     // Clean up OTP record
@@ -221,27 +221,31 @@ async function resolveEnrollmentStatus(u, userType) {
     if (rawType.includes('team member') || rawType === 'teammember') return 'completed';
 
     const raw = String(u.enrollment_status || '').toLowerCase();
-    if (raw === 'completed' || raw === 'approved') return 'completed';
+    if (raw === '0' || raw === 'not_enrolled') return '0';
     if (raw === 'rejected') return 'rejected';
 
     if (userType === 'Customer') {
       const [sub] = await sql`
-        SELECT id, application_status FROM customer_enrollment_submissions 
+        SELECT id, is_final_submitted, application_status FROM customer_enrollment_submissions 
         WHERE user_id = ${u.user_id} 
            OR (mobile_1 IS NOT NULL AND mobile_1 = ${u.mobile_no})
+        ORDER BY created_at DESC
         LIMIT 1
       `;
-      if (sub && ['completed', 'approved'].includes(String(sub.application_status || '').toLowerCase())) {
+      if (sub && sub.is_final_submitted) {
         return 'completed';
       }
-      if (sub && ['rejected'].includes(String(sub.application_status || '').toLowerCase())) {
-        return 'rejected';
+      if (sub) {
+        return 'submitted';
       }
+      return '0';
     } else if (userType === 'Associate') {
       const [sub] = await sql`
         SELECT id, status FROM associate_enrollment 
-        WHERE id = ${u.member_id || ''} 
+        WHERE (user_id IS NOT NULL AND user_id = ${u.user_id || 0})
+           OR id = ${u.member_id || ''} 
            OR (contact_no_1 IS NOT NULL AND contact_no_1 = ${u.mobile_no})
+        ORDER BY (user_id = ${u.user_id || 0}) DESC, created_at DESC
         LIMIT 1
       `;
       if (sub && ['completed', 'approved'].includes(String(sub.status || '').toLowerCase())) {
@@ -250,26 +254,34 @@ async function resolveEnrollmentStatus(u, userType) {
       if (sub && ['rejected'].includes(String(sub.status || '').toLowerCase())) {
         return 'rejected';
       }
+      if (sub) {
+        return 'submitted';
+      }
+      return '0';
     } else if (userType === 'Investor') {
       const invId = u.id || u.user_id;
       const [sub] = await sql`
-        SELECT id, status, enrollment_status FROM investor_enrollments 
+        SELECT id, app_status, is_final_submitted FROM investor_enrollments 
         WHERE investor_id = ${invId} 
            OR (mobile IS NOT NULL AND mobile = ${u.mobile_number || u.mobile_no})
+        ORDER BY created_at DESC
         LIMIT 1
       `;
-      const s = String(sub?.enrollment_status || sub?.status || '').toLowerCase();
-      if (sub && ['completed', 'approved'].includes(s)) {
+      if (sub && ['completed', 'approved'].includes(String(sub.app_status || '').toLowerCase())) {
         return 'completed';
       }
-      if (sub && ['rejected'].includes(s)) {
+      if (sub && ['rejected'].includes(String(sub.app_status || '').toLowerCase())) {
         return 'rejected';
       }
+      if (sub) {
+        return 'submitted';
+      }
+      return '0';
     }
-    return 'pending';
+    return raw === 'completed' || raw === 'approved' ? 'completed' : '0';
   } catch (e) {
     console.error('[resolveEnrollmentStatus Error]', e);
-    return 'pending';
+    return '0';
   }
 }
 

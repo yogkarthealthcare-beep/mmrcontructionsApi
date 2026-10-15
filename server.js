@@ -4621,11 +4621,13 @@ app.post("/api/auth/register-quick", async (req, res) => {
           INSERT INTO users (
             member_id, user_type, full_name, mobile_no, email, password_hash,
             sponsor_user_id, account_status, email_verified, is_otp_verified,
+            enrollment_status, is_verified,
             registered_at, updated_at,
             referred_by_user_id, referred_by_source, referred_by_set_at
           ) VALUES (
             ${memberId}, ${user_type}, ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
             ${sponsorUserId}, 'Active', true, true,
+            '0', false,
             NOW(), NOW(),
             ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
           )
@@ -4825,11 +4827,13 @@ app.post("/api/auth/verify-email-otp", async (req, res) => {
         user_type, full_name, mobile_no, email,
         password_hash, sponsor_user_id, member_id,
         account_status, email_verified, email_verified_at, is_otp_verified,
+        enrollment_status, is_verified,
         referred_by_user_id, referred_by_source, referred_by_set_at
       ) VALUES (
         ${pending.user_type}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email},
         ${pending.password_hash}, ${pending.sponsor_user_id}, ${memberId},
         ${pending.user_type === 'Customer' ? 'Active' : 'Pending'}, TRUE, NOW(), TRUE,
+        '0', false,
         ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
       )
       RETURNING user_id, full_name, email, user_type, member_id, invitation_code`;
@@ -6059,8 +6063,27 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
              COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_number), ''), NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(ces.aadhar_no), '')) AS aadhar_number,
              COALESCE(u.account_status, 'Active') AS account_status,
              u.email_verified, u.is_otp_verified,
-             COALESCE(u.enrollment_status, aen.app_status, CASE WHEN tm.id IS NOT NULL THEN 'Completed' WHEN ces.application_status = 'Approved' THEN 'Completed' WHEN ces.id IS NOT NULL THEN 'Submitted' ELSE 'Pending' END) AS enrollment_status,
-             CASE WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('completed', 'verified', 'approved') OR aen.is_verified = TRUE OR LOWER(COALESCE(aen.app_status, '')) = 'approved' OR tm.id IS NOT NULL OR ces.application_status = 'Approved' THEN TRUE ELSE FALSE END AS is_verified,
+             COALESCE(
+               CASE 
+                 WHEN LOWER(u.user_type::text) = 'customer' THEN 
+                   CASE WHEN ces.id IS NOT NULL AND ces.is_final_submitted = TRUE THEN 'Completed' WHEN ces.id IS NOT NULL THEN 'Submitted' ELSE COALESCE(NULLIF(u.enrollment_status, 'Pending'), '0') END
+                 WHEN LOWER(u.user_type::text) = 'associate' THEN 
+                   CASE WHEN aen.id IS NOT NULL AND LOWER(COALESCE(aen.status, '')) = 'approved' THEN 'Completed' WHEN aen.id IS NOT NULL THEN 'Submitted' ELSE COALESCE(NULLIF(u.enrollment_status, 'Pending'), '0') END
+                 WHEN LOWER(u.user_type::text) = 'team member' THEN 
+                   CASE WHEN tm.id IS NOT NULL AND LOWER(COALESCE(tm.status, '')) IN ('approved', 'active') THEN 'Completed' ELSE '0' END
+                 ELSE u.enrollment_status
+               END,
+               '0'
+             ) AS enrollment_status,
+             CASE 
+               WHEN LOWER(u.user_type::text) = 'customer' THEN
+                 (ces.id IS NOT NULL AND ces.is_final_submitted = TRUE)
+               WHEN LOWER(u.user_type::text) = 'associate' THEN
+                 (aen.id IS NOT NULL AND LOWER(COALESCE(aen.status, '')) = 'approved')
+               WHEN LOWER(u.user_type::text) = 'team member' THEN
+                 (tm.id IS NOT NULL AND LOWER(COALESCE(tm.status, '')) IN ('approved', 'active'))
+               ELSE FALSE
+             END AS is_verified,
              COALESCE(k.status, CASE WHEN aen.is_verified = TRUE OR LOWER(COALESCE(aen.app_status, '')) = 'approved' THEN 'Approved' WHEN tm.id IS NOT NULL THEN 'Approved' WHEN ces.application_status = 'Approved' THEN 'Approved' WHEN aen.id IS NOT NULL THEN 'Submitted' WHEN ces.id IS NOT NULL THEN 'Submitted' ELSE 'Not Submitted' END) AS kyc_status,
              k.admin_remarks AS kyc_remarks,
              u.invitation_code, u.registered_at,
@@ -6142,11 +6165,11 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
                permanent_address, permanent_city, permanent_state_pin,
                co_applicant_name, co_relation, co_mobile, co_email,
                acc_holder_name, acc_bank_branch, drawn_bank_branch, acc_number, ifsc_code,
-               application_status
+               is_final_submitted, application_status
         FROM customer_enrollment_submissions
         WHERE user_id = u.user_id 
            OR (u.mobile_no IS NOT NULL AND RIGHT(regexp_replace(mobile_1, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(u.mobile_no, '\\D', '', 'g'), 10))
-        ORDER BY (user_id = u.user_id) DESC, (application_status = 'Approved') DESC, created_at DESC
+        ORDER BY (user_id = u.user_id) DESC, (is_final_submitted = TRUE) DESC, (application_status = 'Approved') DESC, created_at DESC
         LIMIT 1
       ) ces ON TRUE
       LEFT JOIN LATERAL (
@@ -9482,8 +9505,12 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
              u.user_type::text AS user_type,
              u.full_name, u.mobile_no,
              u.email, u.account_status::text AS account_status, u.registered_at, u.updated_at,
-             COALESCE(u.enrollment_status, 'Pending') AS enrollment_status,
-             CASE WHEN LOWER(COALESCE(ces.application_status, u.enrollment_status, '')) IN ('completed', 'approved') THEN TRUE ELSE FALSE END AS is_verified,
+             CASE 
+                WHEN ces.id IS NOT NULL AND ces.is_final_submitted = TRUE THEN 'Completed' 
+                WHEN ces.id IS NOT NULL THEN 'Submitted' 
+                ELSE COALESCE(NULLIF(u.enrollment_status, '0'), '0') 
+              END AS enrollment_status,
+             CASE WHEN ces.id IS NOT NULL AND ces.is_final_submitted = TRUE THEN TRUE ELSE FALSE END AS is_verified,
              COALESCE(pa.address_line1, ces.permanent_address, ces.present_address) AS address,
              COALESCE(pa.city, ces.permanent_city, ces.present_city) AS city,
              COALESCE(pa.state, ces.permanent_state_pin, ces.present_state_pin) AS state,
@@ -9494,9 +9521,9 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
       LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
       LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
       LEFT JOIN (
-        SELECT DISTINCT ON (user_id) user_id, permanent_address, present_address, permanent_city, present_city, permanent_state_pin, present_state_pin
+        SELECT DISTINCT ON (user_id) id, user_id, is_final_submitted, permanent_address, present_address, permanent_city, present_city, permanent_state_pin, present_state_pin
         FROM customer_enrollment_submissions
-        ORDER BY user_id, created_at DESC
+        ORDER BY user_id, (is_final_submitted = TRUE) DESC, created_at DESC
       ) ces ON ces.user_id = u.user_id
       LEFT JOIN (
         SELECT user_id, COUNT(*) AS doc_count
@@ -13110,19 +13137,12 @@ app.get("/api/admin/associates/:id",
       try {
         const [p] = await sql`
           SELECT u.*, sp.full_name AS sponsor_name, sp.member_id AS sponsor_member_id,
-                 COALESCE(
-                   CASE 
-                     WHEN LOWER(COALESCE(ae.status, '')) IN ('approved', 'completed') THEN 'Completed'
-                     WHEN LOWER(COALESCE(ae.status, '')) IN ('rejected') THEN 'Rejected'
-                     WHEN LOWER(COALESCE(ae.status, '')) IN ('pending', 'submitted') THEN 'Pending'
-                     ELSE NULL
-                   END,
-                   CASE 
-                     WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
-                     WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
-                     ELSE 'Pending'
-                   END
-                 ) AS enrollment_status,
+                 CASE 
+                    WHEN ae.id IS NOT NULL AND LOWER(COALESCE(ae.status, '')) IN ('approved', 'completed') THEN 'Completed'
+                    WHEN ae.id IS NOT NULL AND LOWER(COALESCE(ae.status, '')) IN ('rejected') THEN 'Rejected'
+                    WHEN ae.id IS NOT NULL THEN 'Submitted'
+                    ELSE '0'
+                  END AS enrollment_status,
                  CASE 
                     WHEN COALESCE(u.is_verified, FALSE) = TRUE THEN TRUE
                     WHEN ae.id IS NOT NULL AND LOWER(COALESCE(ae.status, '')) IN ('completed', 'approved') THEN TRUE
@@ -13137,7 +13157,9 @@ app.get("/api/admin/associates/:id",
           LEFT JOIN LATERAL (
             SELECT ae_sub.id, ae_sub.contact_no_1, ae_sub.email, ae_sub.status
             FROM associate_enrollment ae_sub
-            WHERE (u.mobile_no IS NOT NULL AND ae_sub.contact_no_1 = u.mobile_no)
+            WHERE (ae_sub.user_id = u.user_id)
+                OR (u.member_id IS NOT NULL AND (ae_sub.member_id = u.member_id OR ae_sub.id = u.member_id))
+                OR (u.mobile_no IS NOT NULL AND ae_sub.contact_no_1 = u.mobile_no)
                OR (u.email IS NOT NULL AND LOWER(ae_sub.email) = LOWER(u.email))
                OR (ae_sub.id = u.member_id)
             ORDER BY ae_sub.created_at DESC NULLS LAST
@@ -13354,23 +13376,15 @@ app.get("/api/admin/associates",
           SELECT u.user_id, u.member_id, u.full_name, u.email, u.mobile_no, 
                  COALESCE(u.account_status, 'Active') AS account_status,
                  u.invitation_code, u.registered_at, sp.full_name AS sponsor_name,
-                 COALESCE(
-                   CASE 
-                     WHEN LOWER(COALESCE(ae.status, '')) IN ('approved', 'completed') THEN 'Completed'
-                     WHEN LOWER(COALESCE(ae.status, '')) IN ('rejected') THEN 'Rejected'
-                     WHEN LOWER(COALESCE(ae.status, '')) IN ('pending', 'submitted') THEN 'Pending'
-                     ELSE NULL
-                   END,
-                   CASE 
-                     WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
-                     WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
-                     ELSE 'Pending'
-                   END
-                 ) AS enrollment_status,
                  CASE 
-                    WHEN COALESCE(u.is_verified, FALSE) = TRUE THEN TRUE
+                    WHEN ae.id IS NOT NULL AND LOWER(COALESCE(ae.status, '')) IN ('approved', 'completed') THEN 'Completed'
+                    WHEN ae.id IS NOT NULL AND LOWER(COALESCE(ae.status, '')) IN ('rejected') THEN 'Rejected'
+                    WHEN ae.id IS NOT NULL THEN 'Submitted'
+                    ELSE '0'
+                  END AS enrollment_status,
+                 CASE 
                     WHEN ae.id IS NOT NULL AND LOWER(COALESCE(ae.status, '')) IN ('completed', 'approved') THEN TRUE
-                   ELSE FALSE
+                    ELSE FALSE
                  END AS is_verified,
                  ae.id AS associate_enrollment_id,
                  COALESCE(r.rank_name, 'Associate') AS rank_name,
@@ -13666,7 +13680,8 @@ app.get("/api/admin/team-members",
                    COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile, 
                    COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
                    COALESCE(u.account_status::text, tm.status::text, 'Active') AS account_status,
-                   COALESCE(u.is_active, true) AS is_user_active
+                   COALESCE(u.is_active, true) AS is_user_active,
+                   CASE WHEN LOWER(COALESCE(tm.status, '')) IN ('approved', 'active') THEN TRUE ELSE FALSE END AS is_verified
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
             LEFT JOIN users u ON u.user_id = tm.user_id
@@ -13708,7 +13723,8 @@ app.get("/api/admin/team-members",
               COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile,
               COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
               COALESCE(u.account_status::text, 'Active') AS account_status,
-              COALESCE(u.is_active, true) AS is_user_active
+              COALESCE(u.is_active, true) AS is_user_active,
+              FALSE AS is_verified
             FROM users u
             LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
             WHERE (
