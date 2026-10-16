@@ -464,7 +464,10 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
               THEN CONCAT('MMR-CUS-', LPAD(user_id::text, 5, '0'))
               ELSE member_id
             END,
-            enrollment_status = ${Boolean(b.isFinalSubmitted || b.is_final_submitted) ? 'Completed' : COALESCE(enrollment_status, 'Pending')},
+            enrollment_status = CASE 
+              WHEN ${Boolean(b.isFinalSubmitted || b.is_final_submitted)} THEN 'Completed'
+              ELSE COALESCE(enrollment_status, 'Pending')
+            END,
             gender = COALESCE(${b.gender || null}, gender),
             date_of_birth = COALESCE(${dobVal || null}, date_of_birth),
             pan_number = COALESCE(${b.pan || null}, pan_number),
