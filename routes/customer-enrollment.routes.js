@@ -561,6 +561,125 @@ function validateCustomerEnrollmentForApproval(record, nominees = []) {
   return missing;
 }
 
+// GET /api/customer-enrollment/sponsor-lookup/:code (Lookup sponsor by ID, code, or mobile)
+router.get("/customer-enrollment/sponsor-lookup/:code", authUser, async (req, res) => {
+  try {
+    const rawCode = String(req.params.code || "").trim();
+    if (!rawCode) return err(res, "Sponsor code is required", 400);
+
+    const cleanCode = rawCode.toUpperCase().replace(/\s+/g, '');
+    const cleanMobile = rawCode.replace(/\D/g, "");
+    const isMobile = cleanMobile.length === 10;
+    const isNum = /^\d+$/.test(rawCode);
+    const numId = isNum ? Number(rawCode) : -1;
+
+    // Search users first (Associate, Customer, Team Member)
+    const [user] = await sql`
+      SELECT u.user_id,
+             COALESCE(
+               NULLIF(TRIM(tm.team_member_uid), ''),
+               NULLIF(TRIM(u.member_id), ''),
+               NULLIF(TRIM(u.invitation_code), ''),
+               NULLIF(TRIM(aen.application_no), ''),
+               NULLIF(TRIM(ces.application_no), ''),
+               CASE 
+                 WHEN tm.id IS NOT NULL THEN ('MMR-TM-' || LPAD(COALESCE(tm.slot_number, u.user_id)::text, 4, '0'))
+                 WHEN LOWER(u.user_type::TEXT) = 'associate' THEN ('MMR-ASC-' || LPAD(u.user_id::text, 5, '0'))
+                 WHEN LOWER(u.user_type::TEXT) = 'customer' THEN ('MMR-CUS-' || LPAD(u.user_id::text, 5, '0'))
+                 ELSE ('MMR-' || LPAD(u.user_id::text, 5, '0'))
+               END
+             ) AS member_id,
+             CASE
+               WHEN tm.id IS NOT NULL THEN 'Team Member'
+               ELSE COALESCE(NULLIF(TRIM(u.user_type::text), ''), 'Associate')
+             END AS user_type,
+             COALESCE(NULLIF(TRIM(u.full_name), ''), NULLIF(TRIM(aen.full_name), ''), NULLIF(TRIM(tm.full_name), ''), NULLIF(TRIM(ces.applicant_name), '')) AS full_name,
+             COALESCE(NULLIF(TRIM(u.mobile_no), ''), NULLIF(TRIM(aen.contact_no_1), ''), NULLIF(TRIM(tm.mobile_no), ''), NULLIF(TRIM(ces.mobile_1), '')) AS mobile_no
+      FROM users u
+      LEFT JOIN LATERAL (
+        SELECT id, team_member_uid, slot_number, full_name, mobile_no
+        FROM team_members
+        WHERE user_id = u.user_id AND LOWER(status) IN ('approved', 'active')
+        ORDER BY created_at DESC LIMIT 1
+      ) tm ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT id, member_id, application_no, full_name, contact_no_1
+        FROM associate_enrollment
+        WHERE user_id = u.user_id
+        ORDER BY created_at DESC LIMIT 1
+      ) aen ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT id, application_no, applicant_name, mobile_1
+        FROM customer_enrollment_submissions
+        WHERE user_id = u.user_id
+        ORDER BY created_at DESC LIMIT 1
+      ) ces ON TRUE
+      WHERE UPPER(COALESCE(u.member_id, '')) = ${cleanCode}
+         OR UPPER(COALESCE(u.invitation_code, '')) = ${cleanCode}
+         OR UPPER(COALESCE(tm.team_member_uid, '')) = ${cleanCode}
+         OR UPPER(COALESCE(aen.application_no, '')) = ${cleanCode}
+         OR UPPER(COALESCE(aen.member_id, '')) = ${cleanCode}
+         OR UPPER(COALESCE(ces.application_no, '')) = ${cleanCode}
+         OR (${isMobile} AND (
+              RIGHT(regexp_replace(COALESCE(u.mobile_no, ''), '\\D', '', 'g'), 10) = ${cleanMobile}
+              OR RIGHT(regexp_replace(COALESCE(aen.contact_no_1, ''), '\\D', '', 'g'), 10) = ${cleanMobile}
+              OR RIGHT(regexp_replace(COALESCE(ces.mobile_1, ''), '\\D', '', 'g'), 10) = ${cleanMobile}
+            ))
+         OR (${numId > 0} AND u.user_id = ${numId})
+      ORDER BY (UPPER(COALESCE(u.member_id, '')) = ${cleanCode}) DESC, u.created_at DESC
+      LIMIT 1
+    `;
+
+    if (user && user.full_name) {
+      return ok(res, {
+        name: user.full_name,
+        id: user.member_id || cleanCode,
+        mobile: user.mobile_no || '',
+        user_type: user.user_type || 'Associate'
+      });
+    }
+
+    // Direct associate_enrollment lookup
+    const [aeRow] = await sql`
+      SELECT ae.id, ae.full_name, COALESCE(ae.member_id, ae.application_no) as member_id, ae.contact_no_1
+      FROM associate_enrollment ae
+      WHERE UPPER(COALESCE(ae.member_id, '')) = ${cleanCode}
+         OR UPPER(COALESCE(ae.application_no, '')) = ${cleanCode}
+         OR (${isMobile} AND RIGHT(regexp_replace(COALESCE(ae.contact_no_1, ''), '\\D', '', 'g'), 10) = ${cleanMobile})
+      ORDER BY ae.created_at DESC LIMIT 1
+    `;
+    if (aeRow && aeRow.full_name) {
+      return ok(res, {
+        name: aeRow.full_name,
+        id: aeRow.member_id || cleanCode,
+        mobile: aeRow.contact_no_1 || '',
+        user_type: 'Associate'
+      });
+    }
+
+    // Direct customer_enrollment_submissions lookup
+    const [cesRow] = await sql`
+      SELECT ces.applicant_name as full_name, ces.application_no as member_id, ces.mobile_1 as contact_no_1
+      FROM customer_enrollment_submissions ces
+      WHERE UPPER(COALESCE(ces.application_no, '')) = ${cleanCode}
+         OR (${isMobile} AND RIGHT(regexp_replace(COALESCE(ces.mobile_1, ''), '\\D', '', 'g'), 10) = ${cleanMobile})
+      ORDER BY ces.created_at DESC LIMIT 1
+    `;
+    if (cesRow && cesRow.full_name) {
+      return ok(res, {
+        name: cesRow.full_name,
+        id: cesRow.member_id || cleanCode,
+        mobile: cesRow.contact_no_1 || '',
+        user_type: 'Customer'
+      });
+    }
+
+    return err(res, "No sponsor record found for: " + rawCode, 404);
+  } catch (e) {
+    console.error("Sponsor lookup error:", e);
+    return err(res, "Failed to lookup sponsor: " + e.message);
+  }
+});
 // GET /api/customer-enrollment/me (Get for logged-in user)
 router.get("/customer-enrollment/me", authUser, async (req, res) => {
   try {

@@ -6087,10 +6087,48 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
              COALESCE(k.status, CASE WHEN aen.is_verified = TRUE OR LOWER(COALESCE(aen.app_status, '')) = 'approved' THEN 'Approved' WHEN tm.id IS NOT NULL THEN 'Approved' WHEN ces.application_status = 'Approved' THEN 'Approved' WHEN aen.id IS NOT NULL THEN 'Submitted' WHEN ces.id IS NOT NULL THEN 'Submitted' ELSE 'Not Submitted' END) AS kyc_status,
              k.admin_remarks AS kyc_remarks,
              u.invitation_code, u.registered_at,
-             COALESCE(u.sponsor_user_id, tm.associate_id) AS sponsor_user_id,
-             COALESCE(NULLIF(TRIM(aen.assoc_sponsor_name), ''), NULLIF(TRIM(tm.associate_name), ''), sp.full_name, 'Suraj Kumar Verma') AS sponsor_name,
-             COALESCE(NULLIF(TRIM(aen.assoc_sponsor_id), ''), sp.invitation_code, sp.member_id, ('MMR' || LPAD(COALESCE(tm.associate_id, 1)::text, 4, '0')), 'MMR0001') AS sponsor_id,
-             COALESCE(NULLIF(TRIM(aen.assoc_sponsor_mobile), ''), sp.mobile_no, '7071951011') AS sponsor_contact,
+              COALESCE(u.sponsor_user_id, u.referred_by_user_id, tm.associate_id, sp.user_id) AS sponsor_user_id,
+              COALESCE(
+                NULLIF(TRIM(ces.associate_name), ''),
+                NULLIF(TRIM(aen.assoc_sponsor_name), ''),
+                NULLIF(TRIM(tm.associate_name), ''),
+                NULLIF(TRIM(sp.full_name), ''),
+                sp_ces.applicant_name,
+                sp_ae.full_name,
+                sp_tm.full_name,
+                'Suraj Kumar Verma'
+              ) AS sponsor_name,
+              COALESCE(
+                NULLIF(TRIM(ces.associate_id), ''),
+                NULLIF(TRIM(aen.assoc_sponsor_id), ''),
+                NULLIF(TRIM(sp.invitation_code), ''),
+                NULLIF(TRIM(sp.member_id), ''),
+                sp_tm.team_member_uid,
+                sp_ae.application_no,
+                sp_ces.application_no,
+                CASE 
+                  WHEN sp.user_id IS NOT NULL AND LOWER(COALESCE(sp.user_type::TEXT, '')) = 'associate' THEN ('MMR-ASC-' || LPAD(sp.user_id::text, 5, '0'))
+                  WHEN sp.user_id IS NOT NULL AND LOWER(COALESCE(sp.user_type::TEXT, '')) = 'customer' THEN ('MMR-CUS-' || LPAD(sp.user_id::text, 5, '0'))
+                  WHEN sp.user_id IS NOT NULL AND LOWER(COALESCE(sp.user_type::TEXT, '')) = 'team member' THEN ('MMR-TM-' || LPAD(sp.user_id::text, 4, '0'))
+                  WHEN sp.user_id IS NOT NULL THEN ('MMR-' || LPAD(sp.user_id::text, 5, '0'))
+                  ELSE ('MMR' || LPAD(COALESCE(tm.associate_id, 1)::text, 4, '0'))
+                END,
+                'MMR0001'
+              ) AS sponsor_id,
+              COALESCE(
+                NULLIF(TRIM(ces.associate_mobile), ''),
+                NULLIF(TRIM(aen.assoc_sponsor_mobile), ''),
+                NULLIF(TRIM(sp.mobile_no), ''),
+                sp_ces.mobile_1,
+                sp_ae.contact_no_1,
+                sp_tm.mobile_no,
+                '7071951011'
+              ) AS sponsor_contact,
+              COALESCE(sp.user_type::text, 'Associate') AS sponsor_user_type,
+              ces.associate_name,
+              ces.associate_id,
+              ces.associate_mobile,
+              ces.associate_signature_name,
              COALESCE(pa.address_line1, aen.perm_address, tm.full_address, ces.permanent_address, ces.present_address) AS address,
              COALESCE(pa.address_line1, aen.perm_address, tm.full_address, ces.permanent_address, ces.present_address) AS address_line1,
              COALESCE(pa.city, aen.perm_city, ces.permanent_city, ces.present_city) AS city,
@@ -6154,7 +6192,35 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
         ORDER BY (ae.user_id = u.user_id) DESC, ae.created_at DESC
         LIMIT 1
       ) aen ON TRUE
-      LEFT JOIN users sp               ON (u.sponsor_user_id = sp.user_id OR tm.associate_id = sp.user_id)
+       LEFT JOIN LATERAL (
+         SELECT u_ref.user_id, u_ref.user_type, u_ref.member_id, u_ref.invitation_code, u_ref.full_name, u_ref.mobile_no
+         FROM users u_ref
+         WHERE u_ref.user_id = COALESCE(
+           u.sponsor_user_id,
+           u.referred_by_user_id,
+           (SELECT rr.sponsor_user_id FROM referral_registrations rr WHERE rr.referred_user_id = u.user_id ORDER BY rr.created_at DESC LIMIT 1),
+           tm.associate_id
+         )
+         LIMIT 1
+       ) sp ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT applicant_name, application_no, mobile_1
+         FROM customer_enrollment_submissions
+         WHERE user_id = sp.user_id
+         ORDER BY created_at DESC LIMIT 1
+       ) sp_ces ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT full_name, application_no, contact_no_1
+         FROM associate_enrollment
+         WHERE user_id = sp.user_id
+         ORDER BY created_at DESC LIMIT 1
+       ) sp_ae ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT full_name, team_member_uid, mobile_no
+         FROM team_members
+         WHERE user_id = sp.user_id
+         ORDER BY created_at DESC LIMIT 1
+       ) sp_tm ON TRUE
       LEFT JOIN user_addresses pa      ON u.user_id = pa.user_id AND pa.address_type = 'Permanent'
       LEFT JOIN user_bank_details b    ON u.user_id = b.user_id
       LEFT JOIN user_nominees n        ON u.user_id = n.user_id
@@ -6164,7 +6230,8 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
                pan_no, aadhar_no, mobile_1, mobile_2, email_1, present_address, present_city, present_state_pin,
                permanent_address, permanent_city, permanent_state_pin,
                co_applicant_name, co_relation, co_mobile, co_email,
-               acc_holder_name, acc_bank_branch, drawn_bank_branch, acc_number, ifsc_code,
+                acc_holder_name, acc_bank_branch, drawn_bank_branch, acc_number, ifsc_code,
+                associate_name, associate_id, associate_mobile, associate_signature_name,
                is_final_submitted, application_status
         FROM customer_enrollment_submissions
         WHERE user_id = u.user_id 

@@ -267,13 +267,13 @@ export async function generateCustomerPdf(id) {
         drawField(doc, "Account Number:", submission.acc_number, 40, y, 250, 110);
         drawField(doc, "IFSC Code:", submission.ifsc_code, 300, y, 255, 110);
         y += 35;
-        drawSectionTitle(doc, "6. Introducer / Associate Details", y);
+        drawSectionTitle(doc, "6. Sponsor / Associate Details", y);
         y += 25;
-        drawField(doc, "Associate Name:", submission.associate_name, 40, y, 250, 110);
-        drawField(doc, "Associate ID:", submission.associate_id, 300, y, 255, 110);
+        drawField(doc, "Sponsor / Associate:", submission.associate_name, 40, y, 250, 110);
+        drawField(doc, "Sponsor ID:", submission.associate_id, 300, y, 255, 110);
         y += 24;
-        drawField(doc, "Associate Mobile:", submission.associate_mobile, 40, y, 250, 110);
-        drawField(doc, "Associate Sign. Name:", submission.associate_signature_name, 300, y, 255, 110);
+        drawField(doc, "Mobile Number:", submission.associate_mobile, 40, y, 250, 110);
+        drawField(doc, "Signature Name:", submission.associate_signature_name, 300, y, 255, 110);
         drawFooter(doc, 3, totalPages);
         // ─────────────────────────────────────────────────────────────────
         // PAGE 4: Specimen Signatures, Declaration, and Office Use
