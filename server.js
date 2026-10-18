@@ -6931,11 +6931,11 @@ app.get("/api/sites/:id/map", async (req, res) => {
              p.base_price, p.down_payment, p.monthly_emi, p.emi_tenure_months,
              p.file_charge,
              CASE
-               WHEN b.booking_status IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status, '')) = 'sold' THEN 'Sold'
-               WHEN b.booking_status IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status, '')) = 'booked' THEN 'Booked'
+               WHEN b.booking_status IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status::text, '')) = 'sold' THEN 'Sold'
+               WHEN b.booking_status IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status::text, '')) = 'booked' THEN 'Booked'
                WHEN (b.booking_id IS NOT NULL AND b.booking_status NOT IN ('Cancelled', 'Rejected')) 
-                    OR LOWER(COALESCE(p.plot_status, '')) IN ('inprocess', 'processing', 'paymentpending', 'hold', 'reserved') THEN 'InProcess'
-               ELSE COALESCE(p.plot_status, 'Vacant')
+                    OR LOWER(COALESCE(p.plot_status::text, '')) IN ('inprocess', 'processing', 'paymentpending', 'hold', 'reserved') THEN 'InProcess'
+               ELSE COALESCE(p.plot_status::text, 'Vacant')
              END AS plot_status,
              p.coordinates_x, p.coordinates_y,
              d.size_label, COALESCE(pc.coordinates, '[]'::jsonb) AS polygon_coordinates,
@@ -6950,10 +6950,10 @@ app.get("/api/sites/:id/map", async (req, res) => {
                ELSE 'Pending'
              END AS payment_status,
              CASE
-               WHEN b.booking_status IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status, '')) = 'sold' THEN '#dc2626'
-               WHEN b.booking_status IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status, '')) = 'booked' THEN '#dc2626'
+               WHEN b.booking_status IN ('Confirmed', 'Sold') OR LOWER(COALESCE(p.plot_status::text, '')) = 'sold' THEN '#dc2626'
+               WHEN b.booking_status IN ('Booked', 'Approved', 'Submitted') OR LOWER(COALESCE(p.plot_status::text, '')) = 'booked' THEN '#dc2626'
                WHEN (b.booking_id IS NOT NULL AND b.booking_status NOT IN ('Cancelled', 'Rejected')) 
-                    OR LOWER(COALESCE(p.plot_status, '')) IN ('inprocess', 'processing', 'paymentpending', 'hold', 'reserved') THEN '#ec4899'
+                    OR LOWER(COALESCE(p.plot_status::text, '')) IN ('inprocess', 'processing', 'paymentpending', 'hold', 'reserved') THEN '#ec4899'
                ELSE '#22c55e'
              END AS status_color
       FROM plots p

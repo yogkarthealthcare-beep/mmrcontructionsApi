@@ -1729,7 +1729,7 @@ router.get("/admin/sites/:id/sales-map", adminAuth, async (req, res) => {
     if (!siteId) return fail(res, "Site ID is required.", 400);
 
     const [site] = await sql`
-      SELECT site_id, site_name, location, city, map_image_url, is_active
+      SELECT site_id, site_name, full_address AS location, city, map_image_url, COALESCE(is_booking_enabled, TRUE) AS is_active
       FROM sites
       WHERE site_id = ${siteId}`;
     if (!site) return fail(res, "Site not found.", 404);
