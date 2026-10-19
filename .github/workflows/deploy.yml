@@ -137,15 +137,27 @@ jobs:
             echo "🔍 Running idempotent admin table & superadmin user check..."
             node scripts/verify_or_create_admin_tables.js || echo "⚠️ Non-critical admin table script output"
 
+            echo "🔍 Diagnosing running processes on port 5000..."
+            ss -tlpn 'sport = :5000' 2>/dev/null || netstat -tlpn 2>/dev/null | grep 5000 || true
+            ps aux | grep -E "node|pm2" | grep -v grep || true
+
+            echo "🔄 Killing any stale node server processes..."
+            fuser -k 5000/tcp 2>/dev/null || true
+            pkill -f "node.*server.js" || true
+            sleep 2
+
             echo "🔄 Restarting PM2 application..."
+            pm2 delete mmr-api 2>/dev/null || true
             if [ -f "ecosystem.config.cjs" ]; then
-              pm2 restart ecosystem.config.cjs --update-env || pm2 restart mmr-api --update-env || pm2 start ecosystem.config.cjs
+              pm2 start ecosystem.config.cjs
             elif [ -f "ecosystem.config.js" ]; then
-              pm2 restart ecosystem.config.js --update-env || pm2 restart mmr-api --update-env || pm2 start ecosystem.config.js
-            elif pm2 describe mmr-api > /dev/null 2>&1; then
-              pm2 restart mmr-api --update-env
+              pm2 start ecosystem.config.js
             else
               pm2 start server.js --name mmr-api
+            fi
+
+            if id "ubuntu" >/dev/null 2>&1; then
+              su - ubuntu -c "pm2 restart all --update-env 2>/dev/null || true" || true
             fi
 
             pm2 save
