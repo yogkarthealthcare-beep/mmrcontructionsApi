@@ -159,6 +159,18 @@ export async function resolveReferralCode(sql, rawCode, options = {}) {
     const isActive = ['active', 'approved'].includes(statusLower);
 
     if (isEligibleRole && isActive) {
+      const isTeamMember = Boolean(referrer.team_member_uid) || roleLower.includes('team member');
+      const targetRole = options.userType || options.targetRole || null;
+      if (isTeamMember && targetRole && String(targetRole).toLowerCase() !== 'customer') {
+        return {
+          valid: false,
+          error: `Team Members can only refer Customers. This referral code cannot be used to register as ${targetRole}.`,
+          status: 400,
+          isRoleMismatch: true,
+          referrer
+        };
+      }
+
       return {
         valid: true,
         referrer,

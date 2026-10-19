@@ -254,6 +254,7 @@ async function findSponsorByCode(code) {
 router.get('/verify-sponsor/:code', async (req, res) => {
   try {
     const code = req.params.code;
+    const targetRole = req.query.role || req.query.user_type || null;
     const sponsor = await findSponsorByCode(code);
     if (!sponsor) {
       return res.status(404).json({
@@ -261,6 +262,21 @@ router.get('/verify-sponsor/:code', async (req, res) => {
         message: 'Invalid sponsor code. No active associate or team member found with this code.',
       });
     }
+
+    if (targetRole) {
+      const sType = String(sponsor.user_type || '').toLowerCase();
+      const tRole = String(targetRole).toLowerCase();
+      if (sType.includes('team member') && tRole !== 'customer') {
+        return res.status(400).json({
+          success: false,
+          valid: false,
+          message: `Team Members can only refer Customers. This referral code cannot be used to register as ${targetRole}.`,
+          sponsor_user_type: sponsor.user_type,
+          allowed_roles: ['Customer']
+        });
+      }
+    }
+
     return ok(res, {
       valid: true,
       user_id: sponsor.user_id,

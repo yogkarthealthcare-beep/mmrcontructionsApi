@@ -4495,7 +4495,7 @@ app.post("/api/auth/register-quick", async (req, res) => {
     if (sponsor_invite_code && user_type !== "Investor") {
       const cleanSponsor = String(sponsor_invite_code).trim().toUpperCase();
       let [sponsor] = await sql`
-        SELECT user_id FROM users 
+        SELECT user_id, user_type FROM users 
         WHERE (
           UPPER(COALESCE(invitation_code, '')) = ${cleanSponsor}
           OR UPPER(COALESCE(member_id, '')) = ${cleanSponsor}
@@ -4506,6 +4506,9 @@ app.post("/api/auth/register-quick", async (req, res) => {
       if (!sponsor && (cleanSponsor === 'MMR3001' || cleanSponsor === 'MMR00001' || cleanSponsor === 'MMR0001' || cleanSponsor === 'MMR-ASC-0001')) {
         sponsorUserId = await getDefaultSponsorUserId();
       } else if (sponsor) {
+        if (String(sponsor.user_type || '').toLowerCase().includes('team member') && user_type !== 'Customer') {
+          return err(res, `Team Members can only refer Customers. This referral code cannot be used to register as ${user_type}.`, 400);
+        }
         sponsorUserId = sponsor.user_id;
       } else {
         return err(res, "Invalid sponsor invitation code", 400);
