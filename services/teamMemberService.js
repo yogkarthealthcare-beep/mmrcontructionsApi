@@ -658,12 +658,14 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
       `;
         }
         if (!existingUser) {
+            const defaultPwd = `Mmr@${cleanMobile.length >= 4 ? cleanMobile.slice(-4) : '2026'}`;
+            const defaultHash = await bcrypt.hash(defaultPwd, 12);
             const [newUser] = await tx `
         INSERT INTO users (
-          member_id, user_type, full_name, mobile_no, email,
+          member_id, user_type, full_name, mobile_no, email, password_hash,
           pan_number, aadhar_number, sponsor_user_id, account_status, is_active, registered_at
         ) VALUES (
-          ${uid}, 'Team Member', ${data.fullName.trim()}, ${cleanMobile}, ${cleanEmail},
+          ${uid}, 'Team Member', ${data.fullName.trim()}, ${cleanMobile}, ${cleanEmail}, ${defaultHash},
           ${data.panNo || null}, ${cleanAadhar}, ${data.associateId}, 'Pending', true, NOW()
         )
         ON CONFLICT DO NOTHING
@@ -1088,6 +1090,8 @@ export async function updateTeamMemberStatus(id, status, authorizedSignatoryName
                 userId = existingUser.user_id;
             }
         }
+        const defaultPwd = `Mmr@${cleanMobile.length >= 4 ? cleanMobile.slice(-4) : '2026'}`;
+        const defaultHash = await bcrypt.hash(defaultPwd, 12);
         if (userId) {
             await tx `
         UPDATE users
@@ -1097,6 +1101,7 @@ export async function updateTeamMemberStatus(id, status, authorizedSignatoryName
           account_status = ${targetAccountStatus},
           is_active = ${targetIsActive},
           member_id = COALESCE(${current.team_member_uid}, member_id),
+          password_hash = COALESCE(password_hash, ${defaultHash}),
           updated_at = NOW()
         WHERE user_id = ${userId}
       `;
@@ -1108,14 +1113,14 @@ export async function updateTeamMemberStatus(id, status, authorizedSignatoryName
         else if (["approved", "active"].includes(normalizedStatus)) {
             const [newUser] = await tx `
         INSERT INTO users (
-          member_id, user_type, full_name, mobile_no, email,
+          member_id, user_type, full_name, mobile_no, email, password_hash,
           pan_number, aadhar_number, sponsor_user_id, account_status, is_active, registered_at
         ) VALUES (
-          ${current.team_member_uid}, 'Team Member', ${current.full_name}, ${cleanMobile}, ${cleanEmail},
+          ${current.team_member_uid}, 'Team Member', ${current.full_name}, ${cleanMobile}, ${cleanEmail}, ${defaultHash},
           ${current.pan_no || null}, ${cleanAadhar}, ${current.associate_id}, ${targetAccountStatus}, ${targetIsActive}, NOW()
         )
         ON CONFLICT (mobile_no) DO UPDATE
-        SET account_status = ${targetAccountStatus}, is_active = ${targetIsActive}, user_type = 'Team Member', sponsor_user_id = ${current.associate_id}
+        SET account_status = ${targetAccountStatus}, is_active = ${targetIsActive}, user_type = 'Team Member', sponsor_user_id = ${current.associate_id}, password_hash = COALESCE(users.password_hash, ${defaultHash})
         RETURNING user_id
       `;
             if (newUser) {

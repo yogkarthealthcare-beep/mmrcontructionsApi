@@ -1047,6 +1047,22 @@ export async function updateAdminAssociateEnrollment(req, res) {
               VALUES (${targetUserId}, ${bankName}, ${accHolder}, ${accNo}, ${ifsc}, ${branchName})
             `;
                     }
+                // Sync user_documents & user_kyc_profiles
+                if (isApproving) {
+                    await tx`
+                        UPDATE user_documents SET
+                            is_verified = TRUE,
+                            review_status = 'Approved',
+                            verified_at = NOW(),
+                            updated_at = NOW()
+                        WHERE user_id = ${targetUserId} AND is_active = TRUE
+                    `.catch(() => {});
+                    await tx`
+                        INSERT INTO user_kyc_profiles (user_id, status, reviewed_at, updated_at)
+                        VALUES (${targetUserId}, 'Approved', NOW(), NOW())
+                        ON CONFLICT (user_id) DO UPDATE SET
+                            status = 'Approved', reviewed_at = NOW(), updated_at = NOW()
+                    `.catch(() => {});
                 }
             }
         });

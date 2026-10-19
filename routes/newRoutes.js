@@ -326,7 +326,17 @@ router.post('/auth/login', async (req, res) => {
         if (investor.status === "inactive" || investor.status === "rejected") {
           return res.status(403).json({ success: false, message: `Account is currently ${investor.status}. Contact support.` });
         }
-        const valid = await bcrypt.compare(password, investor.password_hash);
+        let valid = false;
+        if (!investor.password_hash) {
+          if (String(password).length < 6) {
+            return res.status(400).json({ success: false, message: "Password kam se kam 6 characters ka hona chahiye." });
+          }
+          const newHash = await bcrypt.hash(password, 12);
+          await sql`UPDATE investor_users SET password_hash = ${newHash}, updated_at = NOW() WHERE id = ${investor.id}`;
+          valid = true;
+        } else {
+          valid = await bcrypt.compare(password, investor.password_hash);
+        }
         if (!valid)
           return res.status(401).json({ success: false, message: "Email ya password galat hai" });
 
@@ -374,10 +384,20 @@ router.post('/auth/login', async (req, res) => {
     if (user.account_status === 'Pending')
       return res.status(403).json({ success: false, message: 'Account abhi pending approval mein hai।', code: 'PENDING_APPROVAL' });
 
-    if (user.account_status !== 'Active')
+    if (!['Active', 'Approved'].includes(String(user.account_status)))
       return res.status(403).json({ success: false, message: 'Account inactive hai। Admin se contact karein।' });
 
-    const valid = await bcrypt.compare(password, user.password_hash);
+    let valid = false;
+    if (!user.password_hash) {
+      if (String(password).length < 6) {
+        return res.status(400).json({ success: false, message: 'Password kam se kam 6 characters ka hona chahiye.' });
+      }
+      const newHash = await bcrypt.hash(password, 12);
+      await sql`UPDATE users SET password_hash = ${newHash}, updated_at = NOW() WHERE user_id = ${user.user_id}`;
+      valid = true;
+    } else {
+      valid = await bcrypt.compare(password, user.password_hash);
+    }
     if (!valid)
       return res.status(401).json({ success: false, message: 'Email ya password galat hai' });
 

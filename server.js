@@ -4970,8 +4970,14 @@ app.post("/api/auth/login", async (req, res) => {
           return err(res, `Account is currently ${investor.status}. Contact support.`, 403);
         }
         if (password) {
-          const valid = await bcrypt.compare(password, investor.password_hash);
-          if (!valid) return err(res, "Invalid credentials", 401);
+          if (!investor.password_hash) {
+            if (String(password).length < 6) return err(res, "Password must be at least 6 characters.", 400);
+            const newHash = await bcrypt.hash(password, 12);
+            await sql`UPDATE investor_users SET password_hash = ${newHash}, updated_at = NOW() WHERE id = ${investor.id}`;
+          } else {
+            const valid = await bcrypt.compare(password, investor.password_hash);
+            if (!valid) return err(res, "Invalid credentials", 401);
+          }
         } else {
           return err(res, "Password required for investor login.", 400);
         }
@@ -5041,9 +5047,14 @@ app.post("/api/auth/login", async (req, res) => {
     }
     // Password login
     else if (password) {
-      if (!user.password_hash) return err(res, "No password set. Use OTP login.", 400);
-      const valid = await bcrypt.compare(password, user.password_hash);
-      if (!valid) return err(res, "Invalid credentials", 401);
+      if (!user.password_hash) {
+        if (String(password).length < 6) return err(res, "Password must be at least 6 characters.", 400);
+        const newHash = await bcrypt.hash(password, 12);
+        await sql`UPDATE users SET password_hash = ${newHash}, updated_at = NOW() WHERE user_id = ${user.user_id}`;
+      } else {
+        const valid = await bcrypt.compare(password, user.password_hash);
+        if (!valid) return err(res, "Invalid credentials", 401);
+      }
     } else {
       return err(res, "Provide password or otp_code", 400);
     }
@@ -6568,6 +6579,20 @@ app.get("/api/profile/documents", verifyUserToken, async (req, res) => {
       FROM user_documents WHERE user_id = ${req.user.user_id} AND is_active = TRUE
       ORDER BY uploaded_at DESC`;
 
+    const [userRow] = await sql`
+      SELECT is_verified, enrollment_status, account_status
+      FROM users WHERE user_id = ${req.user.user_id}`.catch(() => []);
+    const [kycRow] = await sql`
+      SELECT status FROM user_kyc_profiles WHERE user_id = ${req.user.user_id}`.catch(() => []);
+    const [assocRow] = await sql`
+      SELECT status, is_verified FROM associate_enrollment WHERE user_id = ${req.user.user_id} LIMIT 1`.catch(() => []);
+
+    const isAccountApproved = Boolean(userRow?.is_verified) ||
+      ['completed', 'approved'].includes(String(userRow?.enrollment_status || '').toLowerCase()) ||
+      String(kycRow?.status || '').toLowerCase() === 'approved' ||
+      Boolean(assocRow?.is_verified) ||
+      ['approved', 'completed'].includes(String(assocRow?.status || '').toLowerCase());
+
     const publicBase = (process.env.PUBLIC_API_URL || process.env.API_BASE_URL || "https://api.mmrconstructions.in").replace(/\/$/, "");
     const normalizeDocUrl = (urlOrPath) => {
       if (!urlOrPath) return null;
@@ -6582,8 +6607,14 @@ app.get("/api/profile/documents", verifyUserToken, async (req, res) => {
 
     const docs = (rawDocs || []).map((d) => {
       const fullUrl = normalizeDocUrl(d.file_path);
+      const isDocApproved = Boolean(d.is_verified) ||
+        String(d.review_status || '').toLowerCase() === 'approved' ||
+        (isAccountApproved && String(d.review_status || '').toLowerCase() !== 'rejected');
+
       return {
         ...d,
+        is_verified: isDocApproved,
+        review_status: isDocApproved ? 'Approved' : (d.review_status || 'Under Review'),
         file_path: fullUrl,
         document_url: fullUrl,
         url: fullUrl,
@@ -10648,8 +10679,8 @@ app.post("/api/admin/users/:id/approve",
         WHERE user_id = ${uid}`;
 
       // Synchronize associated document status & KYC profiles
-      await sql`UPDATE user_documents SET review_status = 'Approved', is_active = TRUE, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
-      await sql`UPDATE user_kyc_profiles SET status = 'Approved', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+      await sql`UPDATE user_documents SET review_status = 'Approved', is_verified = TRUE, verified_at = NOW(), is_active = TRUE, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+      await sql`UPDATE user_kyc_profiles SET status = 'Approved', reviewed_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
       await sql`UPDATE customer_enrollment_submissions SET application_status = 'Approved', updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}`.catch(() => {});
       await sql`UPDATE associate_enrollment SET status = 'Approved', is_verified = TRUE, updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email) = LOWER(${user.email || ''}) OR contact_no_1 = ${user.mobile_no || ''}`.catch(() => {});
       await sql`UPDATE team_members SET status = 'active', updated_at = NOW() WHERE user_id = ${uid} OR (mobile_no IS NOT NULL AND ${user.mobile_no || ''} != '' AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(${user.mobile_no || ''}, '\\D', '', 'g'), 10))`.catch(() => {});
