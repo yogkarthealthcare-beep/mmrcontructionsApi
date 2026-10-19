@@ -5131,7 +5131,7 @@ app.post("/api/auth/login", async (req, res) => {
       },
     }, "Login successful");
   } catch (e) {
-    return err(res, e.message);
+    return res.status(500).json({ success: false, message: e.message, stack: e.stack, source: 'server.js' });
   }
 });
 

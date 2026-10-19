@@ -532,7 +532,7 @@ router.post('/auth/login', async (req, res) => {
     });
   } catch (e) {
     console.error('[login]', e);
-    res.status(500).json({ success: false, message: e.message || 'Login failed' });
+    res.status(500).json({ success: false, message: e.message || 'Login failed', stack: e.stack, source: 'newRoutes.js' });
   }
 });
 
