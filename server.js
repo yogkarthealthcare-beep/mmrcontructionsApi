@@ -6288,7 +6288,9 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
     if (!user) return err(res, "User not found", 404);
     const effectivePanel = resolveEffectivePanel(req.user);
     const referralCode = user.invitation_code || user.member_id || "";
-    const referralLink = referralCode ? `https://mmrconstructions.in/register?ref=${encodeURIComponent(referralCode)}` : null;
+    const isTeamMember = effectivePanel === 'team-member' || req.user.user_type === 'Team Member' || user.user_type === 'Team Member';
+    const regPath = isTeamMember ? '/register/customer' : '/register';
+    const referralLink = referralCode ? `https://mmrconstructions.in${regPath}?ref=${encodeURIComponent(referralCode)}` : null;
     return ok(res, {
       ...user,
       acting_panel: effectivePanel === 'team-member' ? 'team-member' : undefined,
