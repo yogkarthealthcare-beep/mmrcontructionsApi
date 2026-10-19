@@ -146,21 +146,16 @@ jobs:
             pkill -f "node.*server.js" || true
             sleep 2
 
-            echo "🔄 Restarting PM2 application..."
-            pm2 delete mmr-api 2>/dev/null || true
-            if [ -f "ecosystem.config.cjs" ]; then
-              pm2 start ecosystem.config.cjs
-            elif [ -f "ecosystem.config.js" ]; then
-              pm2 start ecosystem.config.js
-            else
-              pm2 start server.js --name mmr-api
-            fi
-
-            if id "ubuntu" >/dev/null 2>&1; then
-              su - ubuntu -c "pm2 restart all --update-env 2>/dev/null || true" || true
-            fi
-
+            echo "🔄 Starting PM2 application..."
+            pm2 delete all 2>/dev/null || true
+            pm2 start server.js --name mmr-api
             pm2 save
+
+            sleep 3
+            echo "📋 PM2 Status:"
+            pm2 status || true
+            echo "📋 PM2 Recent Logs:"
+            pm2 logs mmr-api --lines 30 --nostream || true
 
             echo "--------------------------------------------------------------------------"
             echo "🔍 Running Production Health & Version Verification..."
