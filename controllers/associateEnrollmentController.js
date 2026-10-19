@@ -1047,6 +1047,7 @@ export async function updateAdminAssociateEnrollment(req, res) {
               VALUES (${targetUserId}, ${bankName}, ${accHolder}, ${accNo}, ${ifsc}, ${branchName})
             `;
                     }
+                }
                 // Sync user_documents & user_kyc_profiles
                 if (isApproving) {
                     await tx`

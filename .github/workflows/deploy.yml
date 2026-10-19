@@ -142,24 +142,17 @@ jobs:
             ps aux | grep -E "node|pm2" | grep -v grep || true
 
             echo "🔄 Killing any stale node server processes..."
-            fuser -k 5000/tcp 2>/dev/null || true
-            pkill -f "node.*server.js" || true
-            sleep 2
-
-            echo "🔄 Starting PM2 application..."
-            pm2 delete all 2>/dev/null || true
-            pm2 start server.js --name mmr-api
+            echo "🔄 Restarting PM2 mmr-api application..."
+            pm2 restart mmr-api --update-env || pm2 start server.js --name mmr-api
             pm2 save
 
-            sleep 3
+            sleep 5
             echo "📋 PM2 Status:"
             pm2 status || true
-            echo "📋 PM2 Recent Logs:"
-            pm2 logs mmr-api --lines 30 --nostream || true
 
             echo "--------------------------------------------------------------------------"
             echo "🔍 Running Production Health & Version Verification..."
-            sleep 3
+            sleep 2
             
             HEALTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/api/health || echo "000")
             VERSION_RESPONSE=$(curl -s http://127.0.0.1:5000/api/version || echo "{}")

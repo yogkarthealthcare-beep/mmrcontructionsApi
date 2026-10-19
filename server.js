@@ -5131,7 +5131,7 @@ app.post("/api/auth/login", async (req, res) => {
       },
     }, "Login successful");
   } catch (e) {
-    return res.status(500).json({ success: false, message: e.message, stack: e.stack, source: 'server.js' });
+    return err(res, e.message);
   }
 });
 
@@ -16452,7 +16452,7 @@ app.use((error, req, res, next) => {
     message: error?.message,
     stack: isProduction ? undefined : error?.stack,
   });
-  res.status(500).json({ success: false, message: error?.message || "Unable to process request right now.", unhandled_stack: error?.stack });
+  res.status(500).json({ success: false, message: error?.message || "Unable to process request right now." });
 });
 
 const PORT = Number(process.env.PORT) || 5000;
