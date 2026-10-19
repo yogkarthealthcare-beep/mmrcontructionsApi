@@ -606,7 +606,7 @@ router.get("/customer-enrollment/sponsor-lookup/:code", authUser, async (req, re
         ORDER BY created_at DESC LIMIT 1
       ) tm ON TRUE
       LEFT JOIN LATERAL (
-        SELECT id, member_id, application_no, full_name, contact_no_1
+        SELECT id, member_id, COALESCE(member_id, id) AS application_no, full_name, contact_no_1
         FROM associate_enrollment
         WHERE user_id = u.user_id
         ORDER BY created_at DESC LIMIT 1
@@ -644,10 +644,10 @@ router.get("/customer-enrollment/sponsor-lookup/:code", authUser, async (req, re
 
     // Direct associate_enrollment lookup
     const [aeRow] = await sql`
-      SELECT ae.id, ae.full_name, COALESCE(ae.member_id, ae.application_no) as member_id, ae.contact_no_1
+      SELECT ae.id, ae.full_name, COALESCE(ae.member_id, ae.id) as member_id, ae.contact_no_1
       FROM associate_enrollment ae
       WHERE UPPER(COALESCE(ae.member_id, '')) = ${cleanCode}
-         OR UPPER(COALESCE(ae.application_no, '')) = ${cleanCode}
+         OR UPPER(COALESCE(ae.id, '')) = ${cleanCode}
          OR (${isMobile} AND RIGHT(regexp_replace(COALESCE(ae.contact_no_1, ''), '\\D', '', 'g'), 10) = ${cleanMobile})
       ORDER BY ae.created_at DESC LIMIT 1
     `;

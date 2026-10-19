@@ -6250,7 +6250,7 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
          ORDER BY created_at DESC LIMIT 1
        ) sp_ces ON TRUE
        LEFT JOIN LATERAL (
-         SELECT full_name, application_no, contact_no_1
+         SELECT full_name, COALESCE(member_id, id) AS application_no, contact_no_1
          FROM associate_enrollment
          WHERE user_id = sp.user_id
          ORDER BY created_at DESC LIMIT 1
