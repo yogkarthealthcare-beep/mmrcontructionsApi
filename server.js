@@ -4922,6 +4922,29 @@ app.post("/api/auth/resend-email-otp", async (req, res) => {
   }
 });
 
+function extractValidHash(hashVal) {
+  if (typeof hashVal === 'string') {
+    const trimmed = hashVal.trim();
+    if (trimmed.startsWith('$2') || trimmed.length >= 20) return trimmed;
+    return null;
+  }
+  if (hashVal && typeof hashVal === 'object') {
+    if (Buffer.isBuffer(hashVal)) {
+      const str = hashVal.toString('utf8').trim();
+      if (str.startsWith('$2') || str.length >= 20) return str;
+    }
+    if (typeof hashVal.password_hash === 'string') {
+      const str = hashVal.password_hash.trim();
+      if (str.startsWith('$2') || str.length >= 20) return str;
+    }
+    if (typeof hashVal.hash === 'string') {
+      const str = hashVal.hash.trim();
+      if (str.startsWith('$2') || str.length >= 20) return str;
+    }
+  }
+  return null;
+}
+
 // Login
 app.post("/api/auth/login", async (req, res) => {
   try {
@@ -4970,12 +4993,13 @@ app.post("/api/auth/login", async (req, res) => {
           return err(res, `Account is currently ${investor.status}. Contact support.`, 403);
         }
         if (password) {
-          if (!investor.password_hash) {
+          const cleanInvestorHash = extractValidHash(investor.password_hash);
+          if (!cleanInvestorHash) {
             if (String(password).length < 6) return err(res, "Password must be at least 6 characters.", 400);
             const newHash = await bcrypt.hash(password, 12);
             await sql`UPDATE investor_users SET password_hash = ${newHash}, updated_at = NOW() WHERE id = ${investor.id}`;
           } else {
-            const valid = await bcrypt.compare(password, investor.password_hash);
+            const valid = await bcrypt.compare(password, cleanInvestorHash);
             if (!valid) return err(res, "Invalid credentials", 401);
           }
         } else {
@@ -5047,12 +5071,13 @@ app.post("/api/auth/login", async (req, res) => {
     }
     // Password login
     else if (password) {
-      if (!user.password_hash) {
+      const cleanHash = extractValidHash(user.password_hash);
+      if (!cleanHash) {
         if (String(password).length < 6) return err(res, "Password must be at least 6 characters.", 400);
         const newHash = await bcrypt.hash(password, 12);
         await sql`UPDATE users SET password_hash = ${newHash}, updated_at = NOW() WHERE user_id = ${user.user_id}`;
       } else {
-        const valid = await bcrypt.compare(password, user.password_hash);
+        const valid = await bcrypt.compare(password, cleanHash);
         if (!valid) return err(res, "Invalid credentials", 401);
       }
     } else {
@@ -5344,11 +5369,12 @@ app.post(["/api/auth/change-password", "/api/user/change-password"], verifyUserT
       WHERE user_id = ${req.user.user_id}`;
 
     if (!user) return err(res, "User not found", 404);
-    if (!user.password_hash) return err(res, "No password set for this account", 400);
+    const cleanUserHash = extractValidHash(user.password_hash);
+    if (!cleanUserHash) return err(res, "No password set for this account", 400);
 
-    const valid = await bcrypt.compare(current_password, user.password_hash);
+    const valid = await bcrypt.compare(current_password, cleanUserHash);
     if (!valid) return err(res, "Current password is incorrect", 400);
-    if (await bcrypt.compare(new_password, user.password_hash))
+    if (await bcrypt.compare(new_password, cleanUserHash))
       return err(res, "New password must be different from current password", 400);
 
     const newHash = await bcrypt.hash(new_password, 12);

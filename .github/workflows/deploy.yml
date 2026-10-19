@@ -137,13 +137,13 @@ jobs:
             echo "🔍 Running idempotent admin table & superadmin user check..."
             node scripts/verify_or_create_admin_tables.js || echo "⚠️ Non-critical admin table script output"
 
-            echo "🔄 Reloading PM2 application..."
+            echo "🔄 Restarting PM2 application..."
             if [ -f "ecosystem.config.cjs" ]; then
-              pm2 reload ecosystem.config.cjs --update-env || pm2 restart ecosystem.config.cjs --update-env || pm2 restart server.js --name mmr-api
+              pm2 restart ecosystem.config.cjs --update-env || pm2 restart mmr-api --update-env || pm2 start ecosystem.config.cjs
             elif [ -f "ecosystem.config.js" ]; then
-              pm2 reload ecosystem.config.js --update-env || pm2 restart ecosystem.config.js --update-env || pm2 restart server.js --name mmr-api
+              pm2 restart ecosystem.config.js --update-env || pm2 restart mmr-api --update-env || pm2 start ecosystem.config.js
             elif pm2 describe mmr-api > /dev/null 2>&1; then
-              pm2 reload mmr-api --update-env || pm2 restart mmr-api --update-env
+              pm2 restart mmr-api --update-env
             else
               pm2 start server.js --name mmr-api
             fi

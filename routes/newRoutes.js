@@ -29,6 +29,29 @@ function rateLimit(key, maxAttempts = 5, windowMs = 15 * 60 * 1000) {
   return entry.count > maxAttempts;
 }
 
+function extractValidHash(hashVal) {
+  if (typeof hashVal === 'string') {
+    const trimmed = hashVal.trim();
+    if (trimmed.startsWith('$2') || trimmed.length >= 20) return trimmed;
+    return null;
+  }
+  if (hashVal && typeof hashVal === 'object') {
+    if (Buffer.isBuffer(hashVal)) {
+      const str = hashVal.toString('utf8').trim();
+      if (str.startsWith('$2') || str.length >= 20) return str;
+    }
+    if (typeof hashVal.password_hash === 'string') {
+      const str = hashVal.password_hash.trim();
+      if (str.startsWith('$2') || str.length >= 20) return str;
+    }
+    if (typeof hashVal.hash === 'string') {
+      const str = hashVal.hash.trim();
+      if (str.startsWith('$2') || str.length >= 20) return str;
+    }
+  }
+  return null;
+}
+
 // ── Auth middleware ────────────────────────────────────────────
 function authUser(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
@@ -326,8 +349,9 @@ router.post('/auth/login', async (req, res) => {
         if (investor.status === "inactive" || investor.status === "rejected") {
           return res.status(403).json({ success: false, message: `Account is currently ${investor.status}. Contact support.` });
         }
+        const cleanInvestorHash = extractValidHash(investor.password_hash);
         let valid = false;
-        if (!investor.password_hash) {
+        if (!cleanInvestorHash) {
           if (String(password).length < 6) {
             return res.status(400).json({ success: false, message: "Password kam se kam 6 characters ka hona chahiye." });
           }
@@ -335,7 +359,7 @@ router.post('/auth/login', async (req, res) => {
           await sql`UPDATE investor_users SET password_hash = ${newHash}, updated_at = NOW() WHERE id = ${investor.id}`;
           valid = true;
         } else {
-          valid = await bcrypt.compare(password, investor.password_hash);
+          valid = await bcrypt.compare(password, cleanInvestorHash);
         }
         if (!valid)
           return res.status(401).json({ success: false, message: "Email ya password galat hai" });
@@ -387,8 +411,9 @@ router.post('/auth/login', async (req, res) => {
     if (!['Active', 'Approved'].includes(String(user.account_status)))
       return res.status(403).json({ success: false, message: 'Account inactive hai। Admin se contact karein।' });
 
+    const cleanHash = extractValidHash(user.password_hash);
     let valid = false;
-    if (!user.password_hash) {
+    if (!cleanHash) {
       if (String(password).length < 6) {
         return res.status(400).json({ success: false, message: 'Password kam se kam 6 characters ka hona chahiye.' });
       }
@@ -396,7 +421,7 @@ router.post('/auth/login', async (req, res) => {
       await sql`UPDATE users SET password_hash = ${newHash}, updated_at = NOW() WHERE user_id = ${user.user_id}`;
       valid = true;
     } else {
-      valid = await bcrypt.compare(password, user.password_hash);
+      valid = await bcrypt.compare(password, cleanHash);
     }
     if (!valid)
       return res.status(401).json({ success: false, message: 'Email ya password galat hai' });
