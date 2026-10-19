@@ -3,7 +3,7 @@ module.exports = {
     {
       name: "mmr-api",
       script: "./server.js",
-      cwd: "/var/www/mmrcontructionsApi",
+      cwd: __dirname,
       instances: 1,
       exec_mode: "fork",
       autorestart: true,
