@@ -1,9 +1,22 @@
 import express from "express";
-import sql from "../db.js";
+import defaultSql from "../db.js";
+
+let dbClient = defaultSql;
+export function setDatabaseClient(client) {
+  dbClient = client;
+}
+const sql = (...args) => dbClient(...args);
 import { saveFileToVPS } from "../services/fileStorage.service.js";
 import jwt from "jsonwebtoken";
 import { generateCustomerPdf } from "../services/customerPdfService.js";
 import { normalizeHumanName, isValidHumanName, calculateAge, isValidState } from "../utils/validationHelper.js";
+import {
+  canApproveCustomer,
+  ensureCustomerApprovalSchema,
+  hasCustomerApprovalAuditColumns,
+  resolveActorOperationalRole,
+  isSponsorApprovalFeatureEnabled
+} from "../services/customerApprovalAuthority.service.js";
 
 const router = express.Router();
 
@@ -40,7 +53,7 @@ function authAdmin(req, res, next) {
   }
 }
 
-// User auth (for customer portal endpoints)
+// User auth (for customer portal endpoints - accepts user token or admin token)
 export function authUser(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -50,9 +63,18 @@ export function authUser(req, res, next) {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
-    next();
+    return next();
   } catch (e) {
-    return res.status(401).json({ success: false, message: "Invalid or expired session token." });
+    const adminSecret = process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET;
+    try {
+      const decodedAdmin = jwt.verify(token, adminSecret);
+      req.user = decodedAdmin;
+      req.user.is_admin = true;
+      req.admin = decodedAdmin;
+      return next();
+    } catch (_) {
+      return res.status(401).json({ success: false, message: "Invalid or expired session token." });
+    }
   }
 }
 
@@ -61,6 +83,11 @@ let schemaReady;
 async function ensureSchema() {
   if (schemaReady) return schemaReady;
   schemaReady = (async () => {
+    try {
+      await ensureCustomerApprovalSchema(sql);
+    } catch (e) {
+      console.warn("[ensureSchema] customer approval schema warning:", e.message);
+    }
     try {
       await sql`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`;
     } catch (e) {
@@ -727,10 +754,11 @@ router.get("/customer-enrollment/:id/print", async (req, res) => {
 router.get("/admin/customer-enrollments", authAdmin, async (req, res) => {
   try {
     const search = String(req.query.search || "").trim();
+    const hasAuditCols = await hasCustomerApprovalAuditColumns(sql);
     let rows;
     if (search) {
       const s = `%${search}%`;
-      rows = await sql`
+      rows = hasAuditCols ? await sql`
         SELECT 
           COALESCE(ces.id::text, u.user_id::text) as id,
           ces.id as submission_id,
@@ -765,6 +793,85 @@ router.get("/admin/customer-enrollments", authAdmin, async (req, res) => {
           COALESCE(ces.application_status, 'Pending') as application_status,
           COALESCE(ces.payment_status, 'Pending') as payment_status,
           ces.verified_by,
+          ces.approved_by_user_id,
+          ces.approved_by_member_id,
+          ces.approved_by_name,
+          ces.approved_by_role,
+          ces.approved_at,
+          ces.reject_reason,
+          ces.rejected_by_user_id,
+          ces.rejected_at,
+          COALESCE(
+            CASE 
+              WHEN ces.is_final_submitted = TRUE THEN 'Completed'
+              WHEN ces.id IS NOT NULL THEN 'Submitted'
+              WHEN LOWER(COALESCE(ces.application_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(ces.application_status, '')) IN ('rejected') THEN 'Rejected'
+              ELSE NULL
+            END,
+            CASE 
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
+              ELSE '0'
+            END
+          ) as enrollment_status
+        FROM users u
+        LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
+        LEFT JOIN customer_enrollment_submissions ces ON u.user_id = ces.user_id
+        WHERE u.user_type = 'Customer'
+          AND (
+            u.full_name ILIKE ${s}
+            OR u.mobile_no ILIKE ${s}
+            OR u.email ILIKE ${s}
+            OR u.member_id ILIKE ${s}
+            OR sp.member_id ILIKE ${s}
+            OR ces.application_no ILIKE ${s}
+            OR ces.applicant_name ILIKE ${s}
+          )
+        ORDER BY COALESCE(ces.submitted_at, u.registered_at) DESC
+      ` : await sql`
+        SELECT 
+          COALESCE(ces.id::text, u.user_id::text) as id,
+          ces.id as submission_id,
+          u.user_id,
+          COALESCE(ces.applicant_name, u.full_name, 'N/A') as applicant_name,
+          COALESCE(ces.mobile_1, u.mobile_no, 'N/A') as mobile_1,
+          COALESCE(ces.email_1, u.email, 'N/A') as email_1,
+          u.full_name,
+          u.email,
+          u.mobile_no,
+          COALESCE(ces.application_no, u.member_id, 'Pending') as application_no,
+          u.member_id,
+          u.user_type,
+          COALESCE(ces.form_date, ces.submitted_at, u.registered_at) as form_date,
+          ces.submitted_at,
+          u.registered_at,
+          sp.member_id as sponsor_id,
+          sp.full_name as sponsor_name,
+          ces.project_name,
+          ces.property_type,
+          ces.plot_flat_no,
+          ces.block_tower,
+          ces.size_area,
+          ces.rate_per_unit,
+          ces.basic_sale_price,
+          ces.plc_dev_charges,
+          ces.total_property_value,
+          ces.booking_amount,
+          ces.payment_mode,
+          ces.txn_cheque_no,
+          ces.photo_first_applicant_url,
+          COALESCE(ces.application_status, 'Pending') as application_status,
+          COALESCE(ces.payment_status, 'Pending') as payment_status,
+          ces.verified_by,
+          NULL::integer as approved_by_user_id,
+          NULL::varchar as approved_by_member_id,
+          NULL::varchar as approved_by_name,
+          NULL::varchar as approved_by_role,
+          NULL::timestamptz as approved_at,
+          NULL::text as reject_reason,
+          NULL::integer as rejected_by_user_id,
+          NULL::timestamptz as rejected_at,
           COALESCE(
             CASE 
               WHEN ces.is_final_submitted = TRUE THEN 'Completed'
@@ -795,7 +902,7 @@ router.get("/admin/customer-enrollments", authAdmin, async (req, res) => {
         ORDER BY COALESCE(ces.submitted_at, u.registered_at) DESC
       `;
     } else {
-      rows = await sql`
+      rows = hasAuditCols ? await sql`
         SELECT 
           COALESCE(ces.id::text, u.user_id::text) as id,
           ces.id as submission_id,
@@ -830,6 +937,76 @@ router.get("/admin/customer-enrollments", authAdmin, async (req, res) => {
           COALESCE(ces.application_status, 'Pending') as application_status,
           COALESCE(ces.payment_status, 'Pending') as payment_status,
           ces.verified_by,
+          ces.approved_by_user_id,
+          ces.approved_by_member_id,
+          ces.approved_by_name,
+          ces.approved_by_role,
+          ces.approved_at,
+          ces.reject_reason,
+          ces.rejected_by_user_id,
+          ces.rejected_at,
+          COALESCE(
+            CASE 
+              WHEN ces.is_final_submitted = TRUE THEN 'Completed'
+              WHEN ces.id IS NOT NULL THEN 'Submitted'
+              WHEN LOWER(COALESCE(ces.application_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(ces.application_status, '')) IN ('rejected') THEN 'Rejected'
+              ELSE NULL
+            END,
+            CASE 
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('approved', 'completed') THEN 'Completed'
+              WHEN LOWER(COALESCE(u.enrollment_status, '')) IN ('rejected') THEN 'Rejected'
+              ELSE '0'
+            END
+          ) as enrollment_status
+        FROM users u
+        LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
+        LEFT JOIN customer_enrollment_submissions ces ON u.user_id = ces.user_id
+        WHERE u.user_type = 'Customer'
+        ORDER BY COALESCE(ces.submitted_at, u.registered_at) DESC
+      ` : await sql`
+        SELECT 
+          COALESCE(ces.id::text, u.user_id::text) as id,
+          ces.id as submission_id,
+          u.user_id,
+          COALESCE(ces.applicant_name, u.full_name, 'N/A') as applicant_name,
+          COALESCE(ces.mobile_1, u.mobile_no, 'N/A') as mobile_1,
+          COALESCE(ces.email_1, u.email, 'N/A') as email_1,
+          u.full_name,
+          u.email,
+          u.mobile_no,
+          COALESCE(ces.application_no, u.member_id, 'Pending') as application_no,
+          u.member_id,
+          u.user_type,
+          COALESCE(ces.form_date, ces.submitted_at, u.registered_at) as form_date,
+          ces.submitted_at,
+          u.registered_at,
+          sp.member_id as sponsor_id,
+          sp.full_name as sponsor_name,
+          ces.project_name,
+          ces.property_type,
+          ces.plot_flat_no,
+          ces.block_tower,
+          ces.size_area,
+          ces.rate_per_unit,
+          ces.basic_sale_price,
+          ces.plc_dev_charges,
+          ces.total_property_value,
+          ces.booking_amount,
+          ces.payment_mode,
+          ces.txn_cheque_no,
+          ces.photo_first_applicant_url,
+          COALESCE(ces.application_status, 'Pending') as application_status,
+          COALESCE(ces.payment_status, 'Pending') as payment_status,
+          ces.verified_by,
+          NULL::integer as approved_by_user_id,
+          NULL::varchar as approved_by_member_id,
+          NULL::varchar as approved_by_name,
+          NULL::varchar as approved_by_role,
+          NULL::timestamptz as approved_at,
+          NULL::text as reject_reason,
+          NULL::integer as rejected_by_user_id,
+          NULL::timestamptz as rejected_at,
           COALESCE(
             CASE 
               WHEN ces.is_final_submitted = TRUE THEN 'Completed'
@@ -862,9 +1039,15 @@ router.get("/admin/customer-enrollments", authAdmin, async (req, res) => {
 router.patch("/admin/customer-enrollments/:id/status", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { applicationStatus, application_status, paymentStatus, payment_status, verifiedBy } = req.body;
+    const { applicationStatus, application_status, paymentStatus, payment_status } = req.body;
     const appStatus = applicationStatus || application_status || null;
     const payStatus = paymentStatus || payment_status || null;
+
+    const approverUserId = req.admin?.admin_id || req.admin?.user_id || 1;
+    const approverMemberId = req.admin?.member_id || 'MMR00001';
+    const approverName = req.admin?.full_name || 'Admin';
+    const approverRole = 'Admin';
+    const rejectReasonText = req.body.reject_reason || req.body.rejection_reason || req.body.reason || null;
 
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
     let existing;
@@ -877,6 +1060,7 @@ router.patch("/admin/customer-enrollments/:id/status", authAdmin, async (req, re
     }
 
     const isApproving = appStatus && ['approved', 'completed'].includes(String(appStatus).toLowerCase());
+    const isRejecting = appStatus && String(appStatus).toLowerCase() === 'rejected';
 
     if (isApproving) {
       if (!existing) {
@@ -904,15 +1088,77 @@ router.patch("/admin/customer-enrollments/:id/status", authAdmin, async (req, re
     }
 
     if (existing) {
-      const [updated] = await sql`
-        UPDATE customer_enrollment_submissions
-        SET application_status = COALESCE(${appStatus}, application_status),
-            payment_status = COALESCE(${payStatus}, payment_status),
-            verified_by = COALESCE(${verifiedBy || null}, verified_by),
-            updated_at = NOW()
-        WHERE id = ${existing.id}
-        RETURNING *
-      `;
+      const hasAuditCols = await hasCustomerApprovalAuditColumns(sql);
+      let updated;
+      if (isApproving) {
+        if (hasAuditCols) {
+          const [upd] = await sql`
+            UPDATE customer_enrollment_submissions
+            SET application_status = COALESCE(${appStatus}, application_status),
+                payment_status = COALESCE(${payStatus}, payment_status),
+                verified_by = ${approverName},
+                approved_by_user_id = ${approverUserId},
+                approved_by_member_id = ${approverMemberId},
+                approved_by_name = ${approverName},
+                approved_by_role = ${approverRole},
+                approved_at = NOW(),
+                reject_reason = NULL,
+                rejected_by_user_id = NULL,
+                rejected_at = NULL,
+                updated_at = NOW()
+            WHERE id = ${existing.id}
+            RETURNING *
+          `;
+          updated = upd;
+        } else {
+          const [upd] = await sql`
+            UPDATE customer_enrollment_submissions
+            SET application_status = COALESCE(${appStatus}, application_status),
+                payment_status = COALESCE(${payStatus}, payment_status),
+                verified_by = ${approverName},
+                updated_at = NOW()
+            WHERE id = ${existing.id}
+            RETURNING *
+          `;
+          updated = upd;
+        }
+      } else if (isRejecting) {
+        if (hasAuditCols) {
+          const [upd] = await sql`
+            UPDATE customer_enrollment_submissions
+            SET application_status = 'Rejected',
+                payment_status = COALESCE(${payStatus}, payment_status),
+                reject_reason = ${rejectReasonText || 'Rejected by Admin'},
+                rejected_by_user_id = ${approverUserId},
+                rejected_at = NOW(),
+                updated_at = NOW()
+            WHERE id = ${existing.id}
+            RETURNING *
+          `;
+          updated = upd;
+        } else {
+          const [upd] = await sql`
+            UPDATE customer_enrollment_submissions
+            SET application_status = 'Rejected',
+                payment_status = COALESCE(${payStatus}, payment_status),
+                updated_at = NOW()
+            WHERE id = ${existing.id}
+            RETURNING *
+          `;
+          updated = upd;
+        }
+      } else {
+        const [upd] = await sql`
+          UPDATE customer_enrollment_submissions
+          SET application_status = COALESCE(${appStatus}, application_status),
+              payment_status = COALESCE(${payStatus}, payment_status),
+              updated_at = NOW()
+          WHERE id = ${existing.id}
+          RETURNING *
+        `;
+        updated = upd;
+      }
+
       if (existing.user_id) {
         const uStatus = isApproving ? 'Completed' : ((appStatus === 'Pending' || appStatus === 'Hold/Pending KYC' || appStatus === 'Rejected') ? 'Pending' : 'Completed');
         await sql`UPDATE users SET enrollment_status = ${uStatus} WHERE user_id = ${existing.user_id}`;
@@ -1040,6 +1286,16 @@ const handleAdminCustomerUpdate = async (req, res) => {
 
     if (existing) {
       targetSubmissionId = existing.id;
+      const hasAuditCols = await hasCustomerApprovalAuditColumns(sql);
+      const auditUpdates = hasAuditCols ? (isApproving ? sql`,
+          approved_by_user_id = ${req.admin?.admin_id || req.admin?.user_id || 1},
+          approved_by_member_id = ${req.admin?.member_id || 'MMR00001'},
+          approved_by_name = ${req.admin?.full_name || 'Admin'},
+          approved_by_role = 'Admin',
+          approved_at = NOW(),
+          reject_reason = NULL,
+          rejected_by_user_id = NULL,
+          rejected_at = NULL` : sql``) : sql``;
       const [updated] = await sql`
         UPDATE customer_enrollment_submissions
         SET
@@ -1100,7 +1356,7 @@ const handleAdminCustomerUpdate = async (req, res) => {
           associate_mobile = ${b.associateMobile ?? b.associate_mobile ?? null},
           associate_signature_name = ${b.associateSignatureName ?? b.associate_signature_name ?? null},
           application_status = COALESCE(${appStatusVal}, application_status),
-          verified_by = ${b.verifiedBy ?? b.verified_by ?? null},
+          verified_by = ${isApproving ? (req.admin?.full_name || 'Admin') : (b.verifiedBy ?? b.verified_by ?? null)}${auditUpdates},
           payment_status = ${b.paymentStatus ?? b.payment_status ?? null},
           payment_status_date = ${parseDate(b.paymentStatusDate || b.payment_status_date)},
           updated_at = NOW()
@@ -1147,9 +1403,15 @@ router.put("/admin/customer-enrollments/:id", authAdmin, handleAdminCustomerUpda
 router.patch("/customer-enrollment/:id/office-use", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { applicationStatus, verifiedBy, paymentStatus, paymentStatusDate } = req.body;
+    const { applicationStatus, paymentStatus, paymentStatusDate } = req.body;
     
     const isApproving = applicationStatus && ['approved', 'completed'].includes(String(applicationStatus).toLowerCase());
+    const isRejecting = applicationStatus && String(applicationStatus).toLowerCase() === 'rejected';
+    const approverUserId = req.admin?.admin_id || req.admin?.user_id || 1;
+    const approverMemberId = req.admin?.member_id || 'MMR00001';
+    const approverName = req.admin?.full_name || 'Admin';
+    const approverRole = 'Admin';
+    const rejectReasonText = req.body.reject_reason || req.body.rejection_reason || req.body.reason || null;
     
     let existing;
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
@@ -1185,16 +1447,81 @@ router.patch("/customer-enrollment/:id/office-use", authAdmin, async (req, res) 
 
     if (!existing) return res.status(422).json({ success: false, message: "Enrollment Form has not been completed yet." });
 
-    const [updated] = await sql`
-      UPDATE customer_enrollment_submissions
-      SET application_status = COALESCE(${applicationStatus || null}, application_status),
-          verified_by = COALESCE(${verifiedBy || null}, verified_by),
-          payment_status = COALESCE(${paymentStatus || null}, payment_status),
-          payment_status_date = COALESCE(${paymentStatusDate || null}, payment_status_date),
-          updated_at = NOW()
-      WHERE id = ${existing.id}
-      RETURNING *
-    `;
+    const hasAuditCols = await hasCustomerApprovalAuditColumns(sql);
+    let updated;
+    if (isApproving) {
+      if (hasAuditCols) {
+        const [upd] = await sql`
+          UPDATE customer_enrollment_submissions
+          SET application_status = COALESCE(${applicationStatus || null}, application_status),
+              verified_by = ${approverName},
+              approved_by_user_id = ${approverUserId},
+              approved_by_member_id = ${approverMemberId},
+              approved_by_name = ${approverName},
+              approved_by_role = ${approverRole},
+              approved_at = NOW(),
+              reject_reason = NULL,
+              rejected_by_user_id = NULL,
+              rejected_at = NULL,
+              payment_status = COALESCE(${paymentStatus || null}, payment_status),
+              payment_status_date = COALESCE(${paymentStatusDate || null}, payment_status_date),
+              updated_at = NOW()
+          WHERE id = ${existing.id}
+          RETURNING *
+        `;
+        updated = upd;
+      } else {
+        const [upd] = await sql`
+          UPDATE customer_enrollment_submissions
+          SET application_status = COALESCE(${applicationStatus || null}, application_status),
+              verified_by = ${approverName},
+              payment_status = COALESCE(${paymentStatus || null}, payment_status),
+              payment_status_date = COALESCE(${paymentStatusDate || null}, payment_status_date),
+              updated_at = NOW()
+          WHERE id = ${existing.id}
+          RETURNING *
+        `;
+        updated = upd;
+      }
+    } else if (isRejecting) {
+      if (hasAuditCols) {
+        const [upd] = await sql`
+          UPDATE customer_enrollment_submissions
+          SET application_status = 'Rejected',
+              reject_reason = ${rejectReasonText || 'Rejected by Admin'},
+              rejected_by_user_id = ${approverUserId},
+              rejected_at = NOW(),
+              payment_status = COALESCE(${paymentStatus || null}, payment_status),
+              payment_status_date = COALESCE(${paymentStatusDate || null}, payment_status_date),
+              updated_at = NOW()
+          WHERE id = ${existing.id}
+          RETURNING *
+        `;
+        updated = upd;
+      } else {
+        const [upd] = await sql`
+          UPDATE customer_enrollment_submissions
+          SET application_status = 'Rejected',
+              payment_status = COALESCE(${paymentStatus || null}, payment_status),
+              payment_status_date = COALESCE(${paymentStatusDate || null}, payment_status_date),
+              updated_at = NOW()
+          WHERE id = ${existing.id}
+          RETURNING *
+        `;
+        updated = upd;
+      }
+    } else {
+      const [upd] = await sql`
+        UPDATE customer_enrollment_submissions
+        SET application_status = COALESCE(${applicationStatus || null}, application_status),
+            payment_status = COALESCE(${paymentStatus || null}, payment_status),
+            payment_status_date = COALESCE(${paymentStatusDate || null}, payment_status_date),
+            updated_at = NOW()
+        WHERE id = ${existing.id}
+        RETURNING *
+      `;
+      updated = upd;
+    }
     
     if (existing.user_id && isApproving) {
       await sql`UPDATE users SET enrollment_status = 'Completed' WHERE user_id = ${existing.user_id}`;
@@ -1204,6 +1531,462 @@ router.patch("/customer-enrollment/:id/office-use", authAdmin, async (req, res) 
   } catch (e) {
     console.error("PATCH /api/customer-enrollment/:id/office-use error:", e);
     return err(res, "Failed to update enrollment: " + e.message);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// SCOPED CUSTOMER APPROVAL ENDPOINTS (Associate, Team Member & Admin)
+// ══════════════════════════════════════════════════════════════════════════
+
+// 1. GET /portal/my-customers-for-approval
+// Lists customers inside the actor's scope with statuses, approved-by details, and canApprove flags
+router.get("/portal/my-customers-for-approval", authUser, async (req, res) => {
+  try {
+    const actorInfo = await resolveActorOperationalRole(sql, req.user);
+    if (!actorInfo.userId && actorInfo.role !== 'Admin') {
+      return err(res, "Access denied: Valid sales entity or admin account required.", 403);
+    }
+
+    const { search = "", page = 1, limit = 50 } = req.query;
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+    const offset = (pageNum - 1) * limitNum;
+    const s = search.trim() ? `%${search.trim()}%` : null;
+
+    let customers = [];
+    if (actorInfo.role === 'Admin') {
+      customers = await sql`
+        SELECT 
+          u.user_id, u.member_id, u.full_name, u.email, u.mobile_no,
+          u.account_status, u.registered_at, u.enrollment_status,
+          sp.user_id as sponsor_user_id, sp.member_id as sponsor_id, sp.full_name as sponsor_name,
+          'ALL' as relationship
+        FROM users u
+        LEFT JOIN users sp ON sp.user_id = COALESCE(u.referred_by_user_id, u.sponsor_user_id)
+        WHERE u.user_type = 'Customer'
+          ${s ? sql`AND (u.full_name ILIKE ${s} OR u.mobile_no ILIKE ${s} OR u.member_id ILIKE ${s} OR sp.member_id ILIKE ${s})` : sql``}
+        ORDER BY u.registered_at DESC
+        LIMIT ${limitNum} OFFSET ${offset}
+      `;
+    } else if (actorInfo.role === 'Associate') {
+      customers = await sql`
+        SELECT 
+          c.user_id, c.member_id, c.full_name, c.email, c.mobile_no,
+          c.account_status, c.registered_at, c.enrollment_status,
+          ref.user_id as sponsor_user_id, ref.member_id as sponsor_id, ref.full_name as sponsor_name,
+          CASE 
+            WHEN c.referred_by_user_id = ${actorInfo.userId} OR c.sponsor_user_id = ${actorInfo.userId} THEN 'DIRECT'
+            ELSE 'TEAM_MEMBER'
+          END as relationship
+        FROM users c
+        JOIN users ref ON ref.user_id = COALESCE(c.referred_by_user_id, c.sponsor_user_id)
+        WHERE c.user_type = 'Customer'
+          AND (
+            c.referred_by_user_id = ${actorInfo.userId}
+            OR c.sponsor_user_id = ${actorInfo.userId}
+            OR c.referred_by_user_id IN (
+              SELECT tm.user_id FROM team_members tm 
+              WHERE tm.associate_id = ${actorInfo.userId} AND LOWER(tm.status) IN ('approved', 'active')
+            )
+            OR c.sponsor_user_id IN (
+              SELECT tm.user_id FROM team_members tm 
+              WHERE tm.associate_id = ${actorInfo.userId} AND LOWER(tm.status) IN ('approved', 'active')
+            )
+          )
+          ${s ? sql`AND (c.full_name ILIKE ${s} OR c.mobile_no ILIKE ${s} OR c.member_id ILIKE ${s} OR ref.member_id ILIKE ${s})` : sql``}
+        ORDER BY c.registered_at DESC
+        LIMIT ${limitNum} OFFSET ${offset}
+      `;
+    } else if (actorInfo.role === 'Team Member') {
+      customers = await sql`
+        SELECT 
+          c.user_id, c.member_id, c.full_name, c.email, c.mobile_no,
+          c.account_status, c.registered_at, c.enrollment_status,
+          ref.user_id as sponsor_user_id, ref.member_id as sponsor_id, ref.full_name as sponsor_name,
+          'DIRECT' as relationship
+        FROM users c
+        JOIN users ref ON ref.user_id = COALESCE(c.referred_by_user_id, c.sponsor_user_id)
+        WHERE c.user_type = 'Customer'
+          AND (c.referred_by_user_id = ${actorInfo.userId} OR c.sponsor_user_id = ${actorInfo.userId})
+          ${s ? sql`AND (c.full_name ILIKE ${s} OR c.mobile_no ILIKE ${s} OR c.member_id ILIKE ${s})` : sql``}
+        ORDER BY c.registered_at DESC
+        LIMIT ${limitNum} OFFSET ${offset}
+      `;
+    } else {
+      return ok(res, []);
+    }
+
+    const customerIds = customers.map(c => c.user_id);
+    const enrollmentsMap = new Map();
+    const documentsMap = new Map();
+    const kycMap = new Map();
+
+    if (customerIds.length > 0) {
+      const enrollments = await sql`
+        SELECT id, user_id, application_no, form_date, application_status, is_final_submitted,
+               approved_by_user_id, approved_by_member_id, approved_by_name, approved_by_role, approved_at,
+               reject_reason, rejected_by_user_id, rejected_at
+        FROM customer_enrollment_submissions
+        WHERE user_id = ANY(${customerIds})
+        ORDER BY created_at DESC
+      `;
+      for (const en of enrollments) {
+        if (!enrollmentsMap.has(en.user_id)) {
+          enrollmentsMap.set(en.user_id, en);
+        }
+      }
+
+      const docs = await sql`
+        SELECT document_id, user_id, document_type, file_path, review_status, is_verified,
+               verified_by_user_id, verifier_member_id, verifier_name, verifier_role, verified_at,
+               reject_reason, uploaded_at
+        FROM user_documents
+        WHERE user_id = ANY(${customerIds}) AND (is_active = TRUE OR is_active IS NULL)
+        ORDER BY uploaded_at ASC
+      `;
+      for (const d of docs) {
+        if (!documentsMap.has(d.user_id)) documentsMap.set(d.user_id, []);
+        documentsMap.get(d.user_id).push(d);
+      }
+
+      const kycProfiles = await sql`
+        SELECT user_id, status, reviewed_by_user_id, reviewer_member_id, reviewer_name,
+               reviewer_role, reviewed_at, reject_reason, submitted_at
+        FROM user_kyc_profiles
+        WHERE user_id = ANY(${customerIds})
+      `;
+      for (const k of kycProfiles) {
+        kycMap.set(k.user_id, k);
+      }
+    }
+
+    const results = [];
+    for (const c of customers) {
+      const en = enrollmentsMap.get(c.user_id) || null;
+      const docs = documentsMap.get(c.user_id) || [];
+      const kyc = kycMap.get(c.user_id) || null;
+
+      const enPerm = await canApproveCustomer(sql, req.user, c.user_id, 'enrollment');
+      const docPerm = await canApproveCustomer(sql, req.user, c.user_id, 'documents');
+      const kycPerm = await canApproveCustomer(sql, req.user, c.user_id, 'kyc');
+
+      results.push({
+        ...c,
+        enrollment_submission: en,
+        documents: docs,
+        kyc_profile: kyc,
+        can_approve_enrollment: enPerm.allowed,
+        can_approve_documents: docPerm.allowed,
+        can_verify_kyc: kycPerm.allowed
+      });
+    }
+
+    return ok(res, results);
+  } catch (error) {
+    console.error("GET /portal/my-customers-for-approval error:", error);
+    return err(res, "Failed to load customers for approval: " + error.message, 500);
+  }
+});
+
+// Middleware: Ensure migration 20261020000000 schema is present before attempting portal approvals
+async function requireApprovalSchemaReady(req, res, next) {
+  const schemaReady = await hasCustomerApprovalAuditColumns(sql);
+  if (!schemaReady) {
+    return res.status(503).json({
+      success: false,
+      message: "Customer approval hierarchy schema is not ready. Required database migration 20261020000000_customer_approval_hierarchy has not been applied."
+    });
+  }
+  next();
+}
+
+// 2. POST /portal/customers/:customerId/enrollment/approve
+router.post("/portal/customers/:customerId/enrollment/approve", authUser, requireApprovalSchemaReady, async (req, res) => {
+  try {
+    const customerId = Number(req.params.customerId);
+    const auth = await canApproveCustomer(sql, req.user, customerId, 'enrollment');
+    if (!auth.allowed) {
+      return res.status(403).json({ success: false, message: auth.reason });
+    }
+
+    const [existing] = await sql`
+      SELECT id, user_id, is_final_submitted FROM customer_enrollment_submissions
+      WHERE user_id = ${customerId} ORDER BY created_at DESC LIMIT 1
+    `;
+
+    if (!existing) {
+      return res.status(422).json({
+        success: false,
+        message: "Enrollment Form has not been submitted yet. Cannot approve."
+      });
+    }
+
+    const approver = auth.approver;
+    const [updated] = await sql`
+      UPDATE customer_enrollment_submissions
+      SET application_status = 'Approved',
+          approved_by_user_id = ${approver.userId},
+          approved_by_member_id = ${approver.memberId},
+          approved_by_name = ${approver.fullName},
+          approved_by_role = ${approver.role},
+          approved_at = NOW(),
+          verified_by = ${approver.fullName},
+          reject_reason = NULL,
+          rejected_by_user_id = NULL,
+          rejected_at = NULL,
+          updated_at = NOW()
+      WHERE id = ${existing.id}
+      RETURNING *
+    `;
+
+    await sql`UPDATE users SET enrollment_status = 'Completed' WHERE user_id = ${customerId}`;
+
+    return ok(res, updated, `Enrollment Form approved successfully by ${approver.fullName} (${approver.memberId}).`);
+  } catch (error) {
+    console.error("Enrollment approve error:", error);
+    return err(res, "Failed to approve enrollment: " + error.message, 500);
+  }
+});
+
+// 3. POST /portal/customers/:customerId/enrollment/reject
+router.post("/portal/customers/:customerId/enrollment/reject", authUser, requireApprovalSchemaReady, async (req, res) => {
+  try {
+    const customerId = Number(req.params.customerId);
+    const auth = await canApproveCustomer(sql, req.user, customerId, 'enrollment');
+    if (!auth.allowed) {
+      return res.status(403).json({ success: false, message: auth.reason });
+    }
+
+    const reason = String(req.body.reason || req.body.rejectReason || req.body.reject_reason || "").trim();
+    if (!reason) {
+      return res.status(400).json({ success: false, message: "Rejection reason is required." });
+    }
+
+    const [existing] = await sql`
+      SELECT id, user_id FROM customer_enrollment_submissions
+      WHERE user_id = ${customerId} ORDER BY created_at DESC LIMIT 1
+    `;
+
+    if (!existing) {
+      return res.status(422).json({ success: false, message: "Enrollment submission not found." });
+    }
+
+    const approver = auth.approver;
+    const [updated] = await sql`
+      UPDATE customer_enrollment_submissions
+      SET application_status = 'Rejected',
+          reject_reason = ${reason},
+          rejected_by_user_id = ${approver.userId},
+          rejected_at = NOW(),
+          updated_at = NOW()
+      WHERE id = ${existing.id}
+      RETURNING *
+    `;
+
+    await sql`UPDATE users SET enrollment_status = 'Pending' WHERE user_id = ${customerId}`;
+
+    return ok(res, updated, `Enrollment Form rejected. Reason documented.`);
+  } catch (error) {
+    console.error("Enrollment reject error:", error);
+    return err(res, "Failed to reject enrollment: " + error.message, 500);
+  }
+});
+
+// 4. POST /portal/customers/:customerId/documents/:docId/verify
+router.post("/portal/customers/:customerId/documents/:docId/verify", authUser, requireApprovalSchemaReady, async (req, res) => {
+  try {
+    const customerId = Number(req.params.customerId);
+    const docId = Number(req.params.docId);
+    const auth = await canApproveCustomer(sql, req.user, customerId, 'documents');
+    if (!auth.allowed) {
+      return res.status(403).json({ success: false, message: auth.reason });
+    }
+
+    const approver = auth.approver;
+    const [updated] = await sql`
+      UPDATE user_documents
+      SET is_verified = TRUE,
+          review_status = 'Approved',
+          verified_by_user_id = ${approver.userId},
+          verifier_member_id = ${approver.memberId},
+          verifier_name = ${approver.fullName},
+          verifier_role = ${approver.role},
+          verified_at = NOW(),
+          verified_by = ${approver.fullName},
+          reject_reason = NULL,
+          updated_at = NOW()
+      WHERE document_id = ${docId} AND user_id = ${customerId}
+      RETURNING *
+    `;
+
+    if (!updated) {
+      return res.status(404).json({ success: false, message: "Document not found." });
+    }
+
+    return ok(res, updated, `Document verified successfully by ${approver.fullName}.`);
+  } catch (error) {
+    console.error("Document verify error:", error);
+    return err(res, "Failed to verify document: " + error.message, 500);
+  }
+});
+
+// 5. POST /portal/customers/:customerId/documents/:docId/reject
+router.post("/portal/customers/:customerId/documents/:docId/reject", authUser, requireApprovalSchemaReady, async (req, res) => {
+  try {
+    const customerId = Number(req.params.customerId);
+    const docId = Number(req.params.docId);
+    const auth = await canApproveCustomer(sql, req.user, customerId, 'documents');
+    if (!auth.allowed) {
+      return res.status(403).json({ success: false, message: auth.reason });
+    }
+
+    const reason = String(req.body.reason || req.body.rejectReason || req.body.reject_reason || "").trim();
+    if (!reason) {
+      return res.status(400).json({ success: false, message: "Rejection reason is required." });
+    }
+
+    const approver = auth.approver;
+    const [updated] = await sql`
+      UPDATE user_documents
+      SET is_verified = FALSE,
+          review_status = 'Rejected',
+          reject_reason = ${reason},
+          rejected_by_user_id = ${approver.userId},
+          rejected_at = NOW(),
+          updated_at = NOW()
+      WHERE document_id = ${docId} AND user_id = ${customerId}
+      RETURNING *
+    `;
+
+    if (!updated) {
+      return res.status(404).json({ success: false, message: "Document not found." });
+    }
+
+    return ok(res, updated, `Document rejected.`);
+  } catch (error) {
+    console.error("Document reject error:", error);
+    return err(res, "Failed to reject document: " + error.message, 500);
+  }
+});
+
+// 6. POST /portal/customers/:customerId/kyc/verify
+router.post("/portal/customers/:customerId/kyc/verify", authUser, requireApprovalSchemaReady, async (req, res) => {
+  try {
+    const customerId = Number(req.params.customerId);
+    const auth = await canApproveCustomer(sql, req.user, customerId, 'kyc');
+    if (!auth.allowed) {
+      return res.status(403).json({ success: false, message: auth.reason });
+    }
+
+    const approver = auth.approver;
+    const [kyc] = await sql`
+      INSERT INTO user_kyc_profiles (
+        user_id, status, reviewed_at,
+        reviewed_by_user_id, reviewer_member_id, reviewer_name, reviewer_role,
+        reject_reason, submitted_at
+      )
+      VALUES (
+        ${customerId}, 'Approved', NOW(),
+        ${approver.userId}, ${approver.memberId}, ${approver.fullName}, ${approver.role},
+        NULL, NOW()
+      )
+      ON CONFLICT (user_id) DO UPDATE SET
+        status = 'Approved',
+        reviewed_at = NOW(),
+        reviewed_by_user_id = ${approver.userId},
+        reviewer_member_id = ${approver.memberId},
+        reviewer_name = ${approver.fullName},
+        reviewer_role = ${approver.role},
+        reject_reason = NULL,
+        updated_at = NOW()
+      RETURNING *
+    `;
+
+    // Also synchronize active documents to Approved
+    await sql`
+      UPDATE user_documents
+      SET is_verified = TRUE,
+          review_status = 'Approved',
+          verified_by_user_id = ${approver.userId},
+          verifier_member_id = ${approver.memberId},
+          verifier_name = ${approver.fullName},
+          verifier_role = ${approver.role},
+          verified_at = NOW(),
+          verified_by = ${approver.fullName},
+          reject_reason = NULL,
+          updated_at = NOW()
+      WHERE user_id = ${customerId} AND (is_active = TRUE OR is_active IS NULL)
+    `.catch(() => {});
+
+    // Update user account status to Active (fires fn_on_user_approved trigger)
+    await sql`
+      UPDATE users
+      SET account_status = 'Active',
+          is_verified = TRUE,
+          updated_at = NOW()
+      WHERE user_id = ${customerId}
+    `;
+
+    return ok(res, kyc, `Customer KYC verified and approved successfully by ${approver.fullName}.`);
+  } catch (error) {
+    console.error("KYC verify error:", error);
+    return err(res, "Failed to verify KYC: " + error.message, 500);
+  }
+});
+
+// 7. POST /portal/customers/:customerId/kyc/reject
+router.post("/portal/customers/:customerId/kyc/reject", authUser, requireApprovalSchemaReady, async (req, res) => {
+  try {
+    const customerId = Number(req.params.customerId);
+    const auth = await canApproveCustomer(sql, req.user, customerId, 'kyc');
+    if (!auth.allowed) {
+      return res.status(403).json({ success: false, message: auth.reason });
+    }
+
+    const reason = String(req.body.reason || req.body.rejectReason || req.body.reject_reason || "").trim();
+    if (!reason) {
+      return res.status(400).json({ success: false, message: "Rejection reason is required." });
+    }
+
+    const approver = auth.approver;
+    const [kyc] = await sql`
+      INSERT INTO user_kyc_profiles (
+        user_id, status, reviewed_at,
+        reviewed_by_user_id, reviewer_member_id, reviewer_name, reviewer_role,
+        reject_reason, submitted_at
+      )
+      VALUES (
+        ${customerId}, 'Rejected', NOW(),
+        ${approver.userId}, ${approver.memberId}, ${approver.fullName}, ${approver.role},
+        ${reason}, NOW()
+      )
+      ON CONFLICT (user_id) DO UPDATE SET
+        status = 'Rejected',
+        reviewed_at = NOW(),
+        reviewed_by_user_id = ${approver.userId},
+        reviewer_member_id = ${approver.memberId},
+        reviewer_name = ${approver.fullName},
+        reviewer_role = ${approver.role},
+        reject_reason = ${reason},
+        updated_at = NOW()
+      RETURNING *
+    `;
+
+    await sql`
+      UPDATE user_documents
+      SET is_verified = FALSE,
+          review_status = 'Rejected',
+          reject_reason = ${reason},
+          rejected_by_user_id = ${approver.userId},
+          rejected_at = NOW(),
+          updated_at = NOW()
+      WHERE user_id = ${customerId} AND (is_active = TRUE OR is_active IS NULL)
+    `.catch(() => {});
+
+    return ok(res, kyc, `Customer KYC rejected.`);
+  } catch (error) {
+    console.error("KYC reject error:", error);
+    return err(res, "Failed to reject KYC: " + error.message, 500);
   }
 });
 
@@ -1237,3 +2020,4 @@ router.get("/customer-enrollment/debug-db", async (req, res) => {
 });
 
 export default router;
+

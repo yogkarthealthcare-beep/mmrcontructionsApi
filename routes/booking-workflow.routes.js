@@ -1,13 +1,18 @@
 import express from "express";
 import jwt from "jsonwebtoken";
-import PDFDocument from "pdfkit";
-import sql from "../db.js";
-import GatewayFactory from "../payment/GatewayFactory.js";
+import defaultSql from "../db.js";
+
+let dbClient = defaultSql;
+export function setDatabaseClient(client) {
+  dbClient = client;
+}
+const sql = (...args) => dbClient(...args);
 import { ensureEmiSchedulesForBooking } from "../services/emi.service.js";
 import { setPlotStatus } from "../services/plotStatus.service.js";
 import { dispatchBookingNotification } from "../services/bookingNotification.service.js";
 import bookingService from "../services/bookingService.js";
 import commissionService from "../services/commissionService.js";
+import { hasCustomerApprovalAuditColumns } from "../services/customerApprovalAuthority.service.js";
 
 const router = express.Router();
 const ok = (res, data, message = "Success", status = 200) =>
@@ -754,23 +759,78 @@ router.patch("/admin/kyc/:userId", adminAuth, async (req, res) => {
     const userId = Number(req.params.userId);
     const status = String(req.body.status || "");
     if (!["Under Review", "Approved", "Rejected", "Submitted"].includes(status)) return fail(res, "Invalid KYC status.", 400);
-    const [profile] = await sql`
-      INSERT INTO user_kyc_profiles (user_id, status, admin_remarks, reviewed_at, reviewed_by_admin_id, submitted_at)
-      VALUES (${userId}, ${status}, ${req.body.remarks || null}, NOW(), ${req.admin.admin_id}, NOW())
-      ON CONFLICT (user_id) DO UPDATE SET
-        status = EXCLUDED.status, admin_remarks = EXCLUDED.admin_remarks,
-        reviewed_at = NOW(), reviewed_by_admin_id = ${req.admin.admin_id}, updated_at = NOW()
-      RETURNING *`;
-    await sql`
-      UPDATE user_documents SET
-        is_verified = ${status === "Approved"},
-        review_status = ${status === "Approved" ? "Approved" : status === "Rejected" ? "Rejected" : "Under Review"},
-        rejection_note = ${status === "Rejected" ? req.body.remarks || "Please re-upload valid documents." : null},
-        admin_remarks = ${req.body.remarks || null},
-        reupload_requested = ${Boolean(req.body.request_reupload)},
-        verified_by_admin_id = ${req.admin.admin_id},
-        verified_at = ${status === "Approved" ? new Date() : null}
-      WHERE user_id = ${userId} AND is_active`;
+
+    const adminId = req.admin?.admin_id || req.admin?.user_id || 1;
+    const adminMemberId = req.admin?.member_id || 'MMR00001';
+    const adminName = req.admin?.full_name || 'Admin';
+    const adminRole = 'Admin';
+    const rejectReasonText = status === "Rejected" ? (req.body.remarks || "Rejected by Admin") : null;
+
+    const hasAuditCols = await hasCustomerApprovalAuditColumns(sql);
+    let profile;
+    if (hasAuditCols) {
+      const [resProfile] = await sql`
+        INSERT INTO user_kyc_profiles (
+          user_id, status, admin_remarks, reviewed_at, reviewed_by_admin_id, submitted_at,
+          reviewed_by_user_id, reviewer_member_id, reviewer_name, reviewer_role, reject_reason
+        )
+        VALUES (
+          ${userId}, ${status}, ${req.body.remarks || null}, NOW(), ${adminId}, NOW(),
+          ${adminId}, ${adminMemberId}, ${adminName}, ${adminRole}, ${rejectReasonText}
+        )
+        ON CONFLICT (user_id) DO UPDATE SET
+          status = EXCLUDED.status, admin_remarks = EXCLUDED.admin_remarks,
+          reviewed_at = NOW(), reviewed_by_admin_id = ${adminId},
+          reviewed_by_user_id = ${adminId},
+          reviewer_member_id = ${adminMemberId},
+          reviewer_name = ${adminName},
+          reviewer_role = ${adminRole},
+          reject_reason = ${rejectReasonText},
+          updated_at = NOW()
+        RETURNING *`;
+      profile = resProfile;
+
+      await sql`
+        UPDATE user_documents SET
+          is_verified = ${status === "Approved"},
+          review_status = ${status === "Approved" ? "Approved" : status === "Rejected" ? "Rejected" : "Under Review"},
+          rejection_note = ${status === "Rejected" ? req.body.remarks || "Please re-upload valid documents." : null},
+          reject_reason = ${rejectReasonText},
+          admin_remarks = ${req.body.remarks || null},
+          reupload_requested = ${Boolean(req.body.request_reupload)},
+          verified_by_admin_id = ${adminId},
+          verified_by_user_id = ${adminId},
+          verifier_member_id = ${adminMemberId},
+          verifier_name = ${adminName},
+          verifier_role = ${adminRole},
+          verified_at = ${status === "Approved" ? new Date() : null}
+        WHERE user_id = ${userId} AND is_active`;
+    } else {
+      const [resProfile] = await sql`
+        INSERT INTO user_kyc_profiles (
+          user_id, status, admin_remarks, reviewed_at, reviewed_by_admin_id, submitted_at
+        )
+        VALUES (
+          ${userId}, ${status}, ${req.body.remarks || null}, NOW(), ${adminId}, NOW()
+        )
+        ON CONFLICT (user_id) DO UPDATE SET
+          status = EXCLUDED.status, admin_remarks = EXCLUDED.admin_remarks,
+          reviewed_at = NOW(), reviewed_by_admin_id = ${adminId},
+          updated_at = NOW()
+        RETURNING *`;
+      profile = resProfile;
+
+      await sql`
+        UPDATE user_documents SET
+          is_verified = ${status === "Approved"},
+          review_status = ${status === "Approved" ? "Approved" : status === "Rejected" ? "Rejected" : "Under Review"},
+          rejection_note = ${status === "Rejected" ? req.body.remarks || "Please re-upload valid documents." : null},
+          admin_remarks = ${req.body.remarks || null},
+          reupload_requested = ${Boolean(req.body.request_reupload)},
+          verified_by_admin_id = ${adminId},
+          verified_at = ${status === "Approved" ? new Date() : null}
+        WHERE user_id = ${userId} AND is_active`;
+    }
     return ok(res, profile, `KYC marked ${status}.`);
   } catch (error) {
     return fail(res, error.message);

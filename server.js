@@ -57,6 +57,7 @@ import installmentPlansRoutes from "./routes/installment-plans.routes.js";
 import installmentService from "./services/installmentService.js";
 import emiManagementRoutes from "./routes/emi-management.routes.js";
 import { ensureSalesAttributionSchema } from "./services/salesAttributionSchema.service.js";
+import { isSponsorApprovalFeatureEnabled, hasCustomerApprovalAuditColumns } from "./services/customerApprovalAuthority.service.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -8890,6 +8891,12 @@ app.post(["/api/associate/customers", "/api/team-member/customers"], verifyUserT
 
     const memberId = await genMemberID("Customer");
 
+    const isApprovalOn = isSponsorApprovalFeatureEnabled();
+    const initialAccountStatus = isApprovalOn ? 'Pending' : 'Active';
+    const initialKycStatus = isApprovalOn ? 'Submitted' : 'Approved';
+    const initialReferralStatus = isApprovalOn ? 'Pending' : 'Approved';
+    const kycRemarks = isApprovalOn ? 'Pending sponsor/admin verification' : 'Auto-approved on party enrollment';
+
     const [createdUser] = await sql`
       INSERT INTO users (
         member_id, user_type, full_name, mobile_no, email, password_hash,
@@ -8898,7 +8905,7 @@ app.post(["/api/associate/customers", "/api/team-member/customers"], verifyUserT
         referred_by_user_id, referred_by_source, referred_by_set_at
       ) VALUES (
         ${memberId}, 'Customer', ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
-        ${sponsorUserId}, 'Active', true, true,
+        ${sponsorUserId}, ${initialAccountStatus}, true, true,
         NOW(), NOW(),
         ${sponsorUserId}, 'ASSOCIATE_ENROLLMENT', NOW()
       )
@@ -8914,19 +8921,33 @@ app.post(["/api/associate/customers", "/api/team-member/customers"], verifyUserT
     };
 
     try {
-      await sql`
-        INSERT INTO user_kyc_profiles (user_id, status, submitted_at, approved_at, remarks)
-        VALUES (${createdUser.user_id}, 'Approved', NOW(), NOW(), 'Auto-approved on party enrollment')
-        ON CONFLICT (user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
+      if (isApprovalOn) {
+        await sql`
+          INSERT INTO user_kyc_profiles (user_id, status, submitted_at, remarks)
+          VALUES (${createdUser.user_id}, ${initialKycStatus}, NOW(), ${kycRemarks})
+          ON CONFLICT (user_id) DO UPDATE SET status = ${initialKycStatus}, updated_at = NOW()`;
+      } else {
+        await sql`
+          INSERT INTO user_kyc_profiles (user_id, status, submitted_at, approved_at, remarks)
+          VALUES (${createdUser.user_id}, 'Approved', NOW(), NOW(), ${kycRemarks})
+          ON CONFLICT (user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
+      }
     } catch (kErr) {
       console.warn('[associate add-customer] kyc warning:', kErr.message);
     }
 
     try {
-      await sql`
-        INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
-        VALUES (${sponsorUserId}, ${createdUser.user_id}, 'Approved', NOW())
-        ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
+      if (isApprovalOn) {
+        await sql`
+          INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status)
+          VALUES (${sponsorUserId}, ${createdUser.user_id}, ${initialReferralStatus})
+          ON CONFLICT (referred_user_id) DO UPDATE SET status = ${initialReferralStatus}, updated_at = NOW()`;
+      } else {
+        await sql`
+          INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, status, approved_at)
+          VALUES (${sponsorUserId}, ${createdUser.user_id}, 'Approved', NOW())
+          ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
+      }
     } catch (_) {}
 
     try {
@@ -10709,10 +10730,22 @@ app.post("/api/admin/users/:id/approve",
           updated_at = NOW()
         WHERE user_id = ${uid}`;
 
-      // Synchronize associated document status & KYC profiles
-      await sql`UPDATE user_documents SET review_status = 'Approved', is_verified = TRUE, verified_at = NOW(), is_active = TRUE, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
-      await sql`UPDATE user_kyc_profiles SET status = 'Approved', reviewed_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
-      await sql`UPDATE customer_enrollment_submissions SET application_status = 'Approved', updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}`.catch(() => {});
+      const adminId = req.admin.admin_id;
+      const adminMemberId = req.admin.member_id || 'MMR00001';
+      const adminName = req.admin.full_name || 'Admin';
+      const adminRole = 'Admin';
+
+      // Synchronize associated document status & KYC profiles with pre-migration safety
+      const hasAuditCols = await hasCustomerApprovalAuditColumns(sql);
+      if (hasAuditCols) {
+        await sql`UPDATE user_documents SET review_status = 'Approved', is_verified = TRUE, verified_at = NOW(), is_active = TRUE, verified_by_user_id = ${adminId}, verifier_member_id = ${adminMemberId}, verifier_name = ${adminName}, verifier_role = ${adminRole}, verified_by = ${adminName}, reject_reason = NULL, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+        await sql`UPDATE user_kyc_profiles SET status = 'Approved', reviewed_at = NOW(), reviewed_by_user_id = ${adminId}, reviewer_member_id = ${adminMemberId}, reviewer_name = ${adminName}, reviewer_role = ${adminRole}, reject_reason = NULL, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+        await sql`UPDATE customer_enrollment_submissions SET application_status = 'Approved', approved_by_user_id = ${adminId}, approved_by_member_id = ${adminMemberId}, approved_by_name = ${adminName}, approved_by_role = ${adminRole}, approved_at = NOW(), verified_by = ${adminName}, reject_reason = NULL, updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}`.catch(() => {});
+      } else {
+        await sql`UPDATE user_documents SET review_status = 'Approved', is_verified = TRUE, verified_at = NOW(), is_active = TRUE, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+        await sql`UPDATE user_kyc_profiles SET status = 'Approved', reviewed_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+        await sql`UPDATE customer_enrollment_submissions SET application_status = 'Approved', updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}`.catch(() => {});
+      }
       await sql`UPDATE associate_enrollment SET status = 'Approved', is_verified = TRUE, updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email) = LOWER(${user.email || ''}) OR contact_no_1 = ${user.mobile_no || ''}`.catch(() => {});
       await sql`UPDATE team_members SET status = 'active', updated_at = NOW() WHERE user_id = ${uid} OR (mobile_no IS NOT NULL AND ${user.mobile_no || ''} != '' AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(${user.mobile_no || ''}, '\\D', '', 'g'), 10))`.catch(() => {});
 
@@ -10786,7 +10819,16 @@ app.post("/api/admin/users/:id/reject",
           updated_at = NOW()
         WHERE user_id = ${uid}`;
 
-      await sql`UPDATE user_documents SET review_status = 'Rejected', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+      const hasAuditColsReject = await hasCustomerApprovalAuditColumns(sql);
+      if (hasAuditColsReject) {
+        await sql`UPDATE user_documents SET review_status = 'Rejected', reject_reason = ${rejection_reason}, rejected_by_user_id = ${req.admin.admin_id}, rejected_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+        await sql`UPDATE user_kyc_profiles SET status = 'Rejected', reject_reason = ${rejection_reason}, rejected_by_user_id = ${req.admin.admin_id}, rejected_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+        await sql`UPDATE customer_enrollment_submissions SET application_status = 'Rejected', reject_reason = ${rejection_reason}, rejected_by_user_id = ${req.admin.admin_id}, rejected_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+      } else {
+        await sql`UPDATE user_documents SET review_status = 'Rejected', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+        await sql`UPDATE user_kyc_profiles SET status = 'Rejected', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+        await sql`UPDATE customer_enrollment_submissions SET application_status = 'Rejected', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+      }
 
       await sql`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action,
