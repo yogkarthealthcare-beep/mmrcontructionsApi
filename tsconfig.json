@@ -18,6 +18,7 @@
     "routes/associateEnrollmentRoutes.ts",
     "controllers/teamMemberController.ts",
     "services/teamMemberService.ts",
+    "services/teamMemberPdfService.ts",
     "routes/teamMemberRoutes.ts"
   ]
 }

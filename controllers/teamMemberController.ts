@@ -8,8 +8,10 @@ import {
   getTeamMembersByAssociate,
   getTeamMemberById,
   updateTeamMemberRecord,
-  updateTeamMemberStatus
+  updateTeamMemberStatus,
+  finalSubmitTeamMemberRecord
 } from "../services/teamMemberService.js";
+import { generateTeamMemberPdf } from "../services/teamMemberPdfService.js";
 
 /**
  * GET /api/associates/:associateId/prefill
@@ -312,7 +314,8 @@ export async function updateTeamMemberController(req: Request, res: Response): P
     });
   } catch (error: any) {
     console.error("[TeamMemberController Update Error]:", error);
-    return res.status(400).json({
+    const status = error.statusCode || (error.message?.includes("finalized") || error.message?.includes("Unauthorized") ? 403 : 400);
+    return res.status(status).json({
       success: false,
       message: error.message || "Failed to update team member record"
     });
@@ -346,6 +349,124 @@ export async function updateTeamMemberStatusController(req: Request, res: Respon
     return res.status(400).json({
       success: false,
       message: error.message || "Failed to update team member status"
+    });
+  }
+}
+
+/**
+ * POST /api/team-members/:id/final-submit
+ */
+export async function finalSubmitTeamMemberController(req: Request, res: Response): Promise<Response> {
+  try {
+    const id = String(req.params.id);
+    const authUser: any = (req as any).user;
+    const authUserId = authUser?.user_id || authUser?.id;
+    const isAdmin = Boolean(
+      authUser?.is_admin || 
+      authUser?.role === "SuperAdmin" || 
+      authUser?.role === "Admin" || 
+      authUser?.user_type === "Admin" ||
+      authUser?.user_type === "SuperAdmin"
+    );
+
+    const body = req.body || {};
+    const declarationAccepted = (
+      body.declarationAccepted === true || 
+      body.declarationAccepted === 'true' || 
+      body.termsAccepted === true || 
+      body.termsAccepted === 'true'
+    );
+    if (!declarationAccepted) {
+      return res.status(400).json({
+        success: false,
+        message: "Declaration must be accepted to perform Final Submit."
+      });
+    }
+
+    const result = await finalSubmitTeamMemberRecord(id, authUserId, isAdmin);
+    return res.status(200).json({
+      success: true,
+      message: "Team member enrollment final submitted successfully",
+      data: result
+    });
+  } catch (error: any) {
+    console.error("[TeamMemberController FinalSubmit Error]:", error);
+    const status = error.statusCode || (error.message?.includes("finalized") || error.message?.includes("Unauthorized") ? 403 : 400);
+    return res.status(status).json({
+      success: false,
+      message: error.message || "Failed to final submit team member record"
+    });
+  }
+}
+
+/**
+ * GET /api/team-members/:id/print
+ */
+export async function printTeamMemberController(req: Request, res: Response): Promise<Response | void> {
+  try {
+    const id = String(req.params.id);
+    const authUser: any = (req as any).user;
+    const authUserId = authUser?.user_id || authUser?.id;
+    const isAdmin = Boolean(
+      authUser?.is_admin || 
+      authUser?.role === "SuperAdmin" || 
+      authUser?.role === "Admin" || 
+      authUser?.user_type === "Admin" ||
+      authUser?.user_type === "SuperAdmin"
+    );
+
+    const record = await getTeamMemberById(id, authUserId, isAdmin);
+    if (!record) {
+      return res.status(404).json({
+        success: false,
+        message: "Team member not found"
+      });
+    }
+
+    // Strict ownership check: Admin, owner associate, or the team member themselves
+    if (!isAdmin && authUserId) {
+      const isNumeric = /^\d+$/.test(String(authUserId).trim());
+      const authNumId = isNumeric ? Number(authUserId) : null;
+      const authCodeStr = String(authUser?.member_id || (!isNumeric ? authUserId : "") || "").trim().toUpperCase();
+
+      let isOwnerAssociate = false;
+      let isSelfMember = false;
+
+      if (authNumId !== null) {
+        isOwnerAssociate = Number(record.associate_id) === authNumId;
+        isSelfMember = record.user_id ? Number(record.user_id) === authNumId : false;
+      }
+
+      if (!isOwnerAssociate && !isSelfMember && authCodeStr) {
+        if (record.team_member_uid && String(record.team_member_uid).trim().toUpperCase() === authCodeStr) {
+          isSelfMember = true;
+        }
+      }
+
+      if (!isOwnerAssociate && !isSelfMember) {
+        return res.status(403).json({
+          success: false,
+          message: "Forbidden: You are not authorized to print this team member enrollment record."
+        });
+      }
+    }
+
+    const pdfBuffer = await generateTeamMemberPdf(record.id);
+
+    const dateStr = record.created_at
+      ? new Date(record.created_at).toISOString().split('T')[0]
+      : new Date().toISOString().split('T')[0];
+    const fileName = `MMR-TeamMember-${record.team_member_uid || record.id}-${dateStr}.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    return res.end(pdfBuffer);
+  } catch (error: any) {
+    console.error("[TeamMemberController Print Error]:", error);
+    const status = error.statusCode || (error.message?.includes("Unauthorized") || error.message?.includes("Forbidden") ? 403 : 500);
+    return res.status(status).json({
+      success: false,
+      message: error.message || "Failed to generate Team Member PDF"
     });
   }
 }

@@ -254,6 +254,7 @@ async function ensureInvestorSchema() {
     await sql`CREATE INDEX IF NOT EXISTS idx_investor_transactions_investor ON investor_transactions(investor_id, created_at)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_settlement_requests_status ON settlement_change_requests(status, created_at)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_investor_notifications_investor ON investor_notifications(investor_id, created_at)`;
+    await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS is_final_submitted BOOLEAN DEFAULT FALSE`;
   })().catch((error) => {
     investorSchemaReady = null;
     throw error;
@@ -312,6 +313,40 @@ function authAdmin(req, res, next) {
   } catch (e) {
     return res.status(401).json({ success: false, message: "Invalid admin token." });
   }
+}
+
+export function authInvestorOrAdmin(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ success: false, message: "No authentication token provided." });
+  }
+  const token = authHeader.split(" ")[1];
+  const jwtSecret = process.env.JWT_SECRET;
+  const adminSecret = process.env.JWT_ADMIN_SECRET || jwtSecret;
+
+  // 1. Try investor or user token signed with JWT_SECRET
+  try {
+    const decoded = jwt.verify(token, jwtSecret);
+    if (decoded.role === "Investor" || decoded.user_type === "Investor") {
+      req.investor = decoded;
+      return next();
+    }
+    if (isAdminPrincipal(decoded)) {
+      req.admin = decoded;
+      return next();
+    }
+  } catch (e) {}
+
+  // 2. Try admin token signed with adminSecret
+  try {
+    const decodedAdmin = jwt.verify(token, adminSecret);
+    if (isAdminPrincipal(decodedAdmin)) {
+      req.admin = decodedAdmin;
+      return next();
+    }
+  } catch (e) {}
+
+  return res.status(401).json({ success: false, message: "Invalid or expired session token." });
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1776,6 +1811,8 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
     const sigFirstUrl = await processBase64(body.signatureFirstApplicant, `sig1_${Date.now()}.png`);
     const sigJointUrl = await processBase64(body.signatureJointApplicant, `sig2_${Date.now()}.png`);
 
+    const isFinalSubmit = body.is_final_submitted === true || body.is_final_submitted === 'true' || body.isFinalSubmit === true || body.isFinalSubmit === 'true';
+
     const [existing] = await sql`SELECT id, is_final_submitted FROM investor_enrollments WHERE investor_id = ${investor_id} ORDER BY created_at DESC LIMIT 1`;
     if (existing && existing.is_final_submitted) {
       return res.status(403).json({
@@ -1834,7 +1871,7 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
           photo_url = COALESCE(${photoUrl}, photo_url),
           signature_first_url = COALESCE(${sigFirstUrl}, signature_first_url),
           signature_joint_url = COALESCE(${sigJointUrl}, signature_joint_url),
-          is_final_submitted = COALESCE(${Boolean(body.is_final_submitted || body.isFinalSubmit || false)}, is_final_submitted),
+          is_final_submitted = (is_final_submitted OR ${isFinalSubmit}),
           updated_at = NOW()
         WHERE id = ${existing.id}
       `;
@@ -1856,14 +1893,18 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
           ${body.corrAddress || body.corr_address || null}, ${body.corrCity || body.corr_city || null}, ${body.corrState || body.corr_state || null}, ${body.corrPinCode || body.corr_pin_code || null}, ${body.religion || null},
           ${body.mobile}, ${body.altTel || null}, ${body.email || null}, ${body.pan || null}, ${body.aadhar || null}, ${body.amount || null}, ${body.amountWords || null}, ${body.paymentMode || null}, ${body.txnNo || null}, ${body.txnDate || null}, ${body.bankBranch || null}, ${body.ifscCode || body.ifsc_code || null}, ${body.accountNumber || body.account_number || null},
           ${body.nominees ? (typeof body.nominees === 'string' ? body.nominees : JSON.stringify(body.nominees)) : null}, ${body.declDate || null}, ${body.declPlace || null}, ${body.declSignatureName || null}, ${body.firstApplicantName || null}, ${body.jointApplicantName || null},
-          ${photoUrl || null}, ${sigFirstUrl || null}, ${sigJointUrl || null}, ${Boolean(body.is_final_submitted || body.isFinalSubmit || false)}
+          ${photoUrl || null}, ${sigFirstUrl || null}, ${sigJointUrl || null}, ${isFinalSubmit}
         ) RETURNING id
       `;
       resultId = newRow?.id;
     }
 
-    // Mark enrollment_status as Completed in investor_users
+    // Mark enrollment_status in investor_users
+    if (isFinalSubmit) {
+      await sql`UPDATE investor_users SET enrollment_status = 'Completed' WHERE id = ${investor_id}`;
+    } else {
       await sql`UPDATE investor_users SET enrollment_status = COALESCE(enrollment_status, 'Pending') WHERE id = ${investor_id}`;
+    }
 
     return ok(res, { id: resultId }, "Investor enrollment submitted successfully.");
   } catch (e) {
@@ -1888,7 +1929,7 @@ router.get("/investor/enroll/my", authInvestor, async (req, res) => {
 });
 
 // GET /api/investor/enrollment/:id/print
-router.get("/investor/enrollment/:id/print", async (req, res) => {
+router.get("/investor/enrollment/:id/print", authInvestorOrAdmin, async (req, res) => {
   try {
     const id = String(req.params.id);
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id.trim());
@@ -1904,6 +1945,16 @@ router.get("/investor/enrollment/:id/print", async (req, res) => {
 
     if (!enrollment) {
       return err(res, "Enrollment not found.", 404);
+    }
+
+    const isAdmin = Boolean(req.admin && isAdminPrincipal(req.admin));
+    const isOwner = Boolean(req.investor && (Number(enrollment.investor_id) === Number(req.investor.id || req.investor.user_id)));
+
+    if (!isAdmin && !isOwner) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: You are not authorized to access this investor enrollment record."
+      });
     }
 
     const pdfBuffer = await generateInvestorPdf(enrollment.id);

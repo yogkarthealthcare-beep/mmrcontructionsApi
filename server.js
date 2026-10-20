@@ -4983,8 +4983,8 @@ app.post("/api/auth/login", async (req, res) => {
 
     if (!user) {
       const [investor] = loginEmail
-        ? await sql`SELECT id, full_name, email, mobile_number, password_hash, status, is_verified FROM investor_users WHERE LOWER(email) = ${loginEmail} AND deleted_at IS NULL LIMIT 1`
-        : await sql`SELECT id, full_name, email, mobile_number, password_hash, status, is_verified FROM investor_users WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile} AND deleted_at IS NULL LIMIT 1`;
+        ? await sql`SELECT id, full_name, email, mobile_number, password_hash, status, is_verified, enrollment_status FROM investor_users WHERE LOWER(email) = ${loginEmail} AND deleted_at IS NULL LIMIT 1`
+        : await sql`SELECT id, full_name, email, mobile_number, password_hash, status, is_verified, enrollment_status FROM investor_users WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile} AND deleted_at IS NULL LIMIT 1`;
 
       if (investor) {
         const authSettings = await getAppAuthSettingsRow();
@@ -5017,6 +5017,7 @@ app.post("/api/auth/login", async (req, res) => {
           role: "Investor",
           email: investor.email,
           full_name: investor.full_name,
+          enrollment_status: investor.enrollment_status || "Pending",
         };
 
         const jwtSecret = process.env.JWT_SECRET;
@@ -5036,7 +5037,8 @@ app.post("/api/auth/login", async (req, res) => {
             email: investor.email,
             mobile_no: investor.mobile_number,
             account_status: investor.status,
-            email_verified: Boolean(investor.is_verified)
+            email_verified: Boolean(investor.is_verified),
+            enrollment_status: investor.enrollment_status || "Pending"
           }
         }, "Investor login successful");
       }

@@ -1,7 +1,7 @@
 import express from "express";
 import multer from "multer";
 import { userAuth } from "../middleware/auth.middleware.js";
-import { getAssociatePrefillController, getAssociateTeamMembersController, getTeamMemberByIdController, createTeamMemberController, updateTeamMemberController, updateTeamMemberStatusController } from "../controllers/teamMemberController.js";
+import { getAssociatePrefillController, getAssociateTeamMembersController, getTeamMemberByIdController, createTeamMemberController, updateTeamMemberController, updateTeamMemberStatusController, finalSubmitTeamMemberController, printTeamMemberController } from "../controllers/teamMemberController.js";
 const router = express.Router();
 const upload = multer({
     storage: multer.memoryStorage(),
@@ -37,4 +37,8 @@ router.post("/team-members", userAuth, uploadFields, createTeamMemberController)
 router.put("/team-members/:id", userAuth, uploadFields, updateTeamMemberController);
 // 6. Approve / reject team member status
 router.patch("/team-members/:id/status", userAuth, updateTeamMemberStatusController);
+// 7. Final Submit team member enrollment
+router.post("/team-members/:id/final-submit", userAuth, finalSubmitTeamMemberController);
+// 8. Auth-protected print PDF endpoint
+router.get("/team-members/:id/print", userAuth, printTeamMemberController);
 export default router;

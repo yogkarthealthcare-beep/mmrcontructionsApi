@@ -351,6 +351,7 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
     let newSubmissionId = null;
 
     await sql.begin(async (tx) => {
+      const isFinal = b.isFinalSubmitted === true || b.isFinalSubmitted === 'true' || b.is_final_submitted === true || b.is_final_submitted === 'true';
       let existingSub = null;
       if (user_id) {
         const [ex] = await tx`SELECT id, is_final_submitted, photo_first_applicant_url, photo_co_applicant_url, signature_sole_first_applicant_url, signature_co_applicant_url FROM customer_enrollment_submissions WHERE user_id = ${user_id} ORDER BY created_at DESC LIMIT 1`;
@@ -392,7 +393,7 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
             nationality = ${b.nationality || null},
             nationality_other = ${b.nationalityOther || null},
             religion = ${b.religion || null},
-            is_final_submitted = COALESCE(${b.isFinalSubmitted !== undefined ? Boolean(b.isFinalSubmitted) : (b.is_final_submitted !== undefined ? Boolean(b.is_final_submitted) : null)}, is_final_submitted, FALSE),
+            is_final_submitted = (is_final_submitted OR ${isFinal}),
             pan_no = ${b.pan || null},
             aadhar_no = ${b.aadhar || null},
             occupation = ${b.occupation || null},
@@ -443,7 +444,6 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
 
         await tx`DELETE FROM customer_nominees WHERE submission_id = ${newSubmissionId}`;
       } else {
-        const isFinal = Boolean(b.isFinalSubmitted || b.is_final_submitted || false);
         const [newRow] = await tx`
           INSERT INTO customer_enrollment_submissions (
             user_id, form_date, application_no, project_name, property_type, property_type_other, plot_flat_no, block_tower, size_area, rate_per_unit, basic_sale_price, plc_dev_charges, total_property_value,
@@ -726,15 +726,28 @@ router.get("/customer-enrollment/me", authUser, async (req, res) => {
 });
 
 // GET /api/customer-enrollment/:id/print
-router.get("/customer-enrollment/:id/print", async (req, res) => {
+router.get("/customer-enrollment/:id/print", authUser, async (req, res) => {
   try {
     const id = String(req.params.id);
-    const pdfBuffer = await generateCustomerPdf(id);
-
-    const [submission] = await sql`SELECT application_no, form_date FROM customer_enrollment_submissions WHERE id = ${id}`;
+    const [submission] = await sql`SELECT id, user_id, application_no, form_date, associate_id FROM customer_enrollment_submissions WHERE id = ${id}`;
     if (!submission) {
       return err(res, "Submission not found.", 404);
     }
+
+    // Ownership & Admin access check
+    const isAdmin = Boolean(req.user?.is_admin || isAdminPrincipal(req.admin) || isAdminPrincipal(req.user));
+    const authUserId = req.user?.id || req.user?.user_id;
+    const isOwner = (Boolean(authUserId && submission.user_id) && Number(submission.user_id) === Number(authUserId)) ||
+                    (Boolean(submission.associate_id && req.user?.member_id) && String(submission.associate_id).trim().toUpperCase() === String(req.user.member_id).trim().toUpperCase());
+
+    if (!isAdmin && !isOwner) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: You are not authorized to access this customer enrollment record."
+      });
+    }
+
+    const pdfBuffer = await generateCustomerPdf(id);
 
     const dateStr = submission.form_date 
       ? new Date(submission.form_date).toISOString().split('T')[0] 

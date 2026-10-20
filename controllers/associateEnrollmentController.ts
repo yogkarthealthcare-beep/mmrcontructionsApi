@@ -1103,6 +1103,8 @@ export async function updateAdminAssociateEnrollment(req: Request, res: Response
               INSERT INTO user_bank_details (user_id, bank_name, account_holder_name, account_number, ifsc_code, branch_name)
               VALUES (${targetUserId}, ${bankName}, ${accHolder}, ${accNo}, ${ifsc}, ${branchName})
             `;
+          }
+        }
         // Sync user_documents & user_kyc_profiles
         if (isApproving) {
           await tx`

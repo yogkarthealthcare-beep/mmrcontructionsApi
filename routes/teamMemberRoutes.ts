@@ -7,7 +7,9 @@ import {
   getTeamMemberByIdController,
   createTeamMemberController,
   updateTeamMemberController,
-  updateTeamMemberStatusController
+  updateTeamMemberStatusController,
+  finalSubmitTeamMemberController,
+  printTeamMemberController
 } from "../controllers/teamMemberController.js";
 
 const router = express.Router();
@@ -52,5 +54,11 @@ router.put("/team-members/:id", userAuth, uploadFields, updateTeamMemberControll
 
 // 6. Approve / reject team member status
 router.patch("/team-members/:id/status", userAuth, updateTeamMemberStatusController);
+
+// 7. Final Submit team member enrollment
+router.post("/team-members/:id/final-submit", userAuth, finalSubmitTeamMemberController);
+
+// 8. Auth-protected print PDF endpoint
+router.get("/team-members/:id/print", userAuth, printTeamMemberController);
 
 export default router;

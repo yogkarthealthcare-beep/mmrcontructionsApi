@@ -9,6 +9,16 @@ import { normalizeHumanName, isValidHumanName, calculateAge } from "../utils/val
 
 // Ensure table exists on first invocation
 let tableInitialized = false;
+
+/**
+ * Rollout safety flag: Enforce final-submit check on approval.
+ * Defaults to false (OFF) until Step 3 frontend is deployed.
+ * To enable, set ENFORCE_TM_FINAL_SUBMIT=true in environment.
+ */
+export const isEnforceTmFinalSubmitEnabled = (): boolean => {
+  return process.env.ENFORCE_TM_FINAL_SUBMIT === "true" || process.env.ENFORCE_TM_FINAL_SUBMIT === "1";
+};
+
 export async function ensureTeamMembersTable(): Promise<void> {
   if (tableInitialized) return;
   try {
@@ -44,6 +54,7 @@ export async function ensureTeamMembersTable(): Promise<void> {
         associate_signature_url VARCHAR(255),
         authorized_signatory_name VARCHAR(150),
         status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        is_final_submitted BOOLEAN NOT NULL DEFAULT false,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )
@@ -51,6 +62,7 @@ export async function ensureTeamMembersTable(): Promise<void> {
 
     await sql`ALTER TABLE team_members ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL`.catch(() => {});
     await sql`ALTER TABLE team_members ADD COLUMN IF NOT EXISTS slot_number SMALLINT`.catch(() => {});
+    await sql`ALTER TABLE team_members ADD COLUMN IF NOT EXISTS is_final_submitted BOOLEAN NOT NULL DEFAULT FALSE`.catch(() => {});
     await sql`ALTER TABLE team_members DROP CONSTRAINT IF EXISTS team_members_slot_number_check`.catch(() => {});
     await sql`ALTER TABLE team_members DROP CONSTRAINT IF EXISTS chk_team_members_slot`.catch(() => {});
     await sql`ALTER TABLE team_members ADD CONSTRAINT team_members_slot_number_check CHECK (slot_number BETWEEN 1 AND 10)`.catch(() => {});
@@ -373,7 +385,10 @@ export const teamMemberSchema = z.object({
   userId: z.coerce.number().optional().nullable(),
   user_id: z.coerce.number().optional().nullable(),
   slotNumber: z.coerce.number().optional().nullable(),
-  slot_number: z.coerce.number().optional().nullable()
+  slot_number: z.coerce.number().optional().nullable(),
+  termsAccepted: z.preprocess((val) => val === true || val === "true" || val === 1 || val === "1", z.boolean().optional().nullable()),
+  isFinalSubmit: z.preprocess((val) => val === true || val === "true" || val === 1 || val === "1", z.boolean().optional().nullable()),
+  is_final_submitted: z.preprocess((val) => val === true || val === "true" || val === 1 || val === "1", z.boolean().optional().nullable())
 });
 
 export type TeamMemberInput = z.infer<typeof teamMemberSchema>;
@@ -604,7 +619,7 @@ export async function createTeamMemberRecord(
 
     // 2. Check occupied slots for this associate (ignore rejected)
     const existingMembers = await tx`
-      SELECT id, slot_number, status, user_id, team_member_uid
+      SELECT id, slot_number, status, user_id, team_member_uid, is_final_submitted
       FROM team_members
       WHERE associate_id = ${data.associateId}
         AND status <> 'rejected'
@@ -653,6 +668,11 @@ export async function createTeamMemberRecord(
       }
       userId = existingUser.user_id;
       existingTm = existingMembers.find((m: any) => Number(m.user_id) === Number(userId));
+      if (existingTm?.is_final_submitted) {
+        const err: any = new Error("Enrollment is permanently finalized and cannot be modified.");
+        err.statusCode = 403;
+        throw err;
+      }
       if (!existingUser.sponsor_user_id) {
         await tx`
           UPDATE users
@@ -671,6 +691,7 @@ export async function createTeamMemberRecord(
         `;
       }
     }
+    const isFinalSubmit = (data.isFinalSubmit === true || (data as any).isFinalSubmit === 'true' || (data as any).is_final_submitted === true || (data as any).is_final_submitted === 'true');
 
     // Determine assigned slot (1 to 10 direct members, 11 total with Team Lead)
     let assignedSlot: number | null = existingTm ? Number(existingTm.slot_number) : null;
@@ -758,6 +779,7 @@ export async function createTeamMemberRecord(
           declaration_accepted = ${data.declarationAccepted},
           applicant_signature_url = COALESCE(${applicantSigUrl}, applicant_signature_url),
           associate_signature_url = COALESCE(${associateSigUrl}, associate_signature_url),
+          is_final_submitted = ${isFinalSubmit ? true : sql`is_final_submitted`},
           status = 'pending',
           updated_at = NOW()
         WHERE id = ${existingTm.id}
@@ -793,6 +815,7 @@ export async function createTeamMemberRecord(
           declaration_accepted,
           applicant_signature_url,
           associate_signature_url,
+          is_final_submitted,
           status,
           created_at,
           updated_at
@@ -823,6 +846,7 @@ export async function createTeamMemberRecord(
           ${data.declarationAccepted},
           ${applicantSigUrl},
           ${associateSigUrl},
+          ${isFinalSubmit},
           'pending',
           NOW(),
           NOW()
@@ -1019,9 +1043,38 @@ export async function getTeamMemberById(id: number | string, authUserId?: number
 
   // Enforce scoping: accessible by admin, the owner associate, or the team member themselves
   if (!isAdmin && authUserId) {
-    const uid = Number(authUserId);
-    const isOwnerAssociate = Number(record.associate_id) === uid;
-    const isSelfMember = Number(record.user_id) === uid;
+    const isNumeric = /^\d+$/.test(String(authUserId).trim());
+    const authNumId = isNumeric ? Number(authUserId) : null;
+    const authCodeStr = !isNumeric ? String(authUserId).trim().toUpperCase() : "";
+
+    let isOwnerAssociate = false;
+    let isSelfMember = false;
+
+    if (authNumId !== null) {
+      isOwnerAssociate = Number(record.associate_id) === authNumId;
+      isSelfMember = record.user_id ? Number(record.user_id) === authNumId : false;
+    }
+
+    if (!isOwnerAssociate && !isSelfMember && authCodeStr) {
+      if (record.team_member_uid && String(record.team_member_uid).trim().toUpperCase() === authCodeStr) {
+        isSelfMember = true;
+      } else {
+        const [matchedUser] = await sql`
+          SELECT user_id, member_id FROM users
+          WHERE UPPER(member_id) = ${authCodeStr}
+          LIMIT 1
+        `;
+        if (matchedUser) {
+          if (Number(record.associate_id) === Number(matchedUser.user_id)) {
+            isOwnerAssociate = true;
+          }
+          if (record.user_id && Number(record.user_id) === Number(matchedUser.user_id)) {
+            isSelfMember = true;
+          }
+        }
+      }
+    }
+
     if (!isOwnerAssociate && !isSelfMember) {
       throw new Error("Unauthorized access to this team member record");
     }
@@ -1054,9 +1107,17 @@ export async function updateTeamMemberRecord(
     throw new Error("Team member not found");
   }
 
+  if (existing.is_final_submitted && !isAdmin) {
+    const err: any = new Error("Enrollment is permanently finalized and cannot be modified.");
+    err.statusCode = 403;
+    throw err;
+  }
+
   if (existing.status !== "pending" && !isAdmin) {
     throw new Error("Only pending team member records can be updated");
   }
+
+  const isFinalSubmit = (data.isFinalSubmit === true || (data as any).isFinalSubmit === 'true' || (data as any).is_final_submitted === true || (data as any).is_final_submitted === 'true');
 
   if (!applicantSigUrl && data.applicantSignature && data.applicantSignature.startsWith("data:image/")) {
     applicantSigUrl = await saveSignatureDataUrl(data.applicantSignature, existing.associate_id, "applicant");
@@ -1088,6 +1149,51 @@ export async function updateTeamMemberRecord(
       ifsc_code = COALESCE(${data.ifscCode || null}, ifsc_code),
       applicant_signature_url = COALESCE(${applicantSigUrl}, applicant_signature_url),
       associate_signature_url = COALESCE(${associateSigUrl}, associate_signature_url),
+      is_final_submitted = ${isFinalSubmit ? true : sql`is_final_submitted`},
+      updated_at = NOW()
+    WHERE id = ${existing.id}
+    RETURNING *
+  `;
+
+  return {
+    ...updated,
+    aadhar_no_masked: maskAadhar(updated.aadhar_no),
+    account_no_masked: maskAccountNo(updated.account_no)
+  };
+}
+
+/**
+ * 5b. Final Submit Team Member Record (Permanently locks draft)
+ */
+export async function finalSubmitTeamMemberRecord(
+  id: number | string,
+  associateId?: number | string,
+  isAdmin = false
+) {
+  await ensureTeamMembersTable();
+  const numId = Number(id);
+
+  const existing = await getTeamMemberById(numId, associateId, isAdmin);
+  if (!existing) {
+    throw new Error("Team member not found");
+  }
+
+  if (!isAdmin && associateId && Number(existing.associate_id) !== Number(associateId)) {
+    const err: any = new Error("Unauthorized: Only the enrolling Associate or Admin can Final Submit this record.");
+    err.statusCode = 403;
+    throw err;
+  }
+
+  if (existing.is_final_submitted && !isAdmin) {
+    const err: any = new Error("Enrollment is permanently finalized and cannot be modified.");
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const [updated] = await sql`
+    UPDATE team_members
+    SET
+      is_final_submitted = TRUE,
       updated_at = NOW()
     WHERE id = ${existing.id}
     RETURNING *
@@ -1122,6 +1228,31 @@ export async function updateTeamMemberStatus(
       throw new Error("Team member not found");
     }
     const current = rows[0];
+    const isApproving = ["approved", "active"].includes(normalizedStatus);
+    if (isApproving && isEnforceTmFinalSubmitEnabled()) {
+      const currentStatus = String(current.status || "").toLowerCase().trim();
+      const isCurrentlyPending = currentStatus === "pending" || currentStatus === "draft" || currentStatus === "";
+
+      // Extra safety check: verify if the linked user was previously verified/approved (e.g. via referral flow or historical activation).
+      // NOTE: This check prevents re-approval lockouts; it requires staging validation before turning ENFORCE_TM_FINAL_SUBMIT ON in production.
+      let wasEverApproved = !isCurrentlyPending;
+      if (current.user_id) {
+        const [u] = await tx`
+          SELECT is_verified, account_status 
+          FROM users 
+          WHERE user_id = ${current.user_id} 
+          LIMIT 1
+        `;
+        if (u && (u.is_verified === true || ["approved", "active"].includes(String(u.account_status || "").toLowerCase()))) {
+          wasEverApproved = true;
+        }
+      }
+
+      // Gate only applies when moving from a pending state to approved for the first time
+      if (isCurrentlyPending && !wasEverApproved && !current.is_final_submitted) {
+        throw new Error("Cannot approve: Team Member enrollment must be Final Submitted before it can be approved.");
+      }
+    }
 
     // 2. Update team_members status
     const [updated] = await tx`
@@ -1452,6 +1583,19 @@ export async function approveTeamMemberByAssociate(
 
     if (!isDirectSponsor && !isDirectAssociate && !isDownline) {
       throw new Error("Unauthorized: This member is not part of your authorized downline team.");
+    }
+
+    // Final-submit gate: applied ONLY where a team_members row already exists, moving from pending to approved for first time, and ENFORCE_TM_FINAL_SUBMIT is ON
+    if (tmRow && isEnforceTmFinalSubmitEnabled()) {
+      const tmStatus = String(tmRow.status || "").toLowerCase().trim();
+      const isCurrentlyPending = tmStatus === "pending" || tmStatus === "draft" || tmStatus === "";
+      let wasEverApproved = !isCurrentlyPending;
+      if (userRow && (userRow.is_verified === true || ["approved", "active"].includes(String(userRow.account_status || "").toLowerCase()))) {
+        wasEverApproved = true;
+      }
+      if (isCurrentlyPending && !wasEverApproved && !tmRow.is_final_submitted) {
+        throw new Error("Cannot approve: Team Member enrollment must be Final Submitted before it can be approved.");
+      }
     }
 
     // 3. Update Users Account Status to 'Active'
