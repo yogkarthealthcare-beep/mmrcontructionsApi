@@ -495,6 +495,15 @@ export async function createBooking({
 
     // 5f. Compute Pricing, Installment Plans & Balances
     const plotPrice = Number(plot.sold_price || plot.base_price || 0);
+    if (!plotPrice || isNaN(plotPrice) || plotPrice <= 0) {
+      throw createBookingError(`Plot price is unconfigured or zero (₹${plotPrice || 0}). Booking cannot proceed until admin configures the plot base price.`, 400);
+    }
+    if (normalizedAdvance > plotPrice) {
+      throw createBookingError(`Advance amount (₹${normalizedAdvance}) cannot exceed the plot value (₹${plotPrice}).`, 400);
+    }
+    if (normPaymentType === 'FullPayment' && normalizedAdvance > 0 && normalizedAdvance < plotPrice) {
+      throw createBookingError(`FullPayment requires the full plot value (₹${plotPrice}). Received ₹${normalizedAdvance}.`, 400);
+    }
 
     let selectedPlan = null;
     let planSnapshot = null;
@@ -547,7 +556,7 @@ export async function createBooking({
         booking_status, workflow_status, payment_method, notes, queue_position,
         booked_by_user_id, sold_by_user_id, associate_user_id, booking_type,
         associate_approval_status, associate_approved_by, associate_approved_at,
-        required_booking_amount, remaining_balance, booking_date, created_at, updated_at,
+        required_booking_amount, remaining_balance, base_price, booking_date, created_at, updated_at,
         installment_plan_id, plan_snapshot, part_wise_deadline_at
       ) VALUES (
         ${serialNumber}, ${derivedBuyerUserId}, ${normalizedPlotId}, ${siteId || plot.site_id},
@@ -557,7 +566,7 @@ export async function createBooking({
         ${derivedApprovalStatus},
         ${autoApproved ? derivedBookedByUserId : null},
         ${autoApproved ? new Date() : null},
-        ${requiredBookingAmount || initialAdvance}, ${remainingBalance}, CURRENT_DATE, NOW(), NOW(),
+        ${requiredBookingAmount || initialAdvance}, ${remainingBalance}, ${plotPrice}, CURRENT_DATE, NOW(), NOW(),
         ${selectedPlan ? selectedPlan.id : null}, ${planSnapshot ? tx.json(planSnapshot) : null}, ${partWiseDeadlineAt}
       )
       RETURNING *
