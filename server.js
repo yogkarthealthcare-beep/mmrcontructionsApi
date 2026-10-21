@@ -6216,6 +6216,7 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
                ae.contact_no_1, 
                ae.contact_no_2, 
                ae.email, 
+               ae.status,
                ae.status AS app_status, 
                (CASE WHEN LOWER(COALESCE(ae.status, '')) IN ('approved', 'completed') THEN TRUE ELSE FALSE END) AS is_verified,
                ae.applicant_photo_path AS photo_path, 
