@@ -194,7 +194,12 @@ export async function createBooking({
   lockMinutes = null,
   installmentPlanId = null,
   installment_plan_id = null,
-  customDb = null
+  customDb = null,
+  customPlotPrice = null,
+  custom_plot_price = null,
+  plotPrice: incomingPlotPrice = null,
+  plot_price = null,
+  base_price = null
 }) {
   const runner = customDb || sql;
   await ensureBookingTableSchema(runner);
@@ -494,9 +499,21 @@ export async function createBooking({
     const serialNumber = `MMR-${new Date().getFullYear()}-${String(seqRow?.n || 1).padStart(5, '0')}`;
 
     // 5f. Compute Pricing, Installment Plans & Balances
-    const plotPrice = Number(plot.sold_price || plot.base_price || 0);
+    const incomingPrice = Number(customPlotPrice || custom_plot_price || incomingPlotPrice || plot_price || base_price || 0);
+    let plotPrice = Number(plot.sold_price || plot.base_price || 0);
+
+    if ((!plotPrice || isNaN(plotPrice) || plotPrice <= 0) && incomingPrice > 0) {
+      plotPrice = incomingPrice;
+      // Persist user-specified price onto plot base_price if previously unconfigured
+      await tx`
+        UPDATE plots 
+        SET base_price = ${plotPrice}, updated_at = NOW() 
+        WHERE plot_id = ${normalizedPlotId} AND (base_price IS NULL OR base_price <= 0)
+      `;
+    }
+
     if (!plotPrice || isNaN(plotPrice) || plotPrice <= 0) {
-      throw createBookingError(`Plot price is unconfigured or zero (₹${plotPrice || 0}). Booking cannot proceed until admin configures the plot base price.`, 400);
+      throw createBookingError(`Plot price is unconfigured or zero (₹${plotPrice || 0}). Please enter the total plot price to proceed with booking.`, 400);
     }
     if (normalizedAdvance > plotPrice) {
       throw createBookingError(`Advance amount (₹${normalizedAdvance}) cannot exceed the plot value (₹${plotPrice}).`, 400);

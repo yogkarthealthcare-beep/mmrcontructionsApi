@@ -7448,7 +7448,8 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
       paymentType: payment_type,
       advanceAmount: advance_amount,
       paymentMethod: req.body.payment_method || "Online",
-      notes: notes || "Booking submitted by user"
+      notes: notes || "Booking submitted by user",
+      customPlotPrice: req.body.custom_plot_price || req.body.plot_price || req.body.base_price || req.body.customPlotPrice
     });
 
     const booking = {
@@ -9231,7 +9232,8 @@ app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (re
       installmentPlanId: req.body.installment_plan_id || req.body.installmentPlanId,
       advanceAmount: amountToUse,
       paymentMethod: payment_method || "Cash / Bank",
-      notes: notes || `Assisted booking by Associate`
+      notes: notes || `Assisted booking by Associate`,
+      customPlotPrice: req.body.custom_plot_price || req.body.plot_price || req.body.base_price || req.body.customPlotPrice
     });
 
     const booking = result.booking;
