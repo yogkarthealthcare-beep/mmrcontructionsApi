@@ -3,6 +3,7 @@ import { ZodError } from "zod";
 import { saveFileToVPS } from "../services/fileStorage.service.js";
 import { associateEnrollmentSchema, registerAssociateEnrollment } from "../services/associateEnrollmentService.js";
 import { deleteAssociateProfile } from "../services/profileCleanupService.js";
+import { validateNomineeDob } from "../utils/validationHelper.js";
 
 /**
  * Controller to handle POST /api/associate-enrollment
@@ -884,6 +885,12 @@ export async function updateAdminAssociateEnrollment(req: Request, res: Response
     // Nominee fields
     const nomineeName = b.nominee_name || b.nomineeName || null;
     const nomineeDob = b.nominee_dob || b.nomineeDob || null;
+    if (nomineeDob) {
+      const nomCheck = validateNomineeDob(nomineeDob);
+      if (!nomCheck.valid) {
+        return (res as any).status(400).json({ success: false, message: nomCheck.message });
+      }
+    }
     const nomineeGender = b.nominee_gender || b.nomineeGender || 'Male';
     const nomineeRel = b.nominee_relationship || b.nomineeRelationship || 'Nominee';
     const nomineePan = (b.nominee_pan_no || b.nomineePanNo || '') ? String(b.nominee_pan_no || b.nomineePanNo).trim().toUpperCase() : null;

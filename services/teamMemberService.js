@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 import fs from "fs/promises";
 import path from "path";
 import { getStorageRoot, ensureDirExists } from "./fileStorage.service.js";
-import { normalizeHumanName, isValidHumanName, calculateAge } from "../utils/validationHelper.js";
+import { normalizeHumanName, isValidHumanName, calculateAge, validateNomineeDob } from "../utils/validationHelper.js";
 // Ensure table exists on first invocation
 let tableInitialized = false;
 /**
@@ -76,6 +76,43 @@ export async function ensureTeamMembersTable() {
         await sql `CREATE INDEX IF NOT EXISTS idx_team_members_status ON team_members (status)`.catch(() => { });
         await sql `CREATE INDEX IF NOT EXISTS idx_team_members_associate_created ON team_members (associate_id, created_at DESC)`.catch(() => { });
         await sql `CREATE UNIQUE INDEX IF NOT EXISTS uq_team_members_assoc_slot ON team_members (associate_id, slot_number)`.catch(() => { });
+        await sql `
+          UPDATE team_members tm
+          SET 
+            father_husband_name = COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), '')),
+            date_of_birth = COALESCE(tm.date_of_birth, u.date_of_birth, aen.dob),
+            gender = COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), '')),
+            aadhar_no = COALESCE(NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), '')),
+            pan_no = COALESCE(NULLIF(TRIM(tm.pan_no), ''), NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), '')),
+            full_address = COALESCE(NULLIF(TRIM(tm.full_address), ''), NULLIF(TRIM(pa.address_line1), ''), NULLIF(TRIM(aen.perm_address), '')),
+            nominee_name = COALESCE(NULLIF(TRIM(tm.nominee_name), ''), NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), '')),
+            nominee_relation = COALESCE(NULLIF(TRIM(tm.nominee_relation), ''), NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), '')),
+            nominee_age_dob = COALESCE(NULLIF(TRIM(tm.nominee_age_dob), ''), NULLIF(TRIM(aen.nominee_dob::text), '')),
+            nominee_contact_no = COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), '')),
+            bank_name = COALESCE(NULLIF(TRIM(tm.bank_name), ''), NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), '')),
+            branch_name = COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), '')),
+            account_no = COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), '')),
+            ifsc_code = COALESCE(NULLIF(TRIM(tm.ifsc_code), ''), NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), '')),
+            photo_url = COALESCE(NULLIF(TRIM(tm.photo_url), ''), u.profile_image)
+          FROM users u
+          LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
+          LEFT JOIN user_bank_details b ON b.user_id = u.user_id
+          LEFT JOIN user_nominees n ON n.user_id = u.user_id
+          LEFT JOIN LATERAL (
+            SELECT ae.father_husband_name, ae.dob, ae.gender, ae.aadhar_no, ae.pan_no,
+                   COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
+                   ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
+                   an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+            FROM associate_enrollment ae
+            LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+            LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
+            LEFT JOIN associate_nominee an ON an.associate_id = ae.id
+            WHERE ae.user_id = u.user_id OR (u.mobile_no IS NOT NULL AND (ae.contact_no_1 = u.mobile_no OR ae.contact_1 = u.mobile_no))
+            ORDER BY (ae.user_id = u.user_id) DESC, ae.created_at DESC LIMIT 1
+          ) aen ON TRUE
+          WHERE tm.user_id = u.user_id
+            AND (tm.bank_name IS NULL OR tm.full_address IS NULL OR tm.nominee_name IS NULL OR tm.father_husband_name IS NULL)
+        `.catch(e => console.warn("[TeamMemberService Backfill Warning]:", e.message));
         await syncExistingTeamMembersFromUsers();
         tableInitialized = true;
     }
@@ -350,7 +387,11 @@ export const teamMemberSchema = z.object({
         .refine(v => !v || isValidHumanName(v), { message: "Nominee Name must contain only alphabets and spaces" })
         .transform(v => (v ? normalizeHumanName(v) : v)),
     nomineeRelation: z.string().optional().nullable(),
-    nomineeAgeDob: z.string().optional().nullable(),
+    nomineeAgeDob: z.string().optional().nullable()
+        .refine(v => {
+            if (!v) return true;
+            return validateNomineeDob(v).valid;
+        }, { message: "Nominee must be at least 18 years old and Date of Birth cannot be in the future" }),
     nomineeContactNo: z.string().optional().nullable(),
     bankName: z.string().min(2, "Bank Name is required"),
     branchName: z.string().min(2, "Branch Name is required"),

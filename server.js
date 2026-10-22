@@ -45,7 +45,7 @@ import { getVersionInfo } from "./services/version.service.js";
 import { ensureEmiSchedulesForBooking, ensureInvoiceForEmi, ensureReceiptForEmi } from "./services/emi.service.js";
 import { setPlotStatus } from "./services/plotStatus.service.js";
 import { dispatchBookingNotification } from "./services/bookingNotification.service.js";
-import { normalizeHumanName, isValidHumanName, calculateAge, isValidState } from "./utils/validationHelper.js";
+import { normalizeHumanName, isValidHumanName, calculateAge, isValidState, validateNomineeDob } from "./utils/validationHelper.js";
 import bookingService from "./services/bookingService.js";
 import salesAttributionReportsRoutes from "./routes/sales-attribution-reports.routes.js";
 import bookingApprovalsRoutes from "./routes/booking-approvals.routes.js";
@@ -6172,22 +6172,22 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
               ces.associate_id,
               ces.associate_mobile,
               ces.associate_signature_name,
-             COALESCE(pa.address_line1, aen.perm_address, tm.full_address, ces.permanent_address, ces.present_address) AS address,
-             COALESCE(pa.address_line1, aen.perm_address, tm.full_address, ces.permanent_address, ces.present_address) AS address_line1,
-             COALESCE(pa.city, aen.perm_city, ces.permanent_city, ces.present_city) AS city,
-             COALESCE(pa.state, aen.perm_state, ces.permanent_state_pin, ces.present_state_pin) AS state,
-             COALESCE(pa.pin_code, aen.perm_pin, ces.permanent_state_pin, ces.present_state_pin) AS pin_code,
+             COALESCE(NULLIF(TRIM(aen.perm_address), ''), NULLIF(TRIM(pa.address_line1), ''), tm.full_address, ces.permanent_address, ces.present_address) AS address,
+             COALESCE(NULLIF(TRIM(aen.perm_address), ''), NULLIF(TRIM(pa.address_line1), ''), tm.full_address, ces.permanent_address, ces.present_address) AS address_line1,
+             COALESCE(NULLIF(TRIM(aen.perm_city), ''), NULLIF(TRIM(pa.city), ''), ces.permanent_city, ces.present_city) AS city,
+             COALESCE(NULLIF(TRIM(aen.perm_state), ''), NULLIF(TRIM(pa.state), ''), ces.permanent_state_pin, ces.present_state_pin) AS state,
+             COALESCE(NULLIF(TRIM(aen.perm_pin), ''), NULLIF(TRIM(pa.pin_code), ''), ces.permanent_state_pin, ces.present_state_pin) AS pin_code,
              ces.permanent_address,
              ces.present_address,
              ces.application_status,
              ces.application_no,
-             COALESCE(b.bank_name, aen.bank_name, tm.bank_name, ces.acc_bank_branch, ces.drawn_bank_branch) AS bank_name,
-             COALESCE(b.branch_name, aen.branch_name, tm.branch_name, ces.drawn_bank_branch, ces.acc_bank_branch) AS branch_name,
-             COALESCE(b.account_holder_name, aen.account_holder_name, tm.full_name, ces.acc_holder_name, u.full_name, ces.applicant_name) AS account_holder_name,
-             COALESCE(b.account_number, aen.account_no, tm.account_no, ces.acc_number) AS account_number,
-             COALESCE(b.ifsc_code, aen.ifsc_code, tm.ifsc_code, ces.ifsc_code) AS ifsc_code,
-             COALESCE(n.nominee_name, aen.nominee_name, tm.nominee_name, cnom.nominee_name, ces.co_applicant_name) AS nominee_name,
-             COALESCE(n.relationship, aen.nom_rel, tm.nominee_relation, cnom.relation, ces.co_relation) AS nominee_relationship,
+             COALESCE(NULLIF(TRIM(aen.bank_name), ''), b.bank_name, tm.bank_name, ces.acc_bank_branch, ces.drawn_bank_branch) AS bank_name,
+             COALESCE(NULLIF(TRIM(aen.branch_name), ''), b.branch_name, tm.branch_name, ces.drawn_bank_branch, ces.acc_bank_branch) AS branch_name,
+             COALESCE(NULLIF(TRIM(aen.account_holder_name), ''), b.account_holder_name, tm.full_name, ces.acc_holder_name, u.full_name, ces.applicant_name) AS account_holder_name,
+             COALESCE(NULLIF(TRIM(aen.account_no), ''), b.account_number, tm.account_no, ces.acc_number) AS account_number,
+             COALESCE(NULLIF(TRIM(aen.ifsc_code), ''), b.ifsc_code, tm.ifsc_code, ces.ifsc_code) AS ifsc_code,
+             COALESCE(NULLIF(TRIM(aen.nominee_name), ''), n.nominee_name, tm.nominee_name, cnom.nominee_name, ces.co_applicant_name) AS nominee_name,
+             COALESCE(NULLIF(TRIM(aen.nom_rel), ''), n.relationship, tm.nominee_relation, cnom.relation, ces.co_relation) AS nominee_relationship,
              tm.slot_number,
              COALESCE(tm.photo_url, aen.photo_path) AS photo_url,
              COALESCE(tm.applicant_signature_url, aen.signature_path) AS applicant_signature_url,
@@ -6317,11 +6317,19 @@ app.put("/api/profile", verifyUserToken, async (req, res) => {
     const {
       alternate_mobile, email, spouse_name,
       account_holder_name, bank_name, branch_name, account_number, ifsc_code,
-      nominee_name, nominee_relationship,
+      nominee_name, nominee_relationship, nominee_dob, nominee_age_dob, nomineeDob,
       address, address_line1, city, state, pin_code,
       father_name, date_of_birth, gender, pan_number, aadhar_number, full_name
     } = req.body || {};
     const uid = req.user.user_id;
+
+    const rawNomDob = nominee_dob || nominee_age_dob || nomineeDob || null;
+    if (rawNomDob) {
+      const nomDobCheck = validateNomineeDob(rawNomDob);
+      if (!nomDobCheck.valid) {
+        return err(res, nomDobCheck.message, 400);
+      }
+    }
 
     const cleanEmail = email && String(email).trim() ? String(email).trim().toLowerCase() : null;
     const cleanAltMobile = alternate_mobile && String(alternate_mobile).trim() ? String(alternate_mobile).replace(/\D/g, "") : null;
@@ -6643,13 +6651,14 @@ app.get("/api/profile/documents", verifyUserToken, async (req, res) => {
     const docs = (rawDocs || []).map((d) => {
       const fullUrl = normalizeDocUrl(d.file_path);
       const isDocApproved = Boolean(d.is_verified) ||
-        String(d.review_status || '').toLowerCase() === 'approved' ||
-        (isAccountApproved && String(d.review_status || '').toLowerCase() !== 'rejected');
+        String(d.review_status || '').toLowerCase() === 'approved';
+      const isDocRejected = String(d.review_status || '').toLowerCase() === 'rejected';
+      const status = isDocApproved ? 'Approved' : (isDocRejected ? 'Rejected' : 'Under Review');
 
       return {
         ...d,
         is_verified: isDocApproved,
-        review_status: isDocApproved ? 'Approved' : (d.review_status || 'Under Review'),
+        review_status: status,
         file_path: fullUrl,
         document_url: fullUrl,
         url: fullUrl,
@@ -9194,8 +9203,8 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
   }
 });
 
-// 3. Associate books a plot for their authorized team member
-app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (req, res) => {
+// 3. Associate or Team Member books a plot for their authorized buyer
+app.post("/api/associate/bookings", verifyUserToken, requireSalesEntity, async (req, res) => {
   try {
     const associateId = req.user.user_id;
     const {
@@ -9232,7 +9241,7 @@ app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (re
       installmentPlanId: req.body.installment_plan_id || req.body.installmentPlanId,
       advanceAmount: amountToUse,
       paymentMethod: payment_method || "Cash / Bank",
-      notes: notes || `Assisted booking by Associate`,
+      notes: notes || `Assisted booking by Associate/Team Member`,
       customPlotPrice: req.body.custom_plot_price || req.body.plot_price || req.body.base_price || req.body.customPlotPrice
     });
 
@@ -9241,7 +9250,7 @@ app.post("/api/associate/bookings", verifyUserToken, requireAssociate, async (re
     const teamMember = result.buyer;
     const [associate] = await sql`SELECT user_id, full_name, member_id FROM users WHERE user_id = ${associateId}`;
 
-    const totalPlotPrice = Number(plot.sold_price || plot.base_price || (Number(plot.plot_area || 0) * 1000) || 0);
+    const totalPlotPrice = Number(booking.base_price || plot.sold_price || plot.base_price || 0);
     const initialPaid = Number(booking.advance_amount || 0);
     const remainingBalance = Number(booking.remaining_balance || Math.max(0, totalPlotPrice - initialPaid));
 
@@ -13009,7 +13018,7 @@ app.put("/api/admin/plots/:id",
       const { plot_number, plot_area, plot_category, base_price, down_payment,
         monthly_emi, emi_tenure_months, file_charge, plot_status,
         coordinates_x, coordinates_y, reason } = req.body;
-      const [oldPlot] = await sql`SELECT plot_status FROM plots WHERE plot_id = ${req.params.id}`;
+      const [oldPlot] = await sql`SELECT plot_status, base_price, plot_area FROM plots WHERE plot_id = ${req.params.id}`;
       if (!oldPlot) return err(res, "Plot not found", 404);
       if (plot_status && plot_status !== oldPlot.plot_status && !reason) {
         return err(res, "reason required when changing plot_status", 400);
@@ -13030,8 +13039,24 @@ app.put("/api/admin/plots/:id",
           coordinates_y = ${coordinates_y ?? null},
           updated_at = NOW()
         WHERE plot_id = ${req.params.id}
-        RETURNING plot_id, plot_number, plot_status`;
+        RETURNING plot_id, plot_number, plot_status, base_price`;
       if (!plot) return err(res, "Plot not found", 404);
+
+      if (base_price != null && Number(base_price) !== Number(oldPlot.base_price)) {
+        const areaGaj = Number(plot_area || oldPlot.plot_area || 0);
+        await sql`
+          INSERT INTO plot_price_history (
+            plot_id, old_price, new_price, rate_per_gaj, rate_per_sqft,
+            changed_by_admin_id, changed_at, source
+          ) VALUES (
+            ${req.params.id}, ${oldPlot.base_price}, ${Number(base_price)},
+            ${areaGaj > 0 ? (Number(base_price) / areaGaj) : null},
+            ${areaGaj > 0 ? (Number(base_price) / (areaGaj * 9)) : null},
+            ${req.admin.admin_id}, NOW(), 'MANUAL_EDIT'
+          )
+        `.catch(() => {});
+      }
+
       if (plot_status && plot_status !== oldPlot.plot_status) {
         await safeInsertPlotStatusHistory({
           plot_id: req.params.id,
@@ -13051,6 +13076,59 @@ app.put("/api/admin/plots/:id",
       await logAdminAudit(req, "PlotManagement", "UpdatePlot", "plots", req.params.id, sql.json(req.body || {}));
       return ok(res, plot, "Plot updated");
     } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+// Bulk Update Plot Base Prices (Admin only)
+app.put("/api/admin/plots/bulk-price",
+  verifyAdminToken,
+  role("SuperAdmin", "SiteManager", "FinanceManager"),
+  async (req, res) => {
+    try {
+      const updates = Array.isArray(req.body?.updates) ? req.body.updates : [];
+      if (!updates.length) return err(res, "updates must be a non-empty array", 400);
+
+      const results = [];
+      await sql.begin(async (tx) => {
+        for (const item of updates) {
+          const plotId = Number(item.plot_id);
+          const newPrice = Number(item.base_price || 0);
+          const ratePerGaj = item.rate_per_gaj ? Number(item.rate_per_gaj) : null;
+          const ratePerSqft = item.rate_per_sqft ? Number(item.rate_per_sqft) : null;
+          if (!plotId) continue;
+
+          const [oldPlot] = await tx`SELECT plot_id, base_price, plot_area FROM plots WHERE plot_id = ${plotId}`;
+          if (!oldPlot) continue;
+
+          const oldPrice = oldPlot.base_price != null ? Number(oldPlot.base_price) : null;
+
+          await tx`
+            UPDATE plots SET
+              base_price = ${newPrice},
+              updated_at = NOW()
+            WHERE plot_id = ${plotId}
+          `;
+
+          await tx`
+            INSERT INTO plot_price_history (
+              plot_id, old_price, new_price, rate_per_gaj, rate_per_sqft,
+              changed_by_admin_id, changed_at, source
+            ) VALUES (
+              ${plotId}, ${oldPrice}, ${newPrice}, ${ratePerGaj}, ${ratePerSqft},
+              ${req.admin.admin_id}, NOW(), 'BULK_UPDATE'
+            )
+          `;
+
+          results.push({ plot_id: plotId, old_price: oldPrice, new_price: newPrice });
+        }
+      });
+
+      await logAdminAudit(req, "PlotManagement", "BulkPriceUpdate", "plots", null, sql.json({ count: results.length }));
+      return ok(res, { count: results.length, updated: results }, `Updated base price for ${results.length} plots.`);
+    } catch (e) {
+      console.error("[Bulk Price Update Error]:", e);
       return err(res, e.message);
     }
   }
@@ -13881,12 +13959,26 @@ app.get("/api/admin/team-members",
             SELECT tm.id, tm.team_member_uid, tm.user_id, 
                    COALESCE(tm.associate_id, assoc.user_id, 1)::bigint AS associate_id, 
                    COALESCE(NULLIF(TRIM(tm.associate_name), ''), assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
-                   tm.slot_number, tm.full_name, tm.father_husband_name, tm.date_of_birth, tm.gender,
-                   tm.aadhar_no, tm.pan_no, tm.mobile_no, tm.email_id, tm.full_address,
-                   tm.nominee_name, tm.nominee_relation, tm.nominee_age_dob, tm.nominee_contact_no,
-                   tm.bank_name, tm.branch_name, tm.account_no, tm.ifsc_code, 
+                   tm.slot_number, tm.full_name,
+                   COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+                   COALESCE(tm.date_of_birth, u.date_of_birth, aen.dob) AS date_of_birth,
+                   COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+                   COALESCE(NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
+                   COALESCE(NULLIF(TRIM(tm.pan_no), ''), NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
+                   COALESCE(NULLIF(TRIM(tm.mobile_no), ''), u.mobile_no, '') AS mobile_no,
+                   COALESCE(NULLIF(TRIM(tm.email_id), ''), u.email, '') AS email_id,
+                   COALESCE(NULLIF(TRIM(tm.full_address), ''), NULLIF(TRIM(pa.address_line1), ''), NULLIF(TRIM(aen.perm_address), ''), '') AS full_address,
+                   COALESCE(NULLIF(TRIM(tm.nominee_name), ''), NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
+                   COALESCE(NULLIF(TRIM(tm.nominee_relation), ''), NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
+                   COALESCE(NULLIF(TRIM(tm.nominee_age_dob), ''), NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
+                   COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+                   COALESCE(NULLIF(TRIM(tm.bank_name), ''), NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
+                   COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
+                   COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
+                   COALESCE(NULLIF(TRIM(tm.ifsc_code), ''), NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
                    COALESCE(tm.status, 'approved') AS status,
-                   tm.photo_url, tm.applicant_signature_url, tm.associate_signature_url,
+                   COALESCE(NULLIF(TRIM(tm.photo_url), ''), u.profile_image) AS photo_url,
+                   tm.applicant_signature_url, tm.associate_signature_url,
                    COALESCE(tm.created_at, NOW()) AS created_at, COALESCE(tm.updated_at, NOW()) AS updated_at,
                    COALESCE(assoc.full_name, NULLIF(TRIM(tm.associate_name), ''), 'Suraj Kumar Verma') AS sponsor_name, 
                    COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id, 
@@ -13898,6 +13990,23 @@ app.get("/api/admin/team-members",
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
             LEFT JOIN users u ON u.user_id = tm.user_id
+            LEFT JOIN user_addresses pa ON pa.user_id = tm.user_id AND pa.address_type = 'Permanent'
+            LEFT JOIN user_bank_details b ON b.user_id = tm.user_id
+            LEFT JOIN user_nominees n ON n.user_id = tm.user_id
+            LEFT JOIN LATERAL (
+              SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+                     ae.aadhar_no, ae.pan_no,
+                     COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
+                     ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
+                     an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+              FROM associate_enrollment ae
+              LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+              LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
+              LEFT JOIN associate_nominee an ON an.associate_id = ae.id
+              WHERE ae.user_id = tm.user_id
+                 OR (tm.mobile_no IS NOT NULL AND (ae.contact_no_1 = tm.mobile_no OR ae.contact_1 = tm.mobile_no))
+              ORDER BY (ae.user_id = tm.user_id) DESC, ae.created_at DESC LIMIT 1
+            ) aen ON TRUE
 
             UNION ALL
 
@@ -13909,22 +14018,22 @@ app.get("/api/admin/team-members",
               COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
               NULL::smallint AS slot_number,
               u.full_name,
-              NULL::varchar AS father_husband_name,
-              NULL::date AS date_of_birth,
-              NULL::varchar AS gender,
-              u.aadhar_number AS aadhar_no,
-              u.pan_number AS pan_no,
+              COALESCE(NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+              COALESCE(u.date_of_birth, aen.dob) AS date_of_birth,
+              COALESCE(NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+              COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
+              COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
               COALESCE(u.mobile_no, '') AS mobile_no,
-              u.email AS email_id,
-              NULL::text AS full_address,
-              NULL::varchar AS nominee_name,
-              NULL::varchar AS nominee_relation,
-              NULL::varchar AS nominee_age_dob,
-              NULL::varchar AS nominee_contact_no,
-              NULL::varchar AS bank_name,
-              NULL::varchar AS branch_name,
-              NULL::varchar AS account_no,
-              NULL::varchar AS ifsc_code,
+              COALESCE(u.email, '') AS email_id,
+              COALESCE(NULLIF(TRIM(pa.address_line1), ''), NULLIF(TRIM(aen.perm_address), ''), '') AS full_address,
+              COALESCE(NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
+              COALESCE(NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
+              COALESCE(NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
+              COALESCE(NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+              COALESCE(NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
+              COALESCE(NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
+              COALESCE(NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
+              COALESCE(NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
               CASE WHEN LOWER(COALESCE(u.account_status::text, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
               u.profile_image AS photo_url,
               NULL::varchar AS applicant_signature_url,
@@ -13940,6 +14049,23 @@ app.get("/api/admin/team-members",
               FALSE AS is_verified
             FROM users u
             LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
+            LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
+            LEFT JOIN user_bank_details b ON b.user_id = u.user_id
+            LEFT JOIN user_nominees n ON n.user_id = u.user_id
+            LEFT JOIN LATERAL (
+              SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+                     ae.aadhar_no, ae.pan_no,
+                     COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
+                     ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
+                     an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+              FROM associate_enrollment ae
+              LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+              LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
+              LEFT JOIN associate_nominee an ON an.associate_id = ae.id
+              WHERE ae.user_id = u.user_id
+                 OR (u.mobile_no IS NOT NULL AND (ae.contact_no_1 = u.mobile_no OR ae.contact_1 = u.mobile_no))
+              ORDER BY (ae.user_id = u.user_id) DESC, ae.created_at DESC LIMIT 1
+            ) aen ON TRUE
             WHERE (
               u.user_type::text = 'Team Member'
             )
@@ -14018,12 +14144,26 @@ app.get("/api/admin/team-members",
             SELECT tm.id, tm.team_member_uid, tm.user_id, 
                    COALESCE(tm.associate_id, assoc.user_id, 1)::bigint AS associate_id, 
                    COALESCE(NULLIF(TRIM(tm.associate_name), ''), assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
-                   tm.slot_number, tm.full_name, tm.father_husband_name, tm.date_of_birth, tm.gender,
-                   tm.aadhar_no, tm.pan_no, tm.mobile_no, tm.email_id, tm.full_address,
-                   tm.nominee_name, tm.nominee_relation, tm.nominee_age_dob, tm.nominee_contact_no,
-                   tm.bank_name, tm.branch_name, tm.account_no, tm.ifsc_code, 
+                   tm.slot_number, tm.full_name,
+                   COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+                   COALESCE(tm.date_of_birth, u.date_of_birth, aen.dob) AS date_of_birth,
+                   COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+                   COALESCE(NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
+                   COALESCE(NULLIF(TRIM(tm.pan_no), ''), NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
+                   COALESCE(NULLIF(TRIM(tm.mobile_no), ''), u.mobile_no, '') AS mobile_no,
+                   COALESCE(NULLIF(TRIM(tm.email_id), ''), u.email, '') AS email_id,
+                   COALESCE(NULLIF(TRIM(tm.full_address), ''), NULLIF(TRIM(pa.address_line1), ''), NULLIF(TRIM(aen.perm_address), ''), '') AS full_address,
+                   COALESCE(NULLIF(TRIM(tm.nominee_name), ''), NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
+                   COALESCE(NULLIF(TRIM(tm.nominee_relation), ''), NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
+                   COALESCE(NULLIF(TRIM(tm.nominee_age_dob), ''), NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
+                   COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+                   COALESCE(NULLIF(TRIM(tm.bank_name), ''), NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
+                   COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
+                   COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
+                   COALESCE(NULLIF(TRIM(tm.ifsc_code), ''), NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
                    COALESCE(tm.status, 'approved') AS status,
-                   tm.photo_url, tm.applicant_signature_url, tm.associate_signature_url,
+                   COALESCE(NULLIF(TRIM(tm.photo_url), ''), u.profile_image) AS photo_url,
+                   tm.applicant_signature_url, tm.associate_signature_url,
                    COALESCE(tm.created_at, NOW()) AS created_at, COALESCE(tm.updated_at, NOW()) AS updated_at,
                    COALESCE(assoc.full_name, NULLIF(TRIM(tm.associate_name), ''), 'Suraj Kumar Verma') AS sponsor_name, 
                    COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id, 
@@ -14034,6 +14174,23 @@ app.get("/api/admin/team-members",
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
             LEFT JOIN users u ON u.user_id = tm.user_id
+            LEFT JOIN user_addresses pa ON pa.user_id = tm.user_id AND pa.address_type = 'Permanent'
+            LEFT JOIN user_bank_details b ON b.user_id = tm.user_id
+            LEFT JOIN user_nominees n ON n.user_id = tm.user_id
+            LEFT JOIN LATERAL (
+              SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+                     ae.aadhar_no, ae.pan_no,
+                     COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
+                     ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
+                     an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+              FROM associate_enrollment ae
+              LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+              LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
+              LEFT JOIN associate_nominee an ON an.associate_id = ae.id
+              WHERE ae.user_id = tm.user_id
+                 OR (tm.mobile_no IS NOT NULL AND (ae.contact_no_1 = tm.mobile_no OR ae.contact_1 = tm.mobile_no))
+              ORDER BY (ae.user_id = tm.user_id) DESC, ae.created_at DESC LIMIT 1
+            ) aen ON TRUE
 
             UNION ALL
 
@@ -14045,22 +14202,22 @@ app.get("/api/admin/team-members",
               COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
               NULL::smallint AS slot_number,
               u.full_name,
-              NULL::varchar AS father_husband_name,
-              NULL::date AS date_of_birth,
-              NULL::varchar AS gender,
-              u.aadhar_number AS aadhar_no,
-              u.pan_number AS pan_no,
+              COALESCE(NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+              COALESCE(u.date_of_birth, aen.dob) AS date_of_birth,
+              COALESCE(NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+              COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
+              COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
               COALESCE(u.mobile_no, '') AS mobile_no,
-              u.email AS email_id,
-              NULL::text AS full_address,
-              NULL::varchar AS nominee_name,
-              NULL::varchar AS nominee_relation,
-              NULL::varchar AS nominee_age_dob,
-              NULL::varchar AS nominee_contact_no,
-              NULL::varchar AS bank_name,
-              NULL::varchar AS branch_name,
-              NULL::varchar AS account_no,
-              NULL::varchar AS ifsc_code,
+              COALESCE(u.email, '') AS email_id,
+              COALESCE(NULLIF(TRIM(pa.address_line1), ''), NULLIF(TRIM(aen.perm_address), ''), '') AS full_address,
+              COALESCE(NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
+              COALESCE(NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
+              COALESCE(NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
+              COALESCE(NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+              COALESCE(NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
+              COALESCE(NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
+              COALESCE(NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
+              COALESCE(NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
               CASE WHEN LOWER(COALESCE(u.account_status::text, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
               u.profile_image AS photo_url,
               NULL::varchar AS applicant_signature_url,
@@ -14075,6 +14232,23 @@ app.get("/api/admin/team-members",
               COALESCE(u.is_active, true) AS is_user_active
             FROM users u
             LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
+            LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
+            LEFT JOIN user_bank_details b ON b.user_id = u.user_id
+            LEFT JOIN user_nominees n ON n.user_id = u.user_id
+            LEFT JOIN LATERAL (
+              SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+                     ae.aadhar_no, ae.pan_no,
+                     COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
+                     ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
+                     an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+              FROM associate_enrollment ae
+              LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+              LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
+              LEFT JOIN associate_nominee an ON an.associate_id = ae.id
+              WHERE ae.user_id = u.user_id
+                 OR (u.mobile_no IS NOT NULL AND (ae.contact_no_1 = u.mobile_no OR ae.contact_1 = u.mobile_no))
+              ORDER BY (ae.user_id = u.user_id) DESC, ae.created_at DESC LIMIT 1
+            ) aen ON TRUE
             WHERE (
               u.user_type::text = 'Team Member'
             )
@@ -14173,32 +14347,116 @@ app.get("/api/admin/team-members/:id",
       const { id } = req.params;
       const numId = Number(id);
 
-      const rows = isNaN(numId)
+      let rows = isNaN(numId)
         ? await sql`
-            SELECT tm.*,
-                   assoc.full_name AS sponsor_name, assoc.member_id AS sponsor_member_id, 
-                   assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
-                   COALESCE(u.account_status, tm.status, 'Active') AS account_status,
+            SELECT tm.id, tm.team_member_uid, tm.user_id, 
+                   COALESCE(tm.associate_id, assoc.user_id, 1)::bigint AS associate_id, 
+                   COALESCE(NULLIF(TRIM(tm.associate_name), ''), assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
+                   tm.slot_number, tm.full_name,
+                   COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+                   COALESCE(tm.date_of_birth, u.date_of_birth, aen.dob) AS date_of_birth,
+                   COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+                   COALESCE(NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
+                   COALESCE(NULLIF(TRIM(tm.pan_no), ''), NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
+                   COALESCE(NULLIF(TRIM(tm.mobile_no), ''), u.mobile_no, '') AS mobile_no,
+                   COALESCE(NULLIF(TRIM(tm.email_id), ''), u.email, '') AS email_id,
+                   COALESCE(NULLIF(TRIM(tm.full_address), ''), NULLIF(TRIM(pa.address_line1), ''), NULLIF(TRIM(aen.perm_address), ''), '') AS full_address,
+                   COALESCE(NULLIF(TRIM(tm.nominee_name), ''), NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
+                   COALESCE(NULLIF(TRIM(tm.nominee_relation), ''), NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
+                   COALESCE(NULLIF(TRIM(tm.nominee_age_dob), ''), NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
+                   COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+                   COALESCE(NULLIF(TRIM(tm.bank_name), ''), NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
+                   COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
+                   COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
+                   COALESCE(NULLIF(TRIM(tm.ifsc_code), ''), NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
+                   COALESCE(tm.status, 'approved') AS status,
+                   COALESCE(NULLIF(TRIM(tm.photo_url), ''), u.profile_image) AS photo_url,
+                   tm.applicant_signature_url, tm.associate_signature_url,
+                   COALESCE(tm.created_at, NOW()) AS created_at, COALESCE(tm.updated_at, NOW()) AS updated_at,
+                   COALESCE(assoc.full_name, NULLIF(TRIM(tm.associate_name), ''), 'Suraj Kumar Verma') AS sponsor_name, 
+                   COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id, 
+                   COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile, 
+                   COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
+                   COALESCE(u.account_status::text, tm.status::text, 'Active') AS account_status,
                    COALESCE(u.is_active, true) AS is_user_active,
                    COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
                    COALESCE(t.total_commission_earned, 0) AS total_commission_earned
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
             LEFT JOIN users u ON u.user_id = tm.user_id
+            LEFT JOIN user_addresses pa ON pa.user_id = tm.user_id AND pa.address_type = 'Permanent'
+            LEFT JOIN user_bank_details b ON b.user_id = tm.user_id
+            LEFT JOIN user_nominees n ON n.user_id = tm.user_id
+            LEFT JOIN LATERAL (
+              SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+                     ae.aadhar_no, ae.pan_no,
+                     COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
+                     ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
+                     an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+              FROM associate_enrollment ae
+              LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+              LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
+              LEFT JOIN associate_nominee an ON an.associate_id = ae.id
+              WHERE ae.user_id = tm.user_id
+                 OR (tm.mobile_no IS NOT NULL AND (ae.contact_no_1 = tm.mobile_no OR ae.contact_1 = tm.mobile_no))
+              ORDER BY (ae.user_id = tm.user_id) DESC, ae.created_at DESC LIMIT 1
+            ) aen ON TRUE
             LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
             WHERE tm.team_member_uid = ${String(id)}
             LIMIT 1`
         : await sql`
-            SELECT tm.*,
-                   assoc.full_name AS sponsor_name, assoc.member_id AS sponsor_member_id, 
-                   assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
-                   COALESCE(u.account_status, tm.status, 'Active') AS account_status,
+            SELECT tm.id, tm.team_member_uid, tm.user_id, 
+                   COALESCE(tm.associate_id, assoc.user_id, 1)::bigint AS associate_id, 
+                   COALESCE(NULLIF(TRIM(tm.associate_name), ''), assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
+                   tm.slot_number, tm.full_name,
+                   COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+                   COALESCE(tm.date_of_birth, u.date_of_birth, aen.dob) AS date_of_birth,
+                   COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+                   COALESCE(NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
+                   COALESCE(NULLIF(TRIM(tm.pan_no), ''), NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
+                   COALESCE(NULLIF(TRIM(tm.mobile_no), ''), u.mobile_no, '') AS mobile_no,
+                   COALESCE(NULLIF(TRIM(tm.email_id), ''), u.email, '') AS email_id,
+                   COALESCE(NULLIF(TRIM(tm.full_address), ''), NULLIF(TRIM(pa.address_line1), ''), NULLIF(TRIM(aen.perm_address), ''), '') AS full_address,
+                   COALESCE(NULLIF(TRIM(tm.nominee_name), ''), NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
+                   COALESCE(NULLIF(TRIM(tm.nominee_relation), ''), NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
+                   COALESCE(NULLIF(TRIM(tm.nominee_age_dob), ''), NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
+                   COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+                   COALESCE(NULLIF(TRIM(tm.bank_name), ''), NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
+                   COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
+                   COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
+                   COALESCE(NULLIF(TRIM(tm.ifsc_code), ''), NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
+                   COALESCE(tm.status, 'approved') AS status,
+                   COALESCE(NULLIF(TRIM(tm.photo_url), ''), u.profile_image) AS photo_url,
+                   tm.applicant_signature_url, tm.associate_signature_url,
+                   COALESCE(tm.created_at, NOW()) AS created_at, COALESCE(tm.updated_at, NOW()) AS updated_at,
+                   COALESCE(assoc.full_name, NULLIF(TRIM(tm.associate_name), ''), 'Suraj Kumar Verma') AS sponsor_name, 
+                   COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id, 
+                   COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile, 
+                   COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
+                   COALESCE(u.account_status::text, tm.status::text, 'Active') AS account_status,
                    COALESCE(u.is_active, true) AS is_user_active,
                    COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
                    COALESCE(t.total_commission_earned, 0) AS total_commission_earned
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
             LEFT JOIN users u ON u.user_id = tm.user_id
+            LEFT JOIN user_addresses pa ON pa.user_id = tm.user_id AND pa.address_type = 'Permanent'
+            LEFT JOIN user_bank_details b ON b.user_id = tm.user_id
+            LEFT JOIN user_nominees n ON n.user_id = tm.user_id
+            LEFT JOIN LATERAL (
+              SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+                     ae.aadhar_no, ae.pan_no,
+                     COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
+                     ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
+                     an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+              FROM associate_enrollment ae
+              LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+              LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
+              LEFT JOIN associate_nominee an ON an.associate_id = ae.id
+              WHERE ae.user_id = tm.user_id
+                 OR (tm.mobile_no IS NOT NULL AND (ae.contact_no_1 = tm.mobile_no OR ae.contact_1 = tm.mobile_no))
+              ORDER BY (ae.user_id = tm.user_id) DESC, ae.created_at DESC LIMIT 1
+            ) aen ON TRUE
             LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
             WHERE tm.id = ${numId} OR tm.team_member_uid = ${String(id)} OR tm.user_id = ${numId}
             LIMIT 1`;
@@ -14206,33 +14464,119 @@ app.get("/api/admin/team-members/:id",
       if (!rows || rows.length === 0) {
         const userRows = isNaN(numId)
           ? await sql`
-              SELECT u.user_id AS id, u.member_id AS team_member_uid, u.user_id,
-                     COALESCE(u.sponsor_user_id, 0) AS associate_id,
-                     assoc.full_name AS associate_name, assoc.full_name AS sponsor_name,
-                     assoc.member_id AS sponsor_member_id, assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
-                     u.full_name, u.mobile_no, u.email AS email_id, u.aadhar_number AS aadhar_no, u.pan_number AS pan_no,
+              SELECT u.user_id AS id,
+                     COALESCE(u.member_id, 'MMR-TM-' || LPAD(u.user_id::text, 4, '0')) AS team_member_uid,
+                     u.user_id,
+                     COALESCE(u.sponsor_user_id, 1)::bigint AS associate_id,
+                     COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
+                     NULL::smallint AS slot_number,
+                     u.full_name,
+                     COALESCE(NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+                     COALESCE(u.date_of_birth, aen.dob) AS date_of_birth,
+                     COALESCE(NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+                     COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
+                     COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
+                     COALESCE(u.mobile_no, '') AS mobile_no,
+                     COALESCE(u.email, '') AS email_id,
+                     COALESCE(NULLIF(TRIM(pa.address_line1), ''), NULLIF(TRIM(aen.perm_address), ''), '') AS full_address,
+                     COALESCE(NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
+                     COALESCE(NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
+                     COALESCE(NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
+                     COALESCE(NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+                     COALESCE(NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
+                     COALESCE(NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
+                     COALESCE(NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
+                     COALESCE(NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
+                     CASE WHEN LOWER(COALESCE(u.account_status::text, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
                      u.profile_image AS photo_url,
-                     COALESCE(u.account_status, 'Active') AS account_status,
-                     CASE WHEN LOWER(COALESCE(u.account_status, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
+                     NULL::varchar AS applicant_signature_url,
+                     NULL::varchar AS associate_signature_url,
+                     COALESCE(u.registered_at, NOW()) AS created_at,
+                     COALESCE(u.updated_at, NOW()) AS updated_at,
+                     COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS sponsor_name,
+                     COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id,
+                     COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile,
+                     COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
+                     COALESCE(u.account_status::text, 'Active') AS account_status,
                      COALESCE(u.is_active, true) AS is_user_active,
                      0 AS total_gaj_sold, 0 AS total_commission_earned
               FROM users u
               LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
+              LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
+              LEFT JOIN user_bank_details b ON b.user_id = u.user_id
+              LEFT JOIN user_nominees n ON n.user_id = u.user_id
+              LEFT JOIN LATERAL (
+                SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+                       ae.aadhar_no, ae.pan_no,
+                       COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
+                       ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
+                       an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+                FROM associate_enrollment ae
+                LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+                LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
+                LEFT JOIN associate_nominee an ON an.associate_id = ae.id
+                WHERE ae.user_id = u.user_id
+                   OR (u.mobile_no IS NOT NULL AND (ae.contact_no_1 = u.mobile_no OR ae.contact_1 = u.mobile_no))
+                ORDER BY (ae.user_id = u.user_id) DESC, ae.created_at DESC LIMIT 1
+              ) aen ON TRUE
               WHERE u.member_id = ${String(id)}
               LIMIT 1`
           : await sql`
-              SELECT u.user_id AS id, u.member_id AS team_member_uid, u.user_id,
-                     COALESCE(u.sponsor_user_id, 0) AS associate_id,
-                     assoc.full_name AS associate_name, assoc.full_name AS sponsor_name,
-                     assoc.member_id AS sponsor_member_id, assoc.mobile_no AS sponsor_mobile, assoc.email AS sponsor_email,
-                     u.full_name, u.mobile_no, u.email AS email_id, u.aadhar_number AS aadhar_no, u.pan_number AS pan_no,
+              SELECT u.user_id AS id,
+                     COALESCE(u.member_id, 'MMR-TM-' || LPAD(u.user_id::text, 4, '0')) AS team_member_uid,
+                     u.user_id,
+                     COALESCE(u.sponsor_user_id, 1)::bigint AS associate_id,
+                     COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
+                     NULL::smallint AS slot_number,
+                     u.full_name,
+                     COALESCE(NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+                     COALESCE(u.date_of_birth, aen.dob) AS date_of_birth,
+                     COALESCE(NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+                     COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
+                     COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
+                     COALESCE(u.mobile_no, '') AS mobile_no,
+                     COALESCE(u.email, '') AS email_id,
+                     COALESCE(NULLIF(TRIM(pa.address_line1), ''), NULLIF(TRIM(aen.perm_address), ''), '') AS full_address,
+                     COALESCE(NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
+                     COALESCE(NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
+                     COALESCE(NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
+                     COALESCE(NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+                     COALESCE(NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
+                     COALESCE(NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
+                     COALESCE(NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
+                     COALESCE(NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
+                     CASE WHEN LOWER(COALESCE(u.account_status::text, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
                      u.profile_image AS photo_url,
-                     COALESCE(u.account_status, 'Active') AS account_status,
-                     CASE WHEN LOWER(COALESCE(u.account_status, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
+                     NULL::varchar AS applicant_signature_url,
+                     NULL::varchar AS associate_signature_url,
+                     COALESCE(u.registered_at, NOW()) AS created_at,
+                     COALESCE(u.updated_at, NOW()) AS updated_at,
+                     COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS sponsor_name,
+                     COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id,
+                     COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile,
+                     COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
+                     COALESCE(u.account_status::text, 'Active') AS account_status,
                      COALESCE(u.is_active, true) AS is_user_active,
                      0 AS total_gaj_sold, 0 AS total_commission_earned
               FROM users u
               LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
+              LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
+              LEFT JOIN user_bank_details b ON b.user_id = u.user_id
+              LEFT JOIN user_nominees n ON n.user_id = u.user_id
+              LEFT JOIN LATERAL (
+                SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+                       ae.aadhar_no, ae.pan_no,
+                       COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
+                       ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
+                       an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+                FROM associate_enrollment ae
+                LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+                LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
+                LEFT JOIN associate_nominee an ON an.associate_id = ae.id
+                WHERE ae.user_id = u.user_id
+                   OR (u.mobile_no IS NOT NULL AND (ae.contact_no_1 = u.mobile_no OR ae.contact_1 = u.mobile_no))
+                ORDER BY (ae.user_id = u.user_id) DESC, ae.created_at DESC LIMIT 1
+              ) aen ON TRUE
               WHERE u.user_id = ${numId} OR u.member_id = ${String(id)}
               LIMIT 1`;
         if (userRows && userRows.length > 0) {
@@ -14279,9 +14623,27 @@ app.put("/api/admin/team-members/:id",
       const numId = Number(id);
       const b = req.body || {};
 
-      const [existing] = isNaN(numId)
+      let [existing] = isNaN(numId)
         ? await sql`SELECT * FROM team_members WHERE team_member_uid = ${String(id)} LIMIT 1`
-        : await sql`SELECT * FROM team_members WHERE id = ${numId} OR team_member_uid = ${String(id)} LIMIT 1`;
+        : await sql`SELECT * FROM team_members WHERE id = ${numId} OR team_member_uid = ${String(id)} OR user_id = ${numId} LIMIT 1`;
+
+      if (!existing) {
+        const [u] = isNaN(numId)
+          ? await sql`SELECT * FROM users WHERE member_id = ${String(id)} LIMIT 1`
+          : await sql`SELECT * FROM users WHERE user_id = ${numId} OR member_id = ${String(id)} LIMIT 1`;
+        if (u) {
+          const tmUid = u.member_id || `MMR-TM-${String(u.user_id).padStart(4, '0')}`;
+          const [insertedTm] = await sql`
+            INSERT INTO team_members (
+              team_member_uid, user_id, associate_id, associate_name, full_name, mobile_no, email_id, aadhar_no, pan_no, status, photo_url, created_at, updated_at
+            ) VALUES (
+              ${tmUid}, ${u.user_id}, ${u.sponsor_user_id || 1}, '', ${u.full_name || ''}, ${u.mobile_no || ''}, ${u.email || null}, ${u.aadhar_number || null}, ${u.pan_number || null}, 'approved', ${u.profile_image || null}, NOW(), NOW()
+            )
+            ON CONFLICT (team_member_uid) DO UPDATE SET updated_at = NOW()
+            RETURNING *`;
+          existing = insertedTm;
+        }
+      }
 
       if (!existing) return err(res, "Team member not found", 404);
 
@@ -14345,9 +14707,56 @@ app.put("/api/admin/team-members/:id",
               email = ${emailId || null},
               pan_number = ${panNo || null},
               aadhar_number = ${aadharNo || null},
+              father_husband_name = COALESCE(${fatherHusbandName || null}, father_husband_name),
+              gender = COALESCE(${gender || null}, gender),
+              date_of_birth = COALESCE(${dob || null}, date_of_birth),
               profile_image = COALESCE(${photoUrl || null}, profile_image),
               updated_at = NOW()
-          WHERE user_id = ${existing.user_id}`;
+          WHERE user_id = ${existing.user_id}`.catch(e => console.warn("Failed to update users table:", e.message));
+
+        if (fullAddress) {
+          const updatedAddr = await sql`UPDATE user_addresses SET address_line1 = ${fullAddress}, updated_at = NOW() WHERE user_id = ${existing.user_id} AND address_type = 'Permanent' RETURNING id`.catch(() => []);
+          if (!updatedAddr || updatedAddr.length === 0) {
+            await sql`INSERT INTO user_addresses (user_id, address_type, address_line1, city, state, pin_code, created_at, updated_at) VALUES (${existing.user_id}, 'Permanent', ${fullAddress}, 'Lucknow', 'Uttar Pradesh', '226001', NOW(), NOW())`.catch(() => {});
+          }
+        }
+
+        if (bankName || accountNo || ifscCode) {
+          const updatedBank = await sql`
+            UPDATE user_bank_details 
+            SET bank_name = COALESCE(${bankName || null}, bank_name),
+                branch_name = COALESCE(${branchName || null}, branch_name),
+                account_number = COALESCE(${accountNo || null}, account_number),
+                ifsc_code = COALESCE(${ifscCode || null}, ifsc_code),
+                updated_at = NOW()
+            WHERE user_id = ${existing.user_id}
+            RETURNING id
+          `.catch(() => []);
+          if (!updatedBank || updatedBank.length === 0) {
+            await sql`
+              INSERT INTO user_bank_details (user_id, bank_name, branch_name, account_number, ifsc_code, created_at, updated_at)
+              VALUES (${existing.user_id}, ${bankName || null}, ${branchName || null}, ${accountNo || null}, ${ifscCode || null}, NOW(), NOW())
+            `.catch(() => {});
+          }
+        }
+
+        if (nomineeName) {
+          const updatedNom = await sql`
+            UPDATE user_nominees
+            SET nominee_name = ${nomineeName},
+                relationship = ${nomineeRelation || null},
+                contact_number = ${nomineeContactNo || null},
+                updated_at = NOW()
+            WHERE user_id = ${existing.user_id}
+            RETURNING id
+          `.catch(() => []);
+          if (!updatedNom || updatedNom.length === 0) {
+            await sql`
+              INSERT INTO user_nominees (user_id, nominee_name, relationship, contact_number, created_at, updated_at)
+              VALUES (${existing.user_id}, ${nomineeName}, ${nomineeRelation || null}, ${nomineeContactNo || null}, NOW(), NOW())
+            `.catch(() => {});
+          }
+        }
       }
 
       await logAdminAudit(req, "MLM", "UpdateTeamMember", "team_members", existing.id, sql.json({ updated_fields: Object.keys(b) }));

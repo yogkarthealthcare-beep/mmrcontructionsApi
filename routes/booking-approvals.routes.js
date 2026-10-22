@@ -379,4 +379,284 @@ router.get(['/booking-capabilities', '/bookings/capabilities'], (req, res) => {
   }, 'Booking capabilities retrieved successfully.');
 });
 
+/* =========================================================================
+   7. ADMIN PRICE APPROVAL WORKFLOW FOR CUSTOMER BOOKINGS (Part 2B)
+   ========================================================================= */
+
+/**
+ * GET /api/admin/bookings/price-approval-requests
+ * List customer bookings requiring admin rate confirmation
+ */
+router.get('/admin/bookings/price-approval-requests', verifyAdminToken, role('SuperAdmin', 'Admin', 'FinanceManager', 'SiteManager'), async (req, res) => {
+  try {
+    const rows = await sql`
+      SELECT 
+        b.booking_id, b.booking_serial, b.booking_status, b.workflow_status,
+        b.payment_type, b.advance_amount, b.notes, b.created_at,
+        b.list_price, b.requested_price, b.base_price, b.price_approval_status,
+        b.price_admin_counter, b.price_rejection_reason,
+        p.plot_id, p.plot_number, p.plot_area, p.unit_type,
+        s.site_id, s.site_name,
+        u.user_id AS customer_user_id, u.full_name AS customer_name,
+        u.mobile_no AS customer_mobile, u.email AS customer_email
+      FROM bookings b
+      JOIN plots p ON p.plot_id = b.plot_id
+      LEFT JOIN sites s ON s.site_id = p.site_id
+      JOIN users u ON u.user_id = b.user_id
+      WHERE b.booking_status = 'Pending Admin Price Approval'
+         OR b.price_approval_status = 'Pending'
+         OR b.price_approval_status = 'CounterProposed'
+      ORDER BY b.created_at DESC
+    `;
+    return ok(res, rows, 'Price approval requests fetched successfully.');
+  } catch (e) {
+    console.error('[PriceApprovalRequests Error]:', e);
+    return err(res, e.message);
+  }
+});
+
+/**
+ * POST /api/admin/bookings/:id/price-approval/approve
+ * Admin approves proposed rate or sets finalized rate
+ */
+router.post('/admin/bookings/:id/price-approval/approve', verifyAdminToken, role('SuperAdmin', 'Admin', 'FinanceManager'), async (req, res) => {
+  const bookingId = Number(req.params.id);
+  const { approved_price, notes } = req.body || {};
+
+  try {
+    const result = await sql.begin(async (tx) => {
+      const [booking] = await tx`
+        SELECT b.*, p.plot_area, p.plot_number, p.unit_type
+        FROM bookings b
+        JOIN plots p ON p.plot_id = b.plot_id
+        WHERE b.booking_id = ${bookingId}
+        FOR UPDATE
+      `;
+      if (!booking) throw new Error('Booking not found');
+
+      const finalPrice = Number(approved_price || booking.requested_price || booking.list_price || 0);
+      if (finalPrice <= 0) {
+        throw new Error('Approved plot price must be greater than zero.');
+      }
+
+      const initialAdvance = Number(booking.advance_amount || 0);
+      const remainingBalance = Math.max(0, finalPrice - initialAdvance);
+      const nextBookingStatus = booking.payment_type === 'FullPayment' ? 'Submitted' : 'PaymentPending';
+      const nextWorkflowStatus = 'Price Approved by Admin';
+
+      // Update booking with approved price
+      const [updated] = await tx`
+        UPDATE bookings SET
+          base_price = ${finalPrice},
+          remaining_balance = ${remainingBalance},
+          booking_status = ${nextBookingStatus},
+          workflow_status = ${nextWorkflowStatus},
+          price_approval_status = 'Approved',
+          price_approved_by = ${req.admin.admin_id},
+          price_approved_at = NOW(),
+          notes = CASE WHEN ${notes || ''} != '' THEN COALESCE(notes, '') || E'\\n[Admin Price Approval]: ' || ${notes || ''} ELSE notes END,
+          updated_at = NOW()
+        WHERE booking_id = ${bookingId}
+        RETURNING *
+      `;
+
+      // Update plot status to InProcess
+      await tx`
+        UPDATE plots 
+        SET plot_status = 'InProcess', updated_at = NOW() 
+        WHERE plot_id = ${booking.plot_id}
+      `;
+
+      // If EMI: generate EMI schedules
+      if (booking.payment_type === 'EMI' && booking.installment_plan_id) {
+        const [plan] = await tx`SELECT * FROM installment_plans WHERE id = ${booking.installment_plan_id}`;
+        if (plan) {
+          const [settings] = await tx`SELECT min_emi_down_payment FROM booking_workflow_settings WHERE id = 1`.catch(() => [{ min_emi_down_payment: 30000 }]);
+          const planSnapshot = installmentService.calculateInstallmentPlan({
+            price: finalPrice,
+            tenure: plan.tenure_months,
+            interestPercent: plan.interest_percent,
+            downPaymentPercent: plan.down_payment_percent,
+            actualDownPayment: initialAdvance,
+            minDownPaymentAmount: Number(settings?.min_emi_down_payment || 30000)
+          });
+
+          await tx`
+            UPDATE bookings SET 
+              plan_snapshot = ${tx.json(planSnapshot)},
+              remaining_balance = ${planSnapshot.installment_base_amount}
+            WHERE booking_id = ${bookingId}
+          `;
+
+          const start = new Date();
+          start.setMonth(start.getMonth() + 1);
+          for (const item of planSnapshot.schedule) {
+            const due = new Date(start);
+            due.setMonth(due.getMonth() + (item.installment_no - 1));
+            await tx`
+              INSERT INTO emi_schedules (
+                booking_id, user_id, installment_no, due_date, emi_amount,
+                late_fee_amount, total_due, paid_amount, emi_status,
+                principal_component, interest_component, created_at, updated_at
+              ) VALUES (
+                ${bookingId}, ${booking.user_id}, ${item.installment_no},
+                ${due.toISOString().split('T')[0]}, ${item.emi_amount},
+                0.00, ${item.emi_amount}, 0.00, 'Pending',
+                ${item.principal_component}, ${item.interest_component}, NOW(), NOW()
+              )
+              ON CONFLICT (booking_id, installment_no) DO UPDATE SET
+                emi_amount = EXCLUDED.emi_amount,
+                total_due = EXCLUDED.total_due,
+                principal_component = EXCLUDED.principal_component,
+                interest_component = EXCLUDED.interest_component,
+                updated_at = NOW()
+            `;
+          }
+        }
+      } else if (booking.payment_type === 'Partial' || booking.payment_type === 'PartWise') {
+        // Generate Part-Wise 4 installments
+        const [settings] = await tx`SELECT part_wise_gap_days, part_wise_installments FROM booking_workflow_settings WHERE id = 1`.catch(() => [{ part_wise_gap_days: 7, part_wise_installments: 4 }]);
+        const partWiseCount = Number(settings?.part_wise_installments || 4);
+        const gapDays = Number(settings?.part_wise_gap_days || 7);
+
+        const totalPrincipalPaise = Math.round(finalPrice * 100);
+        const advancePaise = Math.round(initialAdvance * 100);
+        const remainingPaise = Math.max(0, totalPrincipalPaise - advancePaise);
+        const remInstallments = Math.max(1, partWiseCount - 1);
+        const basePartPaise = Math.floor(remainingPaise / remInstallments);
+
+        // Installment 1: Initial Advance
+        await tx`
+          INSERT INTO emi_schedules (
+            booking_id, user_id, installment_no, due_date, emi_amount,
+            late_fee_amount, total_due, paid_amount, emi_status,
+            principal_component, interest_component, created_at, updated_at
+          ) VALUES (
+            ${bookingId}, ${booking.user_id}, 1,
+            CURRENT_DATE, ${initialAdvance},
+            0.00, ${initialAdvance}, ${initialAdvance}, ${initialAdvance > 0 ? 'Paid' : 'Pending'},
+            ${initialAdvance}, 0.00, NOW(), NOW()
+          )
+          ON CONFLICT (booking_id, installment_no) DO UPDATE SET
+            emi_amount = EXCLUDED.emi_amount,
+            paid_amount = EXCLUDED.paid_amount,
+            updated_at = NOW()
+        `.catch(() => {});
+
+        let cumRemPaise = 0;
+        for (let p = 1; p <= remInstallments; p++) {
+          const isLast = p === remInstallments;
+          const partPaise = isLast ? (remainingPaise - cumRemPaise) : basePartPaise;
+          cumRemPaise += partPaise;
+          const partAmount = Math.round(partPaise) / 100;
+
+          const dueDate = new Date();
+          dueDate.setDate(dueDate.getDate() + (p * gapDays));
+
+          await tx`
+            INSERT INTO emi_schedules (
+              booking_id, user_id, installment_no, due_date, emi_amount,
+              late_fee_amount, total_due, paid_amount, emi_status,
+              principal_component, interest_component, created_at, updated_at
+            ) VALUES (
+              ${bookingId}, ${booking.user_id}, ${p + 1},
+              ${dueDate.toISOString().split('T')[0]}, ${partAmount},
+              0.00, ${partAmount}, 0.00, 'Pending',
+              ${partAmount}, 0.00, NOW(), NOW()
+            )
+            ON CONFLICT (booking_id, installment_no) DO UPDATE SET
+              emi_amount = EXCLUDED.emi_amount,
+              total_due = EXCLUDED.total_due,
+              updated_at = NOW()
+          `.catch(() => {});
+        }
+      }
+
+      // Log into audit_log
+      await tx`
+        INSERT INTO audit_log (
+          event_type, action, table_name, record_id, user_id, actor_type,
+          before_state, after_state, created_at
+        ) VALUES (
+          'PriceApproval', 'AdminApprovedCustomerRate', 'bookings', ${bookingId},
+          ${req.admin.admin_id}, 'Admin',
+          ${tx.json({ requested_price: booking.requested_price, status: booking.booking_status })},
+          ${tx.json({ approved_price: finalPrice, status: nextBookingStatus })},
+          NOW()
+        )
+      `.catch(() => {});
+
+      return updated;
+    });
+
+    return ok(res, result, 'Plot rate approved and booking payment schedule activated.');
+  } catch (e) {
+    console.error('[Admin Price Approve Error]:', e);
+    return err(res, e.message);
+  }
+});
+
+/**
+ * POST /api/admin/bookings/:id/price-approval/counter
+ * Admin offers a counter price
+ */
+router.post('/admin/bookings/:id/price-approval/counter', verifyAdminToken, role('SuperAdmin', 'Admin', 'FinanceManager'), async (req, res) => {
+  const bookingId = Number(req.params.id);
+  const { counter_price, notes } = req.body || {};
+
+  if (!counter_price || Number(counter_price) <= 0) {
+    return err(res, 'Counter price must be greater than zero.', 400);
+  }
+
+  try {
+    const [updated] = await sql`
+      UPDATE bookings SET
+        price_admin_counter = ${Number(counter_price)},
+        price_approval_status = 'CounterProposed',
+        notes = CASE WHEN ${notes || ''} != '' THEN COALESCE(notes, '') || E'\\n[Admin Counter Offer]: ₹' || ${Number(counter_price)} || ' - ' || ${notes || ''} ELSE notes END,
+        updated_at = NOW()
+      WHERE booking_id = ${bookingId}
+      RETURNING *
+    `;
+    if (!updated) return err(res, 'Booking not found', 404);
+
+    return ok(res, updated, `Counter price ₹${Number(counter_price).toLocaleString('en-IN')} proposed to customer.`);
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+/**
+ * POST /api/admin/bookings/:id/price-approval/reject
+ * Admin rejects the customer proposed price
+ */
+router.post('/admin/bookings/:id/price-approval/reject', verifyAdminToken, role('SuperAdmin', 'Admin', 'FinanceManager'), async (req, res) => {
+  const bookingId = Number(req.params.id);
+  const { reason = 'Price proposal rejected by administration' } = req.body || {};
+
+  try {
+    const [updated] = await sql`
+      UPDATE bookings SET
+        booking_status = 'Rejected',
+        workflow_status = 'Price Rejected',
+        price_approval_status = 'Rejected',
+        price_rejection_reason = ${reason},
+        updated_at = NOW()
+      WHERE booking_id = ${bookingId}
+      RETURNING *
+    `;
+    if (!updated) return err(res, 'Booking not found', 404);
+
+    // Release plot back to Vacant
+    await sql`
+      UPDATE plots SET plot_status = 'Vacant', updated_at = NOW() 
+      WHERE plot_id = ${updated.plot_id}
+    `;
+
+    return ok(res, updated, 'Customer rate proposal rejected and plot released.');
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
 export default router;

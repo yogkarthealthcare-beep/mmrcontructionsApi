@@ -56,9 +56,31 @@ export async function ensureBookingTableSchema(db = sql) {
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS remaining_balance NUMERIC(14,2) DEFAULT 0;
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_date TIMESTAMPTZ DEFAULT NOW();
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_type VARCHAR(50) DEFAULT 'FullPayment';
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS list_price NUMERIC(14,2);
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_overridden BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_set_by_user_id INTEGER;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS requested_price NUMERIC(14,2);
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_approval_status VARCHAR(50);
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_approved_by INTEGER;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_approved_at TIMESTAMPTZ;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_admin_counter NUMERIC(14,2);
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_rejection_reason TEXT;
+
+      CREATE TABLE IF NOT EXISTS plot_price_history (
+        id SERIAL PRIMARY KEY,
+        plot_id INTEGER NOT NULL,
+        old_price NUMERIC(14,2) NULL,
+        new_price NUMERIC(14,2) NOT NULL,
+        rate_per_gaj NUMERIC(14,2) NULL,
+        rate_per_sqft NUMERIC(14,2) NULL,
+        changed_by_admin_id INTEGER NULL,
+        changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        source VARCHAR(50) NOT NULL DEFAULT 'MANUAL_EDIT'
+      );
 
       CREATE INDEX IF NOT EXISTS idx_bookings_queue_position ON bookings(queue_position);
       CREATE INDEX IF NOT EXISTS idx_bookings_plot_id ON bookings(plot_id);
+      CREATE INDEX IF NOT EXISTS idx_plot_price_history_plot_id ON plot_price_history(plot_id);
 
       DO $$
       BEGIN
@@ -499,27 +521,101 @@ export async function createBooking({
     const serialNumber = `MMR-${new Date().getFullYear()}-${String(seqRow?.n || 1).padStart(5, '0')}`;
 
     // 5f. Compute Pricing, Installment Plans & Balances
+    const [workflowSettings] = await tx`
+      SELECT 
+        COALESCE(min_plot_price, 200000) AS min_plot_price,
+        COALESCE(min_emi_down_payment, 30000) AS min_emi_down_payment,
+        COALESCE(part_wise_installments, 4) AS part_wise_installments,
+        COALESCE(part_wise_first_percent, 25.00) AS part_wise_first_percent,
+        COALESCE(part_wise_gap_days, 7) AS part_wise_gap_days,
+        COALESCE(reference_rate_per_gaj, 8000) AS reference_rate_per_gaj,
+        COALESCE(part_wise_deadline_months, 3) AS part_wise_deadline_months
+      FROM booking_workflow_settings WHERE id = 1
+    `.catch(() => [{
+      min_plot_price: 200000,
+      min_emi_down_payment: 30000,
+      part_wise_installments: 4,
+      part_wise_first_percent: 25.00,
+      part_wise_gap_days: 7,
+      reference_rate_per_gaj: 8000,
+      part_wise_deadline_months: 3
+    }]);
+
+    const minPlotPrice = Number(workflowSettings?.min_plot_price || 200000);
+    const minEmiDownPayment = Number(workflowSettings?.min_emi_down_payment || 30000);
+    const partWiseCount = Number(workflowSettings?.part_wise_installments || 4);
+    const partWiseFirstPct = Number(workflowSettings?.part_wise_first_percent || 25);
+    const partWiseGapDays = Number(workflowSettings?.part_wise_gap_days || 7);
+    const deadlineMonths = Number(workflowSettings?.part_wise_deadline_months || 3);
+
+    const staffRoles = ['Associate', 'Team Member', 'Admin', 'SuperAdmin', 'FinanceManager', 'SiteManager'];
+    const isStaff = staffRoles.includes(normalizedActorType) || isRoleAdmin(normalizedActorType) || Boolean(dbActor.is_admin || dbActor.admin_id);
+
+    const listPrice = Number(plot.sold_price || plot.base_price || 0);
     const incomingPrice = Number(customPlotPrice || custom_plot_price || incomingPlotPrice || plot_price || base_price || 0);
-    let plotPrice = Number(plot.sold_price || plot.base_price || 0);
 
-    if ((!plotPrice || isNaN(plotPrice) || plotPrice <= 0) && incomingPrice > 0) {
-      plotPrice = incomingPrice;
-      // Persist user-specified price onto plot base_price if previously unconfigured
-      await tx`
-        UPDATE plots 
-        SET base_price = ${plotPrice}, updated_at = NOW() 
-        WHERE plot_id = ${normalizedPlotId} AND (base_price IS NULL OR base_price <= 0)
-      `;
+    let agreedPrice = 0;
+    let requestedPrice = null;
+    let priceOverridden = false;
+    let priceSetByUserId = null;
+    let isPendingPriceApproval = false;
+    let priceApprovalStatus = null;
+
+    if (isStaff) {
+      // Staff / Team Member / Associate booking
+      if (incomingPrice > 0) {
+        agreedPrice = incomingPrice;
+        priceOverridden = listPrice > 0 && Math.abs(incomingPrice - listPrice) > 0.01;
+        priceSetByUserId = dbActor.user_id;
+      } else if (listPrice > 0) {
+        agreedPrice = listPrice;
+        priceOverridden = false;
+        priceSetByUserId = null;
+      } else {
+        throw createBookingError(`Plot price is unconfigured. Please enter the agreed plot price to proceed.`, 400);
+      }
+
+      // Staff warning threshold: if below minPlotPrice, log audit warning but allow override
+      if (agreedPrice < minPlotPrice) {
+        console.warn(`[BookingService] Staff ${dbActor.user_id} (${normalizedActorType}) overrode plot price to ₹${agreedPrice} (below ₹${minPlotPrice})`);
+      }
+    } else {
+      // Direct Customer booking workflow
+      if (incomingPrice > 0 && (listPrice <= 0 || Math.abs(incomingPrice - listPrice) > 0.01)) {
+        if (incomingPrice < minPlotPrice) {
+          throw createBookingError(`Proposed plot price (₹${incomingPrice.toLocaleString('en-IN')}) cannot be less than the minimum required limit of ₹${minPlotPrice.toLocaleString('en-IN')}.`, 400);
+        }
+        requestedPrice = incomingPrice;
+        agreedPrice = incomingPrice; // Used for provisional installment preview calculations
+        isPendingPriceApproval = true;
+        priceApprovalStatus = 'Pending';
+      } else {
+        // Customer accepted list price
+        if (listPrice <= 0) {
+          throw createBookingError(`Plot price is not configured. Please enter your proposed rate to proceed with admin approval.`, 400);
+        }
+        if (listPrice < minPlotPrice) {
+          throw createBookingError(`Plot base price (₹${listPrice.toLocaleString('en-IN')}) is below minimum threshold ₹${minPlotPrice.toLocaleString('en-IN')}.`, 400);
+        }
+        agreedPrice = listPrice;
+      }
     }
 
-    if (!plotPrice || isNaN(plotPrice) || plotPrice <= 0) {
-      throw createBookingError(`Plot price is unconfigured or zero (₹${plotPrice || 0}). Please enter the total plot price to proceed with booking.`, 400);
+    if (normalizedAdvance > agreedPrice && agreedPrice > 0) {
+      throw createBookingError(`Advance amount (₹${normalizedAdvance}) cannot exceed the plot value (₹${agreedPrice}).`, 400);
     }
-    if (normalizedAdvance > plotPrice) {
-      throw createBookingError(`Advance amount (₹${normalizedAdvance}) cannot exceed the plot value (₹${plotPrice}).`, 400);
+
+    if (normPaymentType === 'FullPayment' && !isPendingPriceApproval) {
+      if (normalizedAdvance > 0 && normalizedAdvance < agreedPrice) {
+        throw createBookingError(`FullPayment requires the full plot value (₹${agreedPrice.toLocaleString('en-IN')}). Received ₹${normalizedAdvance.toLocaleString('en-IN')}.`, 400);
+      }
     }
-    if (normPaymentType === 'FullPayment' && normalizedAdvance > 0 && normalizedAdvance < plotPrice) {
-      throw createBookingError(`FullPayment requires the full plot value (₹${plotPrice}). Received ₹${normalizedAdvance}.`, 400);
+
+    if ((normPaymentType === 'Partial' || normPaymentType === 'PartWise') && !isPendingPriceApproval) {
+      const minFirstInstallment = Math.round((agreedPrice * partWiseFirstPct) / 100);
+      if (normalizedAdvance < minFirstInstallment) {
+        throw createBookingError(`Part-Wise payment requires the first installment to be at least ${partWiseFirstPct}% of total plot value (₹${minFirstInstallment.toLocaleString('en-IN')}). Received ₹${normalizedAdvance.toLocaleString('en-IN')}.`, 400);
+      }
     }
 
     let selectedPlan = null;
@@ -536,36 +632,54 @@ export async function createBooking({
           throw createBookingError(`Selected installment plan (${selectedPlan.tenure_months} months) is currently inactive.`, 400);
         }
         planSnapshot = installmentService.calculateInstallmentPlan({
-          price: plotPrice,
+          price: agreedPrice,
           tenure: selectedPlan.tenure_months,
           interestPercent: selectedPlan.interest_percent,
           downPaymentPercent: selectedPlan.down_payment_percent,
+          actualDownPayment: normalizedAdvance > 0 ? normalizedAdvance : undefined,
+          minDownPaymentAmount: minEmiDownPayment,
         });
+
+        if (!isStaff && normalizedAdvance > 0 && normalizedAdvance < planSnapshot.minimum_required_down_payment) {
+          throw createBookingError(`Minimum down payment required for EMI is ₹${planSnapshot.minimum_required_down_payment.toLocaleString('en-IN')}. Received ₹${normalizedAdvance.toLocaleString('en-IN')}.`, 400);
+        }
       }
     }
 
     // Part-wise deadline calculation
     let partWiseDeadlineAt = null;
     if (normPaymentType === 'Partial' || normPaymentType === 'PartWise') {
-      const [settings] = await tx`
-        SELECT COALESCE(part_wise_deadline_months, 3) AS months FROM booking_workflow_settings WHERE id = 1
-      `.catch(() => [{ months: 3 }]);
-      const deadlineMonths = Number(settings?.months || 3);
       const d = new Date();
       d.setMonth(d.getMonth() + deadlineMonths);
       partWiseDeadlineAt = d;
     }
 
-    let initialAdvance = normalizedAdvance > 0 ? normalizedAdvance : (normPaymentType === 'FullPayment' ? plotPrice : 0);
-    if (planSnapshot) {
+    let initialAdvance = normalizedAdvance > 0 ? normalizedAdvance : (normPaymentType === 'FullPayment' ? agreedPrice : 0);
+    if (planSnapshot && !isPendingPriceApproval) {
       initialAdvance = planSnapshot.down_payment_amount;
     }
-    const remainingBalance = planSnapshot ? planSnapshot.installment_base_amount : Math.max(0, plotPrice - initialAdvance);
 
-    const initialBookingStatus = bookingStatus || (normPaymentType === 'FullPayment' ? 'Submitted' : 'PaymentPending');
-    const initWorkflow = workflowStatus || (normPaymentType === 'FullPayment' ? 'Booking Initiated' : 'Payment Pending');
+    const finalStoredBasePrice = isPendingPriceApproval ? 0 : agreedPrice;
+    const remainingBalance = planSnapshot && !isPendingPriceApproval
+      ? planSnapshot.installment_base_amount
+      : Math.max(0, agreedPrice - initialAdvance);
 
-    // 5g. Insert Booking Record
+    let initialBookingStatus = bookingStatus;
+    let initWorkflow = workflowStatus;
+
+    if (isPendingPriceApproval) {
+      initialBookingStatus = 'Pending Admin Price Approval';
+      initWorkflow = 'Pending Admin Price Approval';
+    } else {
+      if (!initialBookingStatus) {
+        initialBookingStatus = normPaymentType === 'FullPayment' ? 'Submitted' : 'PaymentPending';
+      }
+      if (!initWorkflow) {
+        initWorkflow = normPaymentType === 'FullPayment' ? 'Booking Initiated' : 'Payment Pending';
+      }
+    }
+
+    // 5g. Insert Booking Record (Never alters plots.base_price!)
     const autoApproved = derivedApprovalStatus === 'AutoApproved_CreatedByAssociate';
     const [booking] = await tx`
       INSERT INTO bookings (
@@ -574,7 +688,8 @@ export async function createBooking({
         booked_by_user_id, sold_by_user_id, associate_user_id, booking_type,
         associate_approval_status, associate_approved_by, associate_approved_at,
         required_booking_amount, remaining_balance, base_price, booking_date, created_at, updated_at,
-        installment_plan_id, plan_snapshot, part_wise_deadline_at
+        installment_plan_id, plan_snapshot, part_wise_deadline_at,
+        list_price, price_overridden, price_set_by_user_id, requested_price, price_approval_status
       ) VALUES (
         ${serialNumber}, ${derivedBuyerUserId}, ${normalizedPlotId}, ${siteId || plot.site_id},
         ${normPaymentType}, ${initialAdvance}, ${initialBookingStatus}, ${initWorkflow},
@@ -583,14 +698,15 @@ export async function createBooking({
         ${derivedApprovalStatus},
         ${autoApproved ? derivedBookedByUserId : null},
         ${autoApproved ? new Date() : null},
-        ${requiredBookingAmount || initialAdvance}, ${remainingBalance}, ${plotPrice}, CURRENT_DATE, NOW(), NOW(),
-        ${selectedPlan ? selectedPlan.id : null}, ${planSnapshot ? tx.json(planSnapshot) : null}, ${partWiseDeadlineAt}
+        ${requiredBookingAmount || initialAdvance}, ${remainingBalance}, ${finalStoredBasePrice}, CURRENT_DATE, NOW(), NOW(),
+        ${selectedPlan ? selectedPlan.id : null}, ${planSnapshot ? tx.json(planSnapshot) : null}, ${partWiseDeadlineAt},
+        ${listPrice > 0 ? listPrice : null}, ${priceOverridden}, ${priceSetByUserId}, ${requestedPrice}, ${priceApprovalStatus}
       )
       RETURNING *
     `;
 
-    // 5h. Update Plot Status based on payment type (Full settlement -> Booked, Partial/EMI -> InProcess)
-    const isFullSettlement = normPaymentType === 'FullPayment' || (initialAdvance >= plotPrice && plotPrice > 0);
+    // 5h. Update Plot Status based on payment type (Full settlement -> Booked, Partial/EMI/Approval -> InProcess)
+    const isFullSettlement = !isPendingPriceApproval && (normPaymentType === 'FullPayment' || (initialAdvance >= agreedPrice && agreedPrice > 0));
     const nextPlotStatus = isFullSettlement ? 'Booked' : 'InProcess';
     await tx`UPDATE plots SET plot_status = ${nextPlotStatus}, updated_at = NOW() WHERE plot_id = ${normalizedPlotId}`;
 
@@ -607,36 +723,74 @@ export async function createBooking({
       lockExpiresAt = lock?.expires_at;
     }
 
-    // 5j. Handle EMI Schedules Generation if EMI
-    if (normPaymentType === 'EMI') {
-      const start = new Date();
-      start.setMonth(start.getMonth() + 1);
+    // 5j. Handle EMI or Part-Wise Schedules Generation (Only if price is confirmed / not pending approval)
+    if (!isPendingPriceApproval) {
+      if (normPaymentType === 'EMI') {
+        const start = new Date();
+        start.setMonth(start.getMonth() + 1);
 
-      if (planSnapshot && Array.isArray(planSnapshot.schedule) && planSnapshot.schedule.length > 0) {
-        for (const item of planSnapshot.schedule) {
-          const due = new Date(start);
-          due.setMonth(due.getMonth() + (item.installment_no - 1));
+        if (planSnapshot && Array.isArray(planSnapshot.schedule) && planSnapshot.schedule.length > 0) {
+          for (const item of planSnapshot.schedule) {
+            const due = new Date(start);
+            due.setMonth(due.getMonth() + (item.installment_no - 1));
+            await tx`
+              INSERT INTO emi_schedules (
+                booking_id, user_id, installment_no, due_date, emi_amount,
+                late_fee_amount, total_due, paid_amount, emi_status,
+                principal_component, interest_component, created_at, updated_at
+              ) VALUES (
+                ${booking.booking_id}, ${derivedBuyerUserId}, ${item.installment_no},
+                ${due.toISOString().split('T')[0]}, ${item.emi_amount},
+                0.00, ${item.emi_amount}, 0.00, 'Pending',
+                ${item.principal_component}, ${item.interest_component}, NOW(), NOW()
+              )
+            `.catch(() => {});
+          }
+        }
+      } else if (normPaymentType === 'Partial' || normPaymentType === 'PartWise') {
+        // Generate Part-Wise 4-Installment Schedule (Installment 1 = Advance paid, Remaining 3 spaced 7 days apart)
+        const totalPrincipalPaise = Math.round(agreedPrice * 100);
+        const advancePaise = Math.round(initialAdvance * 100);
+        const remainingPaise = Math.max(0, totalPrincipalPaise - advancePaise);
+        const remInstallments = Math.max(1, partWiseCount - 1);
+        const basePartPaise = Math.floor(remainingPaise / remInstallments);
+
+        // Installment 1: Initial Advance (Due Today, Marked Paid if advance > 0)
+        await tx`
+          INSERT INTO emi_schedules (
+            booking_id, user_id, installment_no, due_date, emi_amount,
+            late_fee_amount, total_due, paid_amount, emi_status,
+            principal_component, interest_component, created_at, updated_at
+          ) VALUES (
+            ${booking.booking_id}, ${derivedBuyerUserId}, 1,
+            CURRENT_DATE, ${initialAdvance},
+            0.00, ${initialAdvance}, ${initialAdvance}, ${initialAdvance > 0 ? 'Paid' : 'Pending'},
+            ${initialAdvance}, 0.00, NOW(), NOW()
+          )
+        `.catch(() => {});
+
+        // Installments 2 to 4: Spaced 7 days (partWiseGapDays) apart
+        let cumRemPaise = 0;
+        for (let p = 1; p <= remInstallments; p++) {
+          const isLast = p === remInstallments;
+          const partPaise = isLast ? (remainingPaise - cumRemPaise) : basePartPaise;
+          cumRemPaise += partPaise;
+          const partAmount = Math.round(partPaise) / 100;
+
+          const dueDate = new Date();
+          dueDate.setDate(dueDate.getDate() + (p * partWiseGapDays));
+
           await tx`
             INSERT INTO emi_schedules (
               booking_id, user_id, installment_no, due_date, emi_amount,
               late_fee_amount, total_due, paid_amount, emi_status,
               principal_component, interest_component, created_at, updated_at
             ) VALUES (
-              ${booking.booking_id}, ${derivedBuyerUserId}, ${item.installment_no},
-              ${due.toISOString().split('T')[0]}, ${item.emi_amount},
-              0.00, ${item.emi_amount}, 0.00, 'Pending',
-              ${item.principal_component}, ${item.interest_component}, NOW(), NOW()
+              ${booking.booking_id}, ${derivedBuyerUserId}, ${p + 1},
+              ${dueDate.toISOString().split('T')[0]}, ${partAmount},
+              0.00, ${partAmount}, 0.00, 'Pending',
+              ${partAmount}, 0.00, NOW(), NOW()
             )
-          `.catch(() => {});
-        }
-      } else {
-        const tenure = Number(plot.emi_tenure_months || 60);
-        for (let i = 1; i <= tenure; i++) {
-          const due = new Date(start);
-          due.setMonth(due.getMonth() + (i - 1));
-          await tx`
-            INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
-            VALUES (${booking.booking_id}, ${derivedBuyerUserId}, ${i}, ${due.toISOString().split('T')[0]}, ${plot.monthly_emi || 0})
           `.catch(() => {});
         }
       }

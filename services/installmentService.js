@@ -25,6 +25,8 @@ export function calculateInstallmentPlan({
   tenure,
   interestPercent,
   downPaymentPercent,
+  actualDownPayment,
+  minDownPaymentAmount = 0,
 }) {
   const principal = Math.max(Number(price || 0), 0);
   const tenureMonths = Math.max(1, Math.round(Number(tenure || 12)));
@@ -33,7 +35,20 @@ export function calculateInstallmentPlan({
 
   const priceInPaise = Math.round(principal * 100);
   const flatInterestInPaise = Math.round((priceInPaise * interestRate) / 100);
-  const dpInPaise = Math.round((priceInPaise * dpRate) / 100);
+
+  // 1. Minimum down payment based on plan percentage
+  const percentDpInPaise = Math.round((priceInPaise * dpRate) / 100);
+  // 2. Minimum fixed threshold (e.g. ₹30,000)
+  const minFixedDpInPaise = Math.round(Math.max(0, Number(minDownPaymentAmount || 0)) * 100);
+  // Stricter (higher) of the two is the minimum required down payment
+  const minRequiredDpInPaise = Math.max(percentDpInPaise, minFixedDpInPaise);
+
+  // 3. If customer or staff paid more than minimum, take actual down payment so excess payment is not lost
+  const userActualDpInPaise = actualDownPayment !== undefined && actualDownPayment !== null && Number(actualDownPayment) > 0
+    ? Math.round(Number(actualDownPayment) * 100)
+    : minRequiredDpInPaise;
+  const dpInPaise = Math.min(priceInPaise, Math.max(minRequiredDpInPaise, userActualDpInPaise));
+
   const totalPayableInPaise = priceInPaise + flatInterestInPaise;
   const balanceRemainingInPaise = priceInPaise - dpInPaise;
   const installmentBaseInPaise = balanceRemainingInPaise + flatInterestInPaise;
@@ -87,8 +102,9 @@ export function calculateInstallmentPlan({
     tenure_months: tenureMonths,
     interest_percent: interestRate,
     down_payment_percent: dpRate,
-    flat_interest_amount: flatInterestInPaise / 100,
+    minimum_required_down_payment: minRequiredDpInPaise / 100,
     down_payment_amount: dpInPaise / 100,
+    flat_interest_amount: flatInterestInPaise / 100,
     total_payable_amount: totalPayableInPaise / 100,
     remaining_balance: balanceRemainingInPaise / 100,
     installment_base_amount: installmentBaseInPaise / 100,

@@ -81,3 +81,46 @@ export function isValidState(stateStr) {
   if (!stateStr) return true; // optional unless required by caller
   return APPROVED_INDIAN_STATES.some(s => s.toLowerCase() === String(stateStr).trim().toLowerCase());
 }
+
+/**
+ * Validates Nominee Date of Birth:
+ * - Must be a valid date
+ * - Must not be a future date
+ * - Must be at least 18 years old
+ */
+export function validateNomineeDob(dobVal) {
+  if (!dobVal) return { valid: true };
+  let birthDate;
+  if (typeof dobVal === "string") {
+    const trimmed = dobVal.trim();
+    if (!trimmed) return { valid: true };
+    const ddmmyyyy = trimmed.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+    if (ddmmyyyy) {
+      const [, d, m, y] = ddmmyyyy;
+      birthDate = new Date(`${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`);
+    } else {
+      birthDate = new Date(trimmed);
+    }
+  } else if (dobVal instanceof Date) {
+    birthDate = dobVal;
+  } else {
+    return { valid: false, message: "Invalid date format for Nominee Date of Birth." };
+  }
+
+  if (isNaN(birthDate.getTime())) {
+    return { valid: false, message: "Invalid Nominee Date of Birth." };
+  }
+
+  const today = new Date();
+  today.setHours(23, 59, 59, 999);
+  if (birthDate > today) {
+    return { valid: false, message: "Nominee Date of Birth cannot be a future date." };
+  }
+
+  const age = calculateAge(birthDate);
+  if (age < 18) {
+    return { valid: false, message: `Nominee must be at least 18 years old (current calculated age: ${age} years).` };
+  }
+
+  return { valid: true, age };
+}

@@ -276,8 +276,8 @@ export async function generateCommissionForPayment({
       return { generated: 0, reason: "No seller attributed (Company Direct)" };
     }
 
-    if (['Cancelled', 'Rejected'].includes(booking.booking_status)) {
-      return { generated: 0, reason: "Booking is cancelled or rejected" };
+    if (['Cancelled', 'Rejected', 'Pending Admin Price Approval'].includes(booking.booking_status)) {
+      return { generated: 0, reason: "Booking is cancelled, rejected, or pending admin price approval" };
     }
 
     // 4. Idempotency Check: check both canonical event_key AND legacy source_id
