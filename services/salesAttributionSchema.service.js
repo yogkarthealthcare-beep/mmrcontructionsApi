@@ -102,6 +102,17 @@ export async function ensureSalesAttributionSchema(sql) {
         VALUES (1, 3)
         ON CONFLICT (id) DO NOTHING;
 
+        ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS min_plot_price NUMERIC(14,2) DEFAULT 200000;
+        ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS reference_rate_per_gaj NUMERIC(14,2) DEFAULT 8000;
+        ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS min_emi_down_payment NUMERIC(14,2) DEFAULT 30000;
+        ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS part_wise_gap_days INT DEFAULT 7;
+        ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS part_wise_installments INT DEFAULT 4;
+        ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS part_wise_first_percent NUMERIC(5,2) DEFAULT 25.00;
+        ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS part_wise_deadline_months INT DEFAULT 3;
+        ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS approval_chain_enabled BOOLEAN DEFAULT FALSE;
+        ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS auto_reject_after_hours INT DEFAULT 72;
+        ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS max_active_requests_per_user INT DEFAULT 5;
+
         CREATE TABLE IF NOT EXISTS plot_status_history (
           id SERIAL PRIMARY KEY,
           plot_id INTEGER NOT NULL,

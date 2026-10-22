@@ -46,7 +46,7 @@ import { ensureEmiSchedulesForBooking, ensureInvoiceForEmi, ensureReceiptForEmi 
 import { setPlotStatus } from "./services/plotStatus.service.js";
 import { dispatchBookingNotification } from "./services/bookingNotification.service.js";
 import { normalizeHumanName, isValidHumanName, calculateAge, isValidState, validateNomineeDob } from "./utils/validationHelper.js";
-import bookingService from "./services/bookingService.js";
+import bookingService, { ensureBookingTableSchema } from "./services/bookingService.js";
 import salesAttributionReportsRoutes from "./routes/sales-attribution-reports.routes.js";
 import bookingApprovalsRoutes from "./routes/booking-approvals.routes.js";
 import adminAttributionRoutes from "./routes/admin-attribution.routes.js";
@@ -16963,6 +16963,7 @@ if (shouldStartServer) {
       }
       await Promise.all([
         ensureCoreDatabaseSequences().catch((e) => console.warn("[MMR API] Sequence sync warning:", e.message)),
+        ensureBookingTableSchema().catch((e) => console.warn("[MMR API] Booking schema warning:", e.message)),
         requireMlmSchema().catch((e) => console.warn("[MMR API] MLM schema warning:", e.message)),
         requireCommissionEngineSchema().catch((e) => console.warn("[MMR API] Commission schema warning:", e.message)),
         ensureAdminUserAccount().catch((e) => console.warn("[MMR API] Admin account ensure warning:", e.message)),

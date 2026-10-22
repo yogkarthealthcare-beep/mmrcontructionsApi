@@ -29,6 +29,25 @@ export async function ensureBookingTableSchema(db = sql) {
       await ensureSalesAttributionSchema(db).catch(() => {});
     }
     await db.unsafe(`
+      CREATE TABLE IF NOT EXISTS booking_workflow_settings (
+        id INT PRIMARY KEY DEFAULT 1,
+        part_wise_deadline_months INT DEFAULT 3,
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_by_admin_id INT
+      );
+      INSERT INTO booking_workflow_settings (id, part_wise_deadline_months) VALUES (1, 3) ON CONFLICT (id) DO NOTHING;
+
+      ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS min_plot_price NUMERIC(14,2) DEFAULT 200000;
+      ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS reference_rate_per_gaj NUMERIC(14,2) DEFAULT 8000;
+      ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS min_emi_down_payment NUMERIC(14,2) DEFAULT 30000;
+      ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS part_wise_gap_days INT DEFAULT 7;
+      ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS part_wise_installments INT DEFAULT 4;
+      ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS part_wise_first_percent NUMERIC(5,2) DEFAULT 25.00;
+      ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS part_wise_deadline_months INT DEFAULT 3;
+      ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS approval_chain_enabled BOOLEAN DEFAULT FALSE;
+      ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS auto_reject_after_hours INT DEFAULT 72;
+      ALTER TABLE booking_workflow_settings ADD COLUMN IF NOT EXISTS max_active_requests_per_user INT DEFAULT 5;
+
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS queue_position INTEGER DEFAULT 1;
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_method VARCHAR(100) DEFAULT 'Cash / Bank';
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT;
@@ -467,6 +486,15 @@ export async function createBooking({
     }
   }
 
+  // 4b. Fetch Workflow Settings safely before transaction to avoid PG transaction aborts
+  let workflowSettings = null;
+  try {
+    const [ws] = await runner`SELECT * FROM booking_workflow_settings WHERE id = 1`;
+    workflowSettings = ws || null;
+  } catch (wsErr) {
+    console.warn('[BookingService] Notice fetching booking_workflow_settings:', wsErr.message);
+  }
+
   // 5. ATOMIC DATABASE TRANSACTION (Concurrency & Race-Condition Safe)
   return await runner.begin(async (tx) => {
     // 5a. PostgreSQL Advisory Lock on the specific plot
@@ -521,32 +549,12 @@ export async function createBooking({
     const serialNumber = `MMR-${new Date().getFullYear()}-${String(seqRow?.n || 1).padStart(5, '0')}`;
 
     // 5f. Compute Pricing, Installment Plans & Balances
-    const [workflowSettings] = await tx`
-      SELECT 
-        COALESCE(min_plot_price, 200000) AS min_plot_price,
-        COALESCE(min_emi_down_payment, 30000) AS min_emi_down_payment,
-        COALESCE(part_wise_installments, 4) AS part_wise_installments,
-        COALESCE(part_wise_first_percent, 25.00) AS part_wise_first_percent,
-        COALESCE(part_wise_gap_days, 7) AS part_wise_gap_days,
-        COALESCE(reference_rate_per_gaj, 8000) AS reference_rate_per_gaj,
-        COALESCE(part_wise_deadline_months, 3) AS part_wise_deadline_months
-      FROM booking_workflow_settings WHERE id = 1
-    `.catch(() => [{
-      min_plot_price: 200000,
-      min_emi_down_payment: 30000,
-      part_wise_installments: 4,
-      part_wise_first_percent: 25.00,
-      part_wise_gap_days: 7,
-      reference_rate_per_gaj: 8000,
-      part_wise_deadline_months: 3
-    }]);
-
-    const minPlotPrice = Number(workflowSettings?.min_plot_price || 200000);
-    const minEmiDownPayment = Number(workflowSettings?.min_emi_down_payment || 30000);
-    const partWiseCount = Number(workflowSettings?.part_wise_installments || 4);
-    const partWiseFirstPct = Number(workflowSettings?.part_wise_first_percent || 25);
-    const partWiseGapDays = Number(workflowSettings?.part_wise_gap_days || 7);
-    const deadlineMonths = Number(workflowSettings?.part_wise_deadline_months || 3);
+    const minPlotPrice = Number(workflowSettings?.min_plot_price ?? 200000);
+    const minEmiDownPayment = Number(workflowSettings?.min_emi_down_payment ?? 30000);
+    const partWiseCount = Number(workflowSettings?.part_wise_installments ?? 4);
+    const partWiseFirstPct = Number(workflowSettings?.part_wise_first_percent ?? 25);
+    const partWiseGapDays = Number(workflowSettings?.part_wise_gap_days ?? 7);
+    const deadlineMonths = Number(workflowSettings?.part_wise_deadline_months ?? 3);
 
     const staffRoles = ['Associate', 'Team Member', 'Admin', 'SuperAdmin', 'FinanceManager', 'SiteManager'];
     const isStaff = staffRoles.includes(normalizedActorType) || isRoleAdmin(normalizedActorType) || Boolean(dbActor.is_admin || dbActor.admin_id);

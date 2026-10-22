@@ -471,7 +471,7 @@ router.post('/admin/bookings/:id/price-approval/approve', verifyAdminToken, role
       if (booking.payment_type === 'EMI' && booking.installment_plan_id) {
         const [plan] = await tx`SELECT * FROM installment_plans WHERE id = ${booking.installment_plan_id}`;
         if (plan) {
-          const [settings] = await tx`SELECT min_emi_down_payment FROM booking_workflow_settings WHERE id = 1`.catch(() => [{ min_emi_down_payment: 30000 }]);
+          const [settings] = await sql`SELECT * FROM booking_workflow_settings WHERE id = 1`.catch(() => [{ min_emi_down_payment: 30000 }]);
           const planSnapshot = installmentService.calculateInstallmentPlan({
             price: finalPrice,
             tenure: plan.tenure_months,
@@ -515,7 +515,7 @@ router.post('/admin/bookings/:id/price-approval/approve', verifyAdminToken, role
         }
       } else if (booking.payment_type === 'Partial' || booking.payment_type === 'PartWise') {
         // Generate Part-Wise 4 installments
-        const [settings] = await tx`SELECT part_wise_gap_days, part_wise_installments FROM booking_workflow_settings WHERE id = 1`.catch(() => [{ part_wise_gap_days: 7, part_wise_installments: 4 }]);
+        const [settings] = await sql`SELECT * FROM booking_workflow_settings WHERE id = 1`.catch(() => [{ part_wise_gap_days: 7, part_wise_installments: 4 }]);
         const partWiseCount = Number(settings?.part_wise_installments || 4);
         const gapDays = Number(settings?.part_wise_gap_days || 7);
 
