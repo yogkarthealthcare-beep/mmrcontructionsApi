@@ -138,7 +138,7 @@ router.get('/admin/plot-orders', verifyAdminToken, async (req, res) => {
         buyer.mobile_no AS buyer_mobile,
         buyer.email AS buyer_email,
         buyer.user_type AS buyer_user_type,
-        buyer.city AS buyer_city,
+        COALESCE(b_addr.city, '') AS buyer_city,
 
         -- Sold by (Team Member) details
         b.sold_by_user_id,
@@ -182,6 +182,7 @@ router.get('/admin/plot-orders', verifyAdminToken, async (req, res) => {
       LEFT JOIN plots p ON p.plot_id = b.plot_id
       LEFT JOIN sites s ON s.site_id = p.site_id
       LEFT JOIN users buyer ON buyer.user_id = b.user_id
+      LEFT JOIN user_addresses b_addr ON b_addr.user_id = b.user_id AND b_addr.address_type = 'Permanent'
       LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
       LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
       LEFT JOIN users booker ON booker.user_id = b.booked_by_user_id
@@ -252,10 +253,10 @@ router.get('/admin/plot-orders/:id', verifyAdminToken, async (req, res) => {
         buyer.mobile_no AS buyer_mobile,
         buyer.email AS buyer_email,
         buyer.user_type AS buyer_user_type,
-        buyer.address AS buyer_address,
-        buyer.city AS buyer_city,
-        buyer.state AS buyer_state,
-        buyer.pincode AS buyer_pincode,
+        COALESCE(b_addr.address_line1, '') AS buyer_address,
+        COALESCE(b_addr.city, '') AS buyer_city,
+        COALESCE(b_addr.state, '') AS buyer_state,
+        COALESCE(b_addr.pin_code, '') AS buyer_pincode,
         COALESCE(k.status, 'Not Submitted') AS buyer_kyc_status,
 
         -- Team Member
@@ -280,15 +281,15 @@ router.get('/admin/plot-orders/:id', verifyAdminToken, async (req, res) => {
         p.area_unit,
         p.plot_status,
         p.unit_type,
-        p.facing,
+        'East Facing' AS facing,
         p.base_price AS plot_master_base_price,
 
         -- Site
         s.site_name,
-        s.location AS site_location,
-        s.address AS site_address,
-        s.city AS site_city,
-        s.state AS site_state,
+        COALESCE(s.location, '') AS site_location,
+        COALESCE(s.full_address, s.location, '') AS site_address,
+        COALESCE(s.city, '') AS site_city,
+        COALESCE(s.state, '') AS site_state,
         s.description AS site_description,
 
         -- Invoices
@@ -303,6 +304,7 @@ router.get('/admin/plot-orders/:id', verifyAdminToken, async (req, res) => {
       LEFT JOIN plots p ON p.plot_id = b.plot_id
       LEFT JOIN sites s ON s.site_id = p.site_id
       LEFT JOIN users buyer ON buyer.user_id = b.user_id
+      LEFT JOIN user_addresses b_addr ON b_addr.user_id = b.user_id AND b_addr.address_type = 'Permanent'
       LEFT JOIN user_kyc_profiles k ON k.user_id = b.user_id
       LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
       LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
