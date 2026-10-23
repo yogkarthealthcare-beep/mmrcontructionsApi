@@ -1,7 +1,7 @@
 import express from "express";
 import sql from "../db.js";
 import jwt from "jsonwebtoken";
-import { userAuth, adminAuth } from "../middleware/auth.middleware.js";
+import { userAuth, adminAuth, optionalAuth } from "../middleware/auth.middleware.js";
 import PDFDocument from "pdfkit";
 import QRCode from "qrcode";
 import bwipjs from "bwip-js";
@@ -156,6 +156,9 @@ router.get("/orders", userAuth, async (req, res) => {
 
 // Helper: Check invoice authorization
 async function canAccessInvoice(reqUser = {}, invoice = {}) {
+  if (!reqUser) {
+    return Boolean(invoice && (invoice.invoice_number || invoice.booking_id));
+  }
   const isAdmin = Boolean(
     reqUser.is_admin ||
     reqUser.admin_id ||
@@ -248,7 +251,7 @@ async function canAccessInvoice(reqUser = {}, invoice = {}) {
 // ----------------------------------------------------
 // 2. GET /api/invoice/:invoiceNumber (Get Single Invoice JSON)
 // ----------------------------------------------------
-router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
+router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
   try {
     const { invoiceNumber } = req.params;
     const isEmiQuery = String(invoiceNumber || "").toUpperCase().startsWith("EMI-") || 
@@ -263,7 +266,10 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
       .replace(/^INV-/i, "")
       .replace(/^EMI-/i, "")
       .trim();
-    const cleanId = !isNaN(Number(cleanNum)) && cleanNum.length > 0 ? Number(cleanNum) : null;
+    const trailingNumMatch = cleanNum.match(/(\d+)$/);
+    const cleanId = !isNaN(Number(cleanNum)) && cleanNum.length > 0 
+      ? Number(cleanNum) 
+      : (trailingNumMatch ? Number(trailingNumMatch[1]) : null);
 
     let [invoice] = await sql`
       SELECT * FROM invoices
@@ -271,6 +277,7 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
          OR LOWER(order_id) = LOWER(${invoiceNumber})
          OR (CASE WHEN ${cleanId !== null && !isEmiQuery} THEN invoice_id = ${cleanId} OR booking_id = ${cleanId} ELSE false END)
          OR (invoice_data->>'booking_id')::text = ${cleanNum}
+         OR (invoice_data->>'booking_id')::text = ${String(cleanId)}
          OR (invoice_data->>'emi_id')::text = ${cleanNum}
          OR (invoice_data->>'invoice_number') ILIKE ${'%' + invoiceNumber + '%'}
          OR invoice_number ILIKE ${'%' + invoiceNumber + '%'}
@@ -632,11 +639,14 @@ router.get("/invoice/:invoiceNumber", userAuth, async (req, res) => {
 // ----------------------------------------------------
 // 3. GET /api/invoice/:invoiceNumber/pdf (Download PDF)
 // ----------------------------------------------------
-router.get("/invoice/:invoiceNumber/pdf", userAuth, async (req, res) => {
+router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
   try {
     const { invoiceNumber } = req.params;
     const cleanNum = String(invoiceNumber || "").replace(/^MMR-INV-/i, "").replace(/^BK-/i, "").replace(/^INV-/i, "").trim();
-    const cleanId = !isNaN(Number(cleanNum)) && cleanNum.length > 0 ? Number(cleanNum) : null;
+    const trailingNumMatch = cleanNum.match(/(\d+)$/);
+    const cleanId = !isNaN(Number(cleanNum)) && cleanNum.length > 0 
+      ? Number(cleanNum) 
+      : (trailingNumMatch ? Number(trailingNumMatch[1]) : null);
 
     let [invoice] = await sql`
       SELECT * FROM invoices
@@ -644,6 +654,7 @@ router.get("/invoice/:invoiceNumber/pdf", userAuth, async (req, res) => {
          OR LOWER(order_id) = LOWER(${invoiceNumber})
          OR (CASE WHEN ${cleanId !== null} THEN invoice_id = ${cleanId} OR booking_id = ${cleanId} ELSE false END)
          OR (invoice_data->>'booking_id')::text = ${cleanNum}
+         OR (invoice_data->>'booking_id')::text = ${String(cleanId)}
          OR (invoice_data->>'invoice_number') ILIKE ${'%' + invoiceNumber + '%'}
          OR invoice_number ILIKE ${'%' + invoiceNumber + '%'}
       ORDER BY invoice_id ASC
@@ -727,8 +738,8 @@ router.get("/invoice/:invoiceNumber/pdf", userAuth, async (req, res) => {
 
     // Audit Log Entry
     try {
-      const actorId = req.user.user_id || req.user.admin_id || req.user.id || 0;
-      const actorRole = req.user.role || (req.user.admin_id ? 'Admin' : 'USER');
+      const actorId = req.user?.user_id || req.user?.admin_id || req.user?.id || 0;
+      const actorRole = req.user?.role || (req.user?.admin_id ? 'Admin' : (req.user ? 'USER' : 'GUEST'));
       await sql`
         INSERT INTO invoice_audit_log (log_id, invoice_id, invoice_number, action, performed_by_id, performed_by_role, ip_address)
         VALUES (

@@ -150,3 +150,30 @@ export const requireSalesEntity = (req, res, next) => {
   return next();
 };
 
+export const optionalAuth = (req, res, next) => {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith("Bearer ")) {
+    req.user = null;
+    return next();
+  }
+  const token = auth.split(" ")[1];
+  if (!token) {
+    req.user = null;
+    return next();
+  }
+  try {
+    req.user = jwt.verify(token, getUserSecret());
+    return next();
+  } catch (_) {
+    try {
+      const decoded = jwt.verify(token, getAdminSecret());
+      req.user = decoded;
+      req.user.is_admin = true;
+      return next();
+    } catch {
+      req.user = null;
+      return next();
+    }
+  }
+};
+
