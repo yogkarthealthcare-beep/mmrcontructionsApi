@@ -161,16 +161,16 @@ router.get('/admin/plot-orders', verifyAdminToken, async (req, res) => {
         -- Plot details
         p.plot_id,
         p.plot_number,
-        p.plot_area,
-        p.area_unit,
-        p.plot_status,
-        p.unit_type,
+        COALESCE(p.plot_area, 0) AS plot_area,
+        'Gaj' AS area_unit,
+        COALESCE(p.plot_status, 'Vacant') AS plot_status,
+        COALESCE(p.unit_type, 'PLOT') AS unit_type,
 
         -- Site details
         s.site_id,
         s.site_name,
-        s.location AS site_location,
-        s.city AS site_city,
+        COALESCE(s.location, '') AS site_location,
+        COALESCE(s.city, '') AS site_city,
 
         -- Invoice details
         inv.invoice_id,
@@ -277,20 +277,20 @@ router.get('/admin/plot-orders/:id', verifyAdminToken, async (req, res) => {
 
         -- Plot
         p.plot_number,
-        p.plot_area,
-        p.area_unit,
-        p.plot_status,
-        p.unit_type,
+        COALESCE(p.plot_area, 0) AS plot_area,
+        'Gaj' AS area_unit,
+        COALESCE(p.plot_status, 'Vacant') AS plot_status,
+        COALESCE(p.unit_type, 'PLOT') AS unit_type,
         'East Facing' AS facing,
-        p.base_price AS plot_master_base_price,
+        COALESCE(p.base_price, 0) AS plot_master_base_price,
 
         -- Site
         s.site_name,
         COALESCE(s.location, '') AS site_location,
         COALESCE(s.full_address, s.location, '') AS site_address,
         COALESCE(s.city, '') AS site_city,
-        COALESCE(s.state, '') AS site_state,
-        s.description AS site_description,
+        'Uttar Pradesh' AS site_state,
+        '' AS site_description,
 
         -- Invoices
         inv.invoice_id,
