@@ -134,49 +134,46 @@ async function createOrGetInvoice(bookingId) {
         ${sql.json(invData)},
         NOW(), NOW()
       )
-      ON CONFLICT (booking_id) DO UPDATE SET
-        invoice_number = EXCLUDED.invoice_number,
-        paid_amount = EXCLUDED.paid_amount,
-        balance_amount = EXCLUDED.balance_amount,
-        invoice_data = EXCLUDED.invoice_data,
-        updated_at = NOW()
       RETURNING *
     `;
   } catch (errWithId) {
-    // If strict GENERATED ALWAYS identity where explicit id is rejected
-    [newInv] = await sql`
-      INSERT INTO invoices (
-        invoice_number, booking_id, user_id, associate_id, order_id, invoice_date,
-        subtotal, grand_total, paid_amount, balance_amount, payment_status, payment_method,
-        order_status, invoice_data, created_at, updated_at
-      ) VALUES (
-        ${invNum}, ${bookingId}, ${booking.user_id}, ${booking.associate_user_id || null},
-        ${booking.booking_serial || `ORDER-${bookingId}`}, NOW(),
-        ${saleVal}, ${saleVal}, ${advVal}, ${remBal},
-        ${paymentStatus},
-        ${booking.payment_method || 'Bank Transfer'},
-        'Completed',
-        ${sql.json(invData)},
-        NOW(), NOW()
-      )
-      ON CONFLICT (booking_id) DO UPDATE SET
-        invoice_number = EXCLUDED.invoice_number,
-        paid_amount = EXCLUDED.paid_amount,
-        balance_amount = EXCLUDED.balance_amount,
-        invoice_data = EXCLUDED.invoice_data,
-        updated_at = NOW()
-      RETURNING *
-    `;
+    try {
+      [newInv] = await sql`
+        INSERT INTO invoices (
+          invoice_number, booking_id, user_id, associate_id, order_id, invoice_date,
+          subtotal, grand_total, paid_amount, balance_amount, payment_status, payment_method,
+          order_status, invoice_data, created_at, updated_at
+        ) VALUES (
+          ${invNum}, ${bookingId}, ${booking.user_id}, ${booking.associate_user_id || null},
+          ${booking.booking_serial || `ORDER-${bookingId}`}, NOW(),
+          ${saleVal}, ${saleVal}, ${advVal}, ${remBal},
+          ${paymentStatus},
+          ${booking.payment_method || 'Bank Transfer'},
+          'Completed',
+          ${sql.json(invData)},
+          NOW(), NOW()
+        )
+        RETURNING *
+      `;
+    } catch (insertErr) {
+      const [fallbackInv] = await sql`
+        SELECT * FROM invoices 
+        WHERE booking_id = ${bookingId} 
+           OR order_id = ${booking.booking_serial || `ORDER-${bookingId}`}
+        LIMIT 1
+      `.catch(() => []);
+      if (fallbackInv) {
+        newInv = fallbackInv;
+      } else {
+        throw insertErr;
+      }
+    }
   }
 
   // Also sync booking_invoices table for legacy compatibility
   await sql`
     INSERT INTO booking_invoices (invoice_number, booking_id, user_id, invoice_data)
     VALUES (${invNum}, ${bookingId}, ${booking.user_id}, ${sql.json(invData)})
-    ON CONFLICT (booking_id) DO UPDATE SET
-      invoice_number = EXCLUDED.invoice_number,
-      invoice_data = EXCLUDED.invoice_data,
-      updated_at = NOW()
   `.catch(() => {});
 
   return newInv;
