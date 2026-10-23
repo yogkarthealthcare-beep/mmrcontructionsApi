@@ -25,6 +25,164 @@ function err(res, message = 'Error', code = 400) {
   return res.status(code).json({ success: false, message });
 }
 
+// Automatically ensure sequence and default on invoices.invoice_id in DB if missing
+(async () => {
+  try {
+    await sql`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'invoices') THEN
+          CREATE SEQUENCE IF NOT EXISTS invoices_invoice_id_seq;
+          PERFORM setval('invoices_invoice_id_seq', COALESCE((SELECT MAX(invoice_id) FROM invoices), 0) + 1, false);
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns 
+            WHERE table_name = 'invoices' AND column_name = 'invoice_id' AND column_default IS NOT NULL
+          ) THEN
+            ALTER TABLE invoices ALTER COLUMN invoice_id SET DEFAULT nextval('invoices_invoice_id_seq');
+          END IF;
+        END IF;
+      EXCEPTION WHEN OTHERS THEN
+        NULL;
+      END $$;
+    `;
+  } catch (schemaErr) {
+    console.warn('[AdminPlotOrders] invoice_id sequence auto-setup notice:', schemaErr.message);
+  }
+})();
+
+// Helper to create or ensure an invoice record exists for a booking
+async function createOrGetInvoice(bookingId) {
+  const [booking] = await sql`
+    SELECT b.*, p.plot_id, p.plot_number, p.plot_area, p.sold_price, p.base_price AS plot_base_price,
+           s.site_name, s.city AS site_city,
+           u.full_name AS buyer_name, u.mobile_no AS buyer_mobile, u.email AS buyer_email,
+           b_addr.address_line1 AS buyer_address,
+           assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile
+    FROM bookings b
+    LEFT JOIN plots p ON p.plot_id = b.plot_id
+    LEFT JOIN sites s ON s.site_id = p.site_id
+    LEFT JOIN users u ON u.user_id = b.user_id
+    LEFT JOIN user_addresses b_addr ON b_addr.user_id = b.user_id
+    LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
+    WHERE b.booking_id = ${bookingId}
+    LIMIT 1
+  `;
+
+  if (!booking) throw new Error('Booking order not found');
+
+  // Check if invoice already exists
+  let [existingInv] = await sql`
+    SELECT * FROM invoices WHERE booking_id = ${bookingId} LIMIT 1
+  `.catch(() => []);
+
+  if (existingInv) {
+    return existingInv;
+  }
+
+  const invNum = `MMR-INV-${new Date().getFullYear()}-${String(bookingId).padStart(6, '0')}`;
+  const saleVal = Number(booking.base_price || booking.sold_price || booking.plot_base_price || booking.advance_amount || 0);
+  const advVal = Number(booking.advance_amount || 0);
+  const remBal = Math.max(0, saleVal - advVal);
+  const paymentStatus = advVal >= saleVal ? 'Paid' : (advVal > 0 ? 'Partially Paid' : 'Unpaid');
+
+  const invData = {
+    invoice_number: invNum,
+    invoice_type: 'Plot Booking Order Invoice',
+    booking_id: booking.booking_id,
+    booking_serial: booking.booking_serial || `BK-${booking.booking_id}`,
+    customer_name: booking.buyer_name || 'Valued Customer',
+    mobile_no: booking.buyer_mobile || '',
+    email: booking.buyer_email || '',
+    address: booking.buyer_address || '',
+    associate_name: booking.associate_name || '',
+    associate_mobile: booking.associate_mobile || '',
+    associate_id: booking.associate_user_id || '',
+    site_name: booking.site_name || 'MMR City',
+    plot_number: booking.plot_number || 'Plot',
+    plot_size: `${booking.plot_area || ''} Gaj`.trim(),
+    total_plot_price: saleVal,
+    down_payment: advVal,
+    grand_total: saleVal,
+    paid_amount: advVal,
+    balance_amount: remBal,
+    payment_method: booking.payment_method || 'Bank Transfer',
+    payment_status: paymentStatus,
+    order_status: 'Completed',
+    created_at: new Date()
+  };
+
+  // Safe invoice ID calculation (handles tables without sequence/default)
+  const [maxRow] = await sql`
+    SELECT COALESCE(MAX(invoice_id), 0) + 1 AS next_id FROM invoices
+  `.catch(() => [{ next_id: 1 }]);
+  const nextInvoiceId = Number(maxRow?.next_id || 1);
+
+  let newInv;
+  try {
+    [newInv] = await sql`
+      INSERT INTO invoices (
+        invoice_id, invoice_number, booking_id, user_id, associate_id, order_id, invoice_date,
+        subtotal, grand_total, paid_amount, balance_amount, payment_status, payment_method,
+        order_status, invoice_data, created_at, updated_at
+      ) VALUES (
+        ${nextInvoiceId}, ${invNum}, ${bookingId}, ${booking.user_id}, ${booking.associate_user_id || null},
+        ${booking.booking_serial || `ORDER-${bookingId}`}, NOW(),
+        ${saleVal}, ${saleVal}, ${advVal}, ${remBal},
+        ${paymentStatus},
+        ${booking.payment_method || 'Bank Transfer'},
+        'Completed',
+        ${sql.json(invData)},
+        NOW(), NOW()
+      )
+      ON CONFLICT (booking_id) DO UPDATE SET
+        invoice_number = EXCLUDED.invoice_number,
+        paid_amount = EXCLUDED.paid_amount,
+        balance_amount = EXCLUDED.balance_amount,
+        invoice_data = EXCLUDED.invoice_data,
+        updated_at = NOW()
+      RETURNING *
+    `;
+  } catch (errWithId) {
+    // If strict GENERATED ALWAYS identity where explicit id is rejected
+    [newInv] = await sql`
+      INSERT INTO invoices (
+        invoice_number, booking_id, user_id, associate_id, order_id, invoice_date,
+        subtotal, grand_total, paid_amount, balance_amount, payment_status, payment_method,
+        order_status, invoice_data, created_at, updated_at
+      ) VALUES (
+        ${invNum}, ${bookingId}, ${booking.user_id}, ${booking.associate_user_id || null},
+        ${booking.booking_serial || `ORDER-${bookingId}`}, NOW(),
+        ${saleVal}, ${saleVal}, ${advVal}, ${remBal},
+        ${paymentStatus},
+        ${booking.payment_method || 'Bank Transfer'},
+        'Completed',
+        ${sql.json(invData)},
+        NOW(), NOW()
+      )
+      ON CONFLICT (booking_id) DO UPDATE SET
+        invoice_number = EXCLUDED.invoice_number,
+        paid_amount = EXCLUDED.paid_amount,
+        balance_amount = EXCLUDED.balance_amount,
+        invoice_data = EXCLUDED.invoice_data,
+        updated_at = NOW()
+      RETURNING *
+    `;
+  }
+
+  // Also sync booking_invoices table for legacy compatibility
+  await sql`
+    INSERT INTO booking_invoices (invoice_number, booking_id, user_id, invoice_data)
+    VALUES (${invNum}, ${bookingId}, ${booking.user_id}, ${sql.json(invData)})
+    ON CONFLICT (booking_id) DO UPDATE SET
+      invoice_number = EXCLUDED.invoice_number,
+      invoice_data = EXCLUDED.invoice_data,
+      updated_at = NOW()
+  `.catch(() => {});
+
+  return newInv;
+}
+
+
 /**
  * 1. GET /api/admin/plot-orders
  * List plot booking orders with rich search, pagination, and summary KPIs.
@@ -420,25 +578,10 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
       }
 
       // 3. Ensure Invoice exists
-      const [existingInv] = await sql`
-        SELECT invoice_id, invoice_number FROM invoices WHERE booking_id = ${bookingId} LIMIT 1
-      `.catch(() => []);
-
-      if (!existingInv) {
-        const invNum = `MMR-INV-${new Date().getFullYear()}-${String(bookingId).padStart(6, '0')}`;
-        const saleVal = Number(booking.base_price || booking.advance_amount || 0);
-        const advVal = Number(booking.advance_amount || 0);
-        await sql`
-          INSERT INTO invoices (
-            invoice_number, booking_id, user_id, associate_id, invoice_date,
-            subtotal, grand_total, paid_amount, balance_amount, payment_status, payment_method
-          ) VALUES (
-            ${invNum}, ${bookingId}, ${booking.user_id}, ${booking.associate_user_id || null}, NOW(),
-            ${saleVal}, ${saleVal}, ${advVal}, ${Math.max(0, saleVal - advVal)},
-            ${advVal >= saleVal ? 'Paid' : (advVal > 0 ? 'Partially Paid' : 'Unpaid')},
-            ${booking.payment_method || 'Bank Transfer'}
-          )
-        `.catch(invErr => console.error('[AdminPlotOrders] Invoice creation warning:', invErr.message));
+      try {
+        await createOrGetInvoice(bookingId);
+      } catch (invErr) {
+        console.error('[AdminPlotOrders] Invoice creation warning:', invErr.message);
       }
 
       // 4. Commission check:
@@ -538,42 +681,8 @@ router.post('/admin/plot-orders/:id/generate-invoice', verifyAdminToken, async (
     const bookingId = Number(req.params.id);
     if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
 
-    const [booking] = await sql`
-      SELECT b.*, p.plot_id, p.plot_number, p.sold_price, p.base_price AS plot_base_price, s.site_name
-      FROM bookings b
-      LEFT JOIN plots p ON p.plot_id = b.plot_id
-      LEFT JOIN sites s ON s.site_id = p.site_id
-      WHERE b.booking_id = ${bookingId}
-    `;
-
-    if (!booking) return err(res, 'Booking order not found', 404);
-
-    let [existingInv] = await sql`
-      SELECT * FROM invoices WHERE booking_id = ${bookingId} LIMIT 1
-    `.catch(() => []);
-
-    if (existingInv) {
-      return ok(res, { invoice: existingInv }, 'Invoice already exists for this order');
-    }
-
-    const invNum = `MMR-INV-${new Date().getFullYear()}-${String(bookingId).padStart(6, '0')}`;
-    const saleVal = Number(booking.base_price || booking.sold_price || booking.plot_base_price || booking.advance_amount || 0);
-    const advVal = Number(booking.advance_amount || 0);
-
-    const [newInv] = await sql`
-      INSERT INTO invoices (
-        invoice_number, booking_id, user_id, associate_id, invoice_date,
-        subtotal, grand_total, paid_amount, balance_amount, payment_status, payment_method
-      ) VALUES (
-        ${invNum}, ${bookingId}, ${booking.user_id}, ${booking.associate_user_id || null}, NOW(),
-        ${saleVal}, ${saleVal}, ${advVal}, ${Math.max(0, saleVal - advVal)},
-        ${advVal >= saleVal ? 'Paid' : (advVal > 0 ? 'Partially Paid' : 'Unpaid')},
-        ${booking.payment_method || 'Bank Transfer'}
-      )
-      RETURNING *
-    `;
-
-    return ok(res, { invoice: newInv }, 'Invoice generated successfully');
+    const invoice = await createOrGetInvoice(bookingId);
+    return ok(res, { invoice }, 'Invoice generated successfully');
   } catch (e) {
     console.error('[AdminPlotOrders] Error generating invoice:', e);
     return err(res, e.message || 'Failed to generate invoice', 500);
