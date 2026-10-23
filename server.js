@@ -50,6 +50,7 @@ import bookingService, { ensureBookingTableSchema } from "./services/bookingServ
 import salesAttributionReportsRoutes from "./routes/sales-attribution-reports.routes.js";
 import bookingApprovalsRoutes from "./routes/booking-approvals.routes.js";
 import adminAttributionRoutes from "./routes/admin-attribution.routes.js";
+import adminPlotOrdersRoutes from "./routes/admin-plot-orders.routes.js";
 import masterDataRoutes from "./routes/master-data.routes.js";
 import { bookingApprovalConfig } from "./config/bookingApproval.js";
 import commissionService from "./services/commissionService.js";
@@ -291,6 +292,7 @@ app.use('/api', adminNetworkTreeRoutes);
 app.use('/api', salesAttributionReportsRoutes);
 app.use('/api', bookingApprovalsRoutes);
 app.use('/api', adminAttributionRoutes);
+app.use('/api', adminPlotOrdersRoutes);
 app.use('/api', masterDataRoutes);
 app.use('/api', installmentPlansRoutes);
 app.use('/api', emiManagementRoutes);
