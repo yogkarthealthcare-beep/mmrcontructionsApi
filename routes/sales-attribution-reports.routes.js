@@ -77,33 +77,50 @@ router.get('/team-members/:id/sales-summary', verifyUserToken, async (req, res) 
       SELECT
         COUNT(*) FILTER (WHERE is_confirmed_sale = TRUE AND is_self_purchase = FALSE)::INT AS plots_sold_count,
         COALESCE(SUM(sale_value) FILTER (WHERE is_confirmed_sale = TRUE AND is_self_purchase = FALSE), 0)::NUMERIC AS total_sales_value,
+        COALESCE(SUM(plot_area) FILTER (WHERE is_confirmed_sale = TRUE AND is_self_purchase = FALSE), 0)::NUMERIC AS total_gaj_sold,
         COUNT(*) FILTER (WHERE is_confirmed_sale = TRUE AND is_self_purchase = TRUE)::INT AS own_purchases_count,
         COALESCE(SUM(sale_value) FILTER (WHERE is_confirmed_sale = TRUE AND is_self_purchase = TRUE), 0)::NUMERIC AS own_purchases_value,
-        COUNT(*) FILTER (WHERE booking_status IN ('Submitted', 'PaymentPending', 'Allocated') AND is_self_purchase = FALSE)::INT AS pending_bookings_count,
+        COUNT(*) FILTER (WHERE (booking_status IN ('Submitted', 'PaymentPending', 'Allocated', 'Under Process', 'Processing', 'Pending') OR associate_approval_status = 'Pending') AND booking_status NOT IN ('Cancelled', 'Rejected') AND is_self_purchase = FALSE)::INT AS processing_deals_count,
         COUNT(*) FILTER (WHERE associate_approval_status = 'Pending' AND is_self_purchase = FALSE)::INT AS pending_approval_count,
+        COUNT(*) FILTER (WHERE booking_status IN ('Cancelled', 'Rejected') OR associate_approval_status = 'Rejected')::INT AS cancelled_deals_count,
         COUNT(*) FILTER (WHERE is_reward_eligible = TRUE)::INT AS reward_eligible_count
       FROM vw_sales_attribution
       WHERE sold_by_user_id = ${targetTmId}
     `;
 
-    // Direct customer referrals count
+    // Direct customer referrals count & active customers count
     const [custCount] = await sql`
-      SELECT COUNT(*)::INT AS total_customers_referred
+      SELECT 
+        COUNT(*)::INT AS total_customers_referred,
+        COUNT(*) FILTER (WHERE account_status IN ('Active', 'Approved'))::INT AS active_customers_count
       FROM users
       WHERE referred_by_user_id = ${targetTmId} AND user_type = 'Customer'
     `;
 
+    const plotsSold = Number(kpis?.plots_sold_count || 0);
+    const processingDeals = Number(kpis?.processing_deals_count || 0);
+    const cancelledDeals = Number(kpis?.cancelled_deals_count || 0);
+    const activeCustomers = Number(custCount?.active_customers_count || 0);
+    const totalCustomers = Number(custCount?.total_customers_referred || 0);
+
     return ok(res, {
       team_member: tmUser,
       kpis: {
-        plots_sold: Number(kpis?.plots_sold_count || 0),
+        active_customers_count: activeCustomers,
+        total_customers_referred: totalCustomers,
+        customers_count: totalCustomers,
+        processing_count: processingDeals,
+        pending_bookings_count: processingDeals,
+        pending_approval_count: Number(kpis?.pending_approval_count || 0),
+        plots_sold: plotsSold,
+        plots_sold_count: plotsSold,
+        cancelled_deals_count: cancelledDeals,
+        total_sales_count: plotsSold + processingDeals,
         total_sales_value: Number(kpis?.total_sales_value || 0),
+        total_gaj_sold: Number(kpis?.total_gaj_sold || 0),
         own_purchases_count: Number(kpis?.own_purchases_count || 0),
         own_purchases_value: Number(kpis?.own_purchases_value || 0),
-        pending_bookings_count: Number(kpis?.pending_bookings_count || 0),
-        pending_approval_count: Number(kpis?.pending_approval_count || 0),
-        reward_eligible_count: Number(kpis?.reward_eligible_count || 0),
-        total_customers_referred: Number(custCount?.total_customers_referred || 0)
+        reward_eligible_count: Number(kpis?.reward_eligible_count || 0)
       }
     });
   } catch (e) {
