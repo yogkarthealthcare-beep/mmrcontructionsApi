@@ -169,7 +169,7 @@ router.get('/admin/plot-orders', verifyAdminToken, async (req, res) => {
         -- Site details
         s.site_id,
         s.site_name,
-        COALESCE(s.location, '') AS site_location,
+        COALESCE(s.full_address, s.city, '') AS site_location,
         COALESCE(s.city, '') AS site_city,
 
         -- Invoice details
@@ -286,11 +286,11 @@ router.get('/admin/plot-orders/:id', verifyAdminToken, async (req, res) => {
 
         -- Site
         s.site_name,
-        COALESCE(s.location, '') AS site_location,
-        COALESCE(s.full_address, s.location, '') AS site_address,
+        COALESCE(s.city, 'Varanasi') AS site_location,
+        COALESCE(s.full_address, s.city, '') AS site_address,
         COALESCE(s.city, '') AS site_city,
-        'Uttar Pradesh' AS site_state,
-        '' AS site_description,
+        COALESCE(s.state, 'Uttar Pradesh') AS site_state,
+        COALESCE(s.description, '') AS site_description,
 
         -- Invoices
         inv.invoice_id,
