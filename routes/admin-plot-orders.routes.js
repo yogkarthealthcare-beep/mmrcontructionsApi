@@ -520,8 +520,8 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
     const { status, reason, remarks } = req.body || {};
 
     if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
-    if (!status || !['Confirmed', 'Approved', 'Rejected', 'Pending', 'Under Process'].includes(status)) {
-      return err(res, "Status must be 'Confirmed'/'Approved', 'Rejected', 'Pending', or 'Under Process'", 400);
+    if (!status || !['Confirmed', 'Approved', 'Rejected', 'Pending', 'Under Process', 'Submitted', 'Choose'].includes(status)) {
+      return err(res, "Status must be 'Confirmed'/'Approved', 'Rejected', 'Pending', 'Under Process', or 'Submitted'", 400);
     }
 
     const adminId = req.admin?.admin_id || req.user?.admin_id || 1;
@@ -639,6 +639,28 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
         await sql`
           INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
           VALUES (${booking.plot_id}, ${booking.plot_status || 'InProcess'}, 'Vacant', ${adminId}, ${adminName}, ${reason || 'Rejected by Admin in Plot Orders'})
+        `.catch(() => {});
+      }
+    } else if (status === 'Submitted' || status === 'Choose') {
+      [updatedOrder] = await sql`
+        UPDATE bookings
+        SET
+          booking_status = 'Submitted',
+          associate_approval_status = 'Pending',
+          confirmed_at = NULL,
+          notes = CASE
+            WHEN ${remarks || reason || ''} != '' THEN CONCAT(COALESCE(notes, ''), ' | Status Reset: ', ${remarks || reason})
+            ELSE notes
+          END
+        WHERE booking_id = ${bookingId}
+        RETURNING *
+      `;
+
+      if (booking.plot_id && booking.plot_status === 'Sold') {
+        await sql`UPDATE plots SET plot_status = 'Vacant', updated_at = NOW() WHERE plot_id = ${booking.plot_id}`.catch(() => {});
+        await sql`
+          INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
+          VALUES (${booking.plot_id}, 'Sold', 'Vacant', ${adminId}, ${adminName}, 'Status reset to unreviewed')
         `.catch(() => {});
       }
     } else {
