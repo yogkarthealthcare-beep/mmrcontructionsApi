@@ -754,130 +754,153 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${invoice.invoice_number}.pdf"`);
 
-    const doc = new PDFDocument({ margin: 40, size: "A4" });
+    const doc = new PDFDocument({ margin: 15, size: "A4", layout: "landscape" });
     doc.pipe(res);
 
-    // Primary Header Branding
-    const brandColor = settings.theme_color || "#14532d";
-    doc.rect(0, 0, 595.28, 80).fill(brandColor);
+    // Page dimensions for A4 Landscape
+    const margin = 15;
+    const colWidth = 390;
+    const colHeight = 565;
 
-    doc.fillColor("#ffffff").fontSize(20).text(settings.company_name || "MMR Constructions & Developers", 40, 20, { align: "left" });
-    doc.fontSize(9).fillColor("#e2e8f0").text(settings.address || "Head Office: Lucknow, Uttar Pradesh", 40, 46, { align: "left" });
-    doc.fontSize(9).text(`Phone: ${settings.phone || "-"}  |  Email: ${settings.email || "-"}`, 40, 58, { align: "left" });
+    // Helper to render one copy (Buyer or Seller)
+    const renderCopy = (startX, copyTitleEn, copyTitleHi, isBuyer) => {
+      // 1. Outer Box
+      const topBarColor = isBuyer ? "#15803d" : "#0284c7";
+      doc.roundedRect(startX, margin, colWidth, colHeight, 5).lineWidth(1).strokeColor("#cbd5e1").stroke();
+      doc.rect(startX + 1, margin, colWidth - 2, 4).fill(topBarColor);
 
-    // Title & Invoice Meta Box
-    doc.moveDown(3);
-    doc.fillColor("#1e293b").fontSize(18).text("PLOT BOOKING INVOICE", 40, 100, { align: "left" });
+      // 2. Company Brand & Header
+      doc.fillColor("#0f172a").fontSize(11).font("Helvetica-Bold").text(settings.company_name || "MMR Constructions & Developers", startX + 10, margin + 10);
+      doc.fontSize(7).font("Helvetica").fillColor("#64748b").text(settings.address || "Head Office: Main Road, Lucknow, Uttar Pradesh - 226001", startX + 10, margin + 23);
+      doc.text(`Ph: ${settings.phone || "+91 98765 43210"}  |  Email: ${settings.email || "info@mmrconstructions.com"}  ${settings.gst_number ? "| GSTIN: " + settings.gst_number : ""}`, startX + 10, margin + 32);
 
-    doc.fontSize(10).fillColor("#64748b").text(`Invoice Number: `, 360, 100, { continued: true });
-    doc.fillColor("#14532d").text(invoice.invoice_number);
+      // Copy Tag Pill
+      const pillW = 130;
+      const pillH = 22;
+      const pillX = startX + colWidth - pillW - 10;
+      const pillY = margin + 8;
+      doc.roundedRect(pillX, pillY, pillW, pillH, 3).lineWidth(1).strokeColor(topBarColor).fillAndStroke(isBuyer ? "#ecfdf5" : "#f0f9ff", topBarColor);
+      doc.fillColor(topBarColor).fontSize(6.5).font("Helvetica-Bold").text(copyTitleEn, pillX, pillY + 3, { width: pillW, align: "center" });
+      doc.fontSize(6).font("Helvetica").text(copyTitleHi, pillX, pillY + 12, { width: pillW, align: "center" });
 
-    doc.fontSize(9).fillColor("#64748b").text(`Invoice Date: `, 360, 114, { continued: true });
-    doc.fillColor("#334155").text(new Date(invoice.invoice_date).toLocaleDateString("en-IN"));
+      // 3. Meta Strip
+      const metaY = margin + 45;
+      doc.rect(startX + 10, metaY, colWidth - 20, 16).fillAndStroke("#f8fafc", "#e2e8f0");
+      doc.fontSize(7).font("Helvetica-Bold").fillColor("#64748b").text("INVOICE NO: ", startX + 14, metaY + 4, { continued: true });
+      doc.fillColor("#15803d").text(invoice.invoice_number, { continued: true });
+      doc.fillColor("#64748b").text("     DATE: ", { continued: true });
+      doc.fillColor("#0f172a").text(new Date(invoice.invoice_date).toLocaleDateString("en-IN"), { continued: true });
+      doc.fillColor("#64748b").text("     ORDER ID: ", { continued: true });
+      doc.fillColor("#0f172a").text(invoice.order_id || `BK-${invoice.booking_id}`);
 
-    doc.fontSize(9).fillColor("#64748b").text(`Order / Serial ID: `, 360, 128, { continued: true });
-    doc.fillColor("#334155").text(invoice.order_id || `BK-${invoice.booking_id}`);
+      // 4. Details 2-Column Grid (Buyer Info & Property Info)
+      const gridY = metaY + 22;
+      const subColW = (colWidth - 26) / 2;
 
-    doc.moveDown();
-    doc.lineWidth(1).strokeColor("#cbd5e1").lineCap("butt").moveTo(40, 150).lineTo(555, 150).stroke();
+      // Buyer box
+      doc.roundedRect(startX + 10, gridY, subColW, 72, 3).fillAndStroke("#ffffff", "#e2e8f0");
+      doc.rect(startX + 10, gridY, subColW, 14).fill("#f1f5f9");
+      doc.fillColor("#0f172a").fontSize(7).font("Helvetica-Bold").text("BUYER / CUSTOMER DETAILS", startX + 14, gridY + 3);
 
-    // Section 1: Customer Details
-    let y = 165;
-    doc.fillColor("#14532d").fontSize(12).text("CUSTOMER DETAILS", 40, y);
-    y += 18;
-    const custLines = [
-      ["Customer Name", data.customer_name || "-"],
-      ["Mobile Number", data.mobile_no || "-"],
-      ["Email Address", data.email || "-"],
-      ["Booking Date", data.booking_date ? new Date(data.booking_date).toLocaleString("en-IN") : "-"],
-    ];
+      let bY = gridY + 18;
+      const drawRow = (x, y, k, v, isBold = false) => {
+        doc.fontSize(6.5).font("Helvetica").fillColor("#64748b").text(k, x + 4, y, { width: 55 });
+        doc.font(isBold ? "Helvetica-Bold" : "Helvetica").fillColor(isBold ? "#0f172a" : "#334155").text(String(v || "-"), x + 60, y, { width: subColW - 65, height: 10, ellipsis: true });
+      };
+      drawRow(startX + 10, bY, "Buyer Name:", data.customer_name || "-", true);
+      bY += 12;
+      drawRow(startX + 10, bY, "Mobile No:", data.mobile_no || "-");
+      bY += 12;
+      drawRow(startX + 10, bY, "Email:", data.email || "-");
+      bY += 12;
+      drawRow(startX + 10, bY, "Address:", data.address || data.full_address || "-");
 
-    if (data.associate_name) {
-      custLines.push(["Associate / Sponsor", `${data.associate_name} (${data.associate_mobile || "-"})`]);
-    }
+      // Property & Seller box
+      const pX = startX + 10 + subColW + 6;
+      doc.roundedRect(pX, gridY, subColW, 72, 3).fillAndStroke("#ffffff", "#e2e8f0");
+      doc.rect(pX, gridY, subColW, 14).fill("#f1f5f9");
+      doc.fillColor("#0f172a").fontSize(7).font("Helvetica-Bold").text("PROPERTY & SELLER DETAILS", pX + 4, gridY + 3);
 
-    for (const [lbl, val] of custLines) {
-      doc.fontSize(9).fillColor("#64748b").text(lbl, 40, y, { width: 130 });
-      doc.fontSize(9).fillColor("#0f172a").text(String(val), 170, y, { width: 380 });
-      y += 14;
-    }
+      let pY = gridY + 18;
+      drawRow(pX, pY, "Site / Project:", data.site_name || "-", true);
+      pY += 12;
+      drawRow(pX, pY, "Plot No:", `#${data.plot_number || '-'} (Block: ${data.block || 'Main'})`, true);
+      pY += 12;
+      drawRow(pX, pY, "Size / Area:", data.plot_size || `${data.plot_area || 0} Gaj`);
+      pY += 12;
+      drawRow(pX, pY, "Seller Company:", settings.company_name || "MMR Constructions");
 
-    y += 10;
-    doc.lineWidth(0.5).strokeColor("#e2e8f0").moveTo(40, y).lineTo(555, y).stroke();
+      // 5. Financial Summary Table
+      const tableY = gridY + 78;
+      doc.rect(startX + 10, tableY, colWidth - 20, 14).fill("#f8fafc");
+      doc.fontSize(7).font("Helvetica-Bold").fillColor("#475569").text("Description", startX + 14, tableY + 3);
+      doc.text("Amount (INR)", startX + colWidth - 85, tableY + 3, { width: 65, align: "right" });
 
-    // Section 2: Property & Plot Details
-    y += 12;
-    doc.fillColor("#14532d").fontSize(12).text("PLOT & PROPERTY DETAILS", 40, y);
-    y += 18;
-    const plotLines = [
-      ["Project / Site Name", data.site_name || "-"],
-      ["Plot Number", data.plot_number || "-"],
-      ["Plot Size / Area", data.plot_size || `${data.plot_area_sqft || 0} Sq.Ft.`],
-      ["Rate Per Sq.Ft.", `INR ${(data.rate_per_sqft || 0).toLocaleString("en-IN")}`],
-      ["Total Plot Price", `INR ${Number(data.total_plot_price || invoice.grand_total || 0).toLocaleString("en-IN")}`],
-    ];
+      let tY = tableY + 16;
+      const finRows = [
+        ["Agreed Plot Price", `INR ${Number(data.total_plot_price || invoice.subtotal || 0).toLocaleString("en-IN")}`],
+        ["Grand Total Plot Value", `INR ${Number(invoice.grand_total || data.total_plot_price || 0).toLocaleString("en-IN")}`, true],
+        ["Amount Paid (Advance / Received)", `INR ${Number(data.paid_amount || invoice.paid_amount || 0).toLocaleString("en-IN")}`, true, "#15803d"],
+        ["Remaining Balance Amount", Number(invoice.balance_amount || 0) === 0 ? "INR 0 (Paid in Full)" : `INR ${Number(invoice.balance_amount || 0).toLocaleString("en-IN")}`, true, Number(invoice.balance_amount || 0) === 0 ? "#15803d" : "#dc2626"]
+      ];
 
-    for (const [lbl, val] of plotLines) {
-      doc.fontSize(9).fillColor("#64748b").text(lbl, 40, y, { width: 130 });
-      doc.fontSize(9).fillColor("#0f172a").text(String(val), 170, y, { width: 380 });
-      y += 14;
-    }
-
-    y += 10;
-    doc.lineWidth(0.5).strokeColor("#e2e8f0").moveTo(40, y).lineTo(555, y).stroke();
-
-    // Section 3: Financial Summary Table
-    y += 12;
-    doc.fillColor("#14532d").fontSize(12).text("FINANCIAL SUMMARY & PAYMENT STATUS", 40, y);
-    y += 18;
-
-    const payType = String(data.payment_type || invoice.payment_method || '').toLowerCase();
-    const isOneTime = Boolean(data.is_one_time || payType.includes('full') || payType.includes('onetime') || payType.includes('one time'));
-    const isPartWise = Boolean(data.is_part_wise || payType.includes('part') || (!isOneTime && Number(invoice.balance_amount || 0) > 0 && !data.is_emi));
-    const isEmi = Boolean(data.is_emi || payType.includes('emi') || payType.includes('installment'));
-
-    const summaryItems = [
-      ["Subtotal Plot Cost", `INR ${Number(data.total_plot_price || invoice.subtotal || 0).toLocaleString("en-IN")}`],
-      ["Discount", `INR ${Number(data.discount || invoice.discount || 0).toLocaleString("en-IN")}`],
-      ["Registration / Statutory Charges", `INR ${Number(data.registration_charges || invoice.registration_charges || 0).toLocaleString("en-IN")}`],
-      ["Other / Development Charges", `INR ${Number(data.other_charges || invoice.other_charges || 0).toLocaleString("en-IN")}`],
-      ["Grand Total Payable", `INR ${Number(invoice.grand_total || 0).toLocaleString("en-IN")}`],
-      ["Amount Paid Till Date", `INR ${Number(isOneTime ? (invoice.grand_total || data.total_plot_price || invoice.paid_amount) : (invoice.paid_amount || 0)).toLocaleString("en-IN")}`],
-      ["Remaining Balance Amount", isOneTime ? "INR 0 (Paid in Full)" : `INR ${Number(invoice.balance_amount || 0).toLocaleString("en-IN")}`],
-      ["Payment Method", isOneTime ? "One Time / Full Payment" : (invoice.payment_method || "Online")],
-      ["Payment & Order Status", `${isOneTime ? "Paid in Full" : invoice.payment_status} / ${invoice.order_status}`],
-    ];
-
-    if (isPartWise && (data.part_wise_deadline_at || invoice.part_wise_deadline_at)) {
-      summaryItems.push(["Remaining Payment Due Date", new Date(data.part_wise_deadline_at || invoice.part_wise_deadline_at).toLocaleDateString("en-IN")]);
-    }
-    if (isEmi && (data.installment_no || data.tenure_months)) {
-      if (data.installment_no) {
-        summaryItems.push(["EMI Installment Number", `#${data.installment_no} of ${data.tenure_months || 60}`]);
-      } else {
-        summaryItems.push(["EMI Plan Tenure", `${data.tenure_months || 60} Months`]);
+      for (const [lbl, val, bold, color] of finRows) {
+        doc.lineWidth(0.5).strokeColor("#f1f5f9").moveTo(startX + 10, tY + 12).lineTo(startX + colWidth - 10, tY + 12).stroke();
+        doc.fontSize(6.8).font(bold ? "Helvetica-Bold" : "Helvetica").fillColor(color || (bold ? "#0f172a" : "#475569")).text(lbl, startX + 14, tY);
+        doc.text(val, startX + colWidth - 110, tY, { width: 90, align: "right" });
+        tY += 14;
       }
-    }
 
-    for (const [lbl, val] of summaryItems) {
-      const isBold = lbl.includes("Grand Total") || lbl.includes("Amount Paid") || lbl.includes("Balance") || lbl.includes("Due Date");
-      doc.fontSize(9).fillColor(isBold ? "#14532d" : "#64748b").text(lbl, 40, y, { width: 180 });
-      doc.fontSize(9).fillColor(isBold ? "#14532d" : "#0f172a").text(String(val), 220, y, { width: 330 });
-      y += 14;
-    }
+      // 6. Payment Mode & Status Bar
+      const payY = tY + 4;
+      doc.roundedRect(startX + 10, payY, colWidth - 20, 16, 3).fillAndStroke("#f1f5f9", "#e2e8f0");
+      doc.fontSize(6.8).font("Helvetica-Bold").fillColor("#64748b").text("Payment Mode: ", startX + 14, payY + 4, { continued: true });
+      doc.fillColor("#0f172a").text(`${data.payment_method || invoice.payment_method || 'Bank Transfer'}   |   Status: `, { continued: true });
+      doc.fillColor("#15803d").text(invoice.payment_status || "Paid in Full");
 
-    // Terms & Conditions Footer
-    y += 20;
-    doc.lineWidth(0.5).strokeColor("#cbd5e1").moveTo(40, y).lineTo(555, y).stroke();
-    y += 12;
+      // 7. Notice / Note Box
+      const noteY = payY + 22;
+      doc.roundedRect(startX + 10, noteY, colWidth - 20, 24, 3).fillAndStroke("#f0fdf4", "#86efac");
+      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#15803d").text("NOTE / महत्वपूर्ण निर्देश: Invoice ko sambhal kar rakhein. Payment dispute me saathi.", startX + 14, noteY + 4);
+      doc.font("Helvetica").fontSize(6).fillColor("#166534").text("This tax invoice is issued subject to MMR Construction plot booking terms & mutual agreement.", startX + 14, noteY + 13);
 
-    doc.fontSize(9).fillColor("#14532d").text("Terms & Conditions:", 40, y);
-    y += 12;
-    doc.fontSize(8).fillColor("#64748b").text(settings.terms_and_conditions || "This is a computer generated invoice.", 40, y, { width: 515 });
+      // 8. Dual Signatures & Stamps Footer
+      const footY = margin + colHeight - 55;
+      doc.lineWidth(0.5).strokeColor("#e2e8f0").moveTo(startX + 10, footY).lineTo(startX + colWidth - 10, footY).stroke();
 
-    // Authorization Signature Line
-    doc.fontSize(9).fillColor("#334155").text("Authorized Signatory", 400, 740, { align: "right" });
-    doc.fontSize(8).fillColor("#64748b").text(settings.company_name || "MMR Constructions & Developers", 400, 752, { align: "right" });
+      // Buyer Signature (Left)
+      const sigY = footY + 5;
+      doc.lineWidth(1).strokeColor("#94a3b8").dash(2, { space: 2 }).moveTo(startX + 14, sigY + 22).lineTo(startX + 120, sigY + 22).stroke().undash();
+      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#0f172a").text("Buyer's Signature / Thumb", startX + 14, sigY + 26);
+      doc.fontSize(5.5).font("Helvetica").fillColor("#64748b").text(`(हस्ताक्षर / अँगूठा - क्रेता: ${data.customer_name || 'Buyer'})`, startX + 14, sigY + 35, { width: 110 });
+
+      // Verified Badge (Center)
+      doc.rect(startX + 140, sigY + 8, 110, 28).fillAndStroke("#f8fafc", "#e2e8f0");
+      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#15803d").text("OFFICIALLY VERIFIED", startX + 140, sigY + 12, { width: 110, align: "center" });
+      doc.fontSize(5.5).font("Helvetica").fillColor("#64748b").text("Tax Invoice & Booking Record", startX + 140, sigY + 22, { width: 110, align: "center" });
+
+      // Seller Signature (Right)
+      const sellerSigX = startX + colWidth - 130;
+      doc.lineWidth(1).strokeColor("#94a3b8").dash(2, { space: 2 }).moveTo(sellerSigX, sigY + 22).lineTo(sellerSigX + 116, sigY + 22).stroke().undash();
+      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#0f172a").text("Seller's Signatory & Stamp", sellerSigX, sigY + 26, { width: 116, align: "right" });
+      doc.fontSize(5.5).font("Helvetica").fillColor("#64748b").text(`(अधिकृत हस्ताक्षर - ${settings.company_name || 'MMR'})`, sellerSigX, sigY + 35, { width: 116, align: "right" });
+    };
+
+    // Render Part 1: Buyer Copy (Left)
+    renderCopy(margin, "BUYER COPY / CUSTOMER COPY", "(क्रेता प्रति — Original for Buyer)", true);
+
+    // Render Center Cut Divider
+    const cutX = margin + colWidth + 11;
+    doc.lineWidth(1).strokeColor("#94a3b8").dash(4, { space: 3 }).moveTo(cutX, margin).lineTo(cutX, margin + colHeight).stroke().undash();
+    // Center cut text
+    doc.save();
+    doc.rect(cutX - 6, margin + (colHeight / 2) - 30, 12, 60).fill("#ffffff");
+    doc.fontSize(7).font("Helvetica-Bold").fillColor("#64748b").text("✂ CUT HERE", cutX - 25, margin + (colHeight / 2) - 4, { width: 50, align: "center" });
+    doc.restore();
+
+    // Render Part 2: Seller Copy (Right)
+    const rightStartX = margin + colWidth + 22;
+    renderCopy(rightStartX, "SELLER COPY / COMPANY COPY", "(विक्रेता प्रति — Original for Seller)", false);
 
     doc.end();
   } catch (error) {

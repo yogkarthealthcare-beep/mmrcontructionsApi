@@ -11,7 +11,7 @@
 
 import express from 'express';
 import sql from '../db.js';
-import { verifyAdminToken, role } from '../middleware/auth.middleware.js';
+import { verifyAdminToken, verifyUserToken, role, resolveEffectivePanel } from '../middleware/auth.middleware.js';
 import commissionService from '../services/commissionService.js';
 import { setPlotStatus } from '../services/plotStatus.service.js';
 
@@ -181,10 +181,103 @@ async function createOrGetInvoice(bookingId) {
 
 
 /**
- * 1. GET /api/admin/plot-orders
- * List plot booking orders with rich search, pagination, and summary KPIs.
+ * Resolve role-based scoping filter for user/portal callers.
+ * Enforces strict isolation:
+ * - Team Member: ONLY self-purchases and direct customer sales booked by/for this TM.
+ * - Associate: Personal purchases, direct customer bookings, and bookings from their downline team members.
+ * - Customer: Only plots purchased by customer.
+ * - Admin: Unrestricted (TRUE).
  */
-router.get('/admin/plot-orders', verifyAdminToken, async (req, res) => {
+async function resolvePlotOrderScope(req) {
+  const userId = Number(req.user?.user_id || req.user?.id);
+  if (!userId) {
+    return { error: 'Unauthorized: User identity missing', status: 401 };
+  }
+
+  const [caller] = await sql`
+    SELECT user_id, user_type, member_id, sponsor_id, referred_by_user_id, account_status
+    FROM users
+    WHERE user_id = ${userId}
+    LIMIT 1
+  `;
+
+  if (!caller) {
+    return { error: 'User account not found', status: 404 };
+  }
+
+  const effectivePanel = resolveEffectivePanel(req.user);
+  const isTm = effectivePanel === 'team-member' ||
+               caller.user_type === 'Team Member' ||
+               String(caller.member_id || '').toUpperCase().startsWith('MMR-TM-');
+
+  const isAssoc = !isTm && (
+    effectivePanel === 'associate' ||
+    caller.user_type === 'Associate' ||
+    Boolean(req.user?.is_associate)
+  );
+
+  const isAdmin = Boolean(req.user?.is_admin || req.user?.admin_id || ['SuperAdmin', 'Admin', 'FinanceManager'].includes(caller.user_type));
+
+  if (isAdmin) {
+    return { role: 'admin', scopeFilter: sql`TRUE`, caller };
+  }
+
+  if (isTm) {
+    // Team Member strict isolation:
+    // Can ONLY see orders booked by themselves (self or customer):
+    const scopeFilter = sql`(
+      b.user_id = ${userId}
+      OR b.sold_by_user_id = ${userId}
+      OR b.booked_by_user_id = ${userId}
+    )`;
+    return { role: 'team-member', scopeFilter, caller };
+  }
+
+  if (isAssoc) {
+    // Associate strict isolation:
+    // Personal purchases, direct customer sales, upline bookings,
+    // and bookings made by/for downline team members under this associate.
+    const scopeFilter = sql`(
+      b.user_id = ${userId}
+      OR b.sold_by_user_id = ${userId}
+      OR b.booked_by_user_id = ${userId}
+      OR b.associate_user_id = ${userId}
+      OR b.sold_by_user_id IN (
+        SELECT tm.user_id FROM team_members tm 
+        WHERE tm.associate_id = ${userId} AND tm.user_id IS NOT NULL
+      )
+      OR b.sold_by_user_id IN (
+        SELECT u2.user_id FROM users u2 
+        WHERE (u2.sponsor_id = ${userId} OR u2.referred_by_user_id = ${userId})
+          AND u2.user_id IS NOT NULL
+      )
+      OR b.booked_by_user_id IN (
+        SELECT tm2.user_id FROM team_members tm2 
+        WHERE tm2.associate_id = ${userId} AND tm2.user_id IS NOT NULL
+      )
+      OR b.booked_by_user_id IN (
+        SELECT u3.user_id FROM users u3 
+        WHERE (u3.sponsor_id = ${userId} OR u3.referred_by_user_id = ${userId})
+          AND u3.user_id IS NOT NULL
+      )
+      OR b.user_id IN (
+        SELECT u4.user_id FROM users u4 
+        WHERE (u4.sponsor_id = ${userId} OR u4.referred_by_user_id = ${userId})
+          AND u4.user_id IS NOT NULL
+      )
+    )`;
+    return { role: 'associate', scopeFilter, caller };
+  }
+
+  // Fallback for regular customer
+  const scopeFilter = sql`b.user_id = ${userId}`;
+  return { role: 'customer', scopeFilter, caller };
+}
+
+/**
+ * Shared query executor for Plot Orders list & KPI metrics.
+ */
+async function executePlotOrdersQuery(req, res, scopeFilter = sql`TRUE`, extraMeta = {}) {
   try {
     const {
       search = '',
@@ -239,7 +332,7 @@ router.get('/admin/plot-orders', verifyAdminToken, async (req, res) => {
     const fromDateFilter = from_date ? sql`b.created_at >= ${from_date}::timestamptz` : sql`TRUE`;
     const toDateFilter = to_date ? sql`b.created_at <= (${to_date}::date + INTERVAL '1 day')::timestamptz` : sql`TRUE`;
 
-    // Calculate aggregated metrics
+    // Calculate aggregated metrics respecting the scopeFilter
     const [metrics] = await sql`
       SELECT
         COUNT(*)::int AS total_orders,
@@ -256,7 +349,8 @@ router.get('/admin/plot-orders', verifyAdminToken, async (req, res) => {
       LEFT JOIN users buyer ON buyer.user_id = b.user_id
       LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
       LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
-      WHERE ${searchFilter}
+      WHERE ${scopeFilter}
+        AND ${searchFilter}
         AND ${statusFilter}
         AND ${bookingTypeFilter}
         AND ${siteFilter}
@@ -348,7 +442,8 @@ router.get('/admin/plot-orders', verifyAdminToken, async (req, res) => {
         ORDER BY invoice_id DESC
         LIMIT 1
       ) inv ON TRUE
-      WHERE ${searchFilter}
+      WHERE ${scopeFilter}
+        AND ${searchFilter}
         AND ${statusFilter}
         AND ${bookingTypeFilter}
         AND ${siteFilter}
@@ -379,23 +474,20 @@ router.get('/admin/plot-orders', verifyAdminToken, async (req, res) => {
         page: pageNum,
         limit: limitNum,
         pages: totalPages
-      }
+      },
+      ...extraMeta
     }, 'Plot orders fetched successfully');
   } catch (e) {
-    console.error('[AdminPlotOrders] Error fetching orders:', e);
+    console.error('[PlotOrders] Error fetching orders:', e);
     return err(res, e.message || 'Failed to fetch plot orders', 500);
   }
-});
+}
 
 /**
- * 2. GET /api/admin/plot-orders/:id
- * Get full detailed specs for a single plot booking order.
+ * Shared query executor for a single Plot Order's detail & payment log.
  */
-router.get('/admin/plot-orders/:id', verifyAdminToken, async (req, res) => {
+async function executePlotOrderDetailQuery(req, res, bookingId, scopeFilter = sql`TRUE`) {
   try {
-    const bookingId = Number(req.params.id);
-    if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
-
     const [order] = await sql`
       SELECT
         b.*,
@@ -471,10 +563,11 @@ router.get('/admin/plot-orders/:id', verifyAdminToken, async (req, res) => {
         LIMIT 1
       ) inv ON TRUE
       WHERE b.booking_id = ${bookingId}
+        AND ${scopeFilter}
     `;
 
     if (!order) {
-      return err(res, 'Booking order not found', 404);
+      return err(res, 'Booking order not found or access unauthorized', 404);
     }
 
     // Fetch related payment transactions or receipts if any
@@ -494,8 +587,73 @@ router.get('/admin/plot-orders/:id', verifyAdminToken, async (req, res) => {
 
     return ok(res, { order, payments }, 'Booking order details retrieved successfully');
   } catch (e) {
-    console.error('[AdminPlotOrders] Error fetching order detail:', e);
+    console.error('[PlotOrders] Error fetching order detail:', e);
     return err(res, e.message || 'Failed to fetch booking order details', 500);
+  }
+}
+
+/**
+ * 1. GET /api/admin/plot-orders
+ * List plot booking orders with rich search, pagination, and summary KPIs (Admin Master View).
+ */
+router.get('/admin/plot-orders', verifyAdminToken, async (req, res) => {
+  return executePlotOrdersQuery(req, res, sql`TRUE`, { audience: 'admin' });
+});
+
+/**
+ * 2. GET /api/admin/plot-orders/:id
+ * Get full detailed specs for a single plot booking order (Admin Master View).
+ */
+router.get('/admin/plot-orders/:id', verifyAdminToken, async (req, res) => {
+  const bookingId = Number(req.params.id);
+  if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
+  return executePlotOrderDetailQuery(req, res, bookingId, sql`TRUE`);
+});
+
+/**
+ * User / Portal Plot Orders Endpoints (Team Member, Associate, Customer)
+ * 3. GET /api/user/plot-orders
+ */
+router.get('/user/plot-orders', verifyUserToken, async (req, res) => {
+  const scope = await resolvePlotOrderScope(req);
+  if (scope.error) return err(res, scope.error, scope.status);
+  return executePlotOrdersQuery(req, res, scope.scopeFilter, { user_role: scope.role });
+});
+
+/**
+ * 4. GET /api/user/plot-orders/:id
+ */
+router.get('/user/plot-orders/:id', verifyUserToken, async (req, res) => {
+  const bookingId = Number(req.params.id);
+  if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
+  const scope = await resolvePlotOrderScope(req);
+  if (scope.error) return err(res, scope.error, scope.status);
+  return executePlotOrderDetailQuery(req, res, bookingId, scope.scopeFilter);
+});
+
+/**
+ * 5. POST /api/user/plot-orders/:id/generate-invoice
+ */
+router.post('/user/plot-orders/:id/generate-invoice', verifyUserToken, async (req, res) => {
+  try {
+    const bookingId = Number(req.params.id);
+    if (!bookingId || bookingId <= 0) return err(res, 'Invalid booking ID', 400);
+    const scope = await resolvePlotOrderScope(req);
+    if (scope.error) return err(res, scope.error, scope.status);
+
+    // Verify booking is within caller's scope
+    const [allowed] = await sql`
+      SELECT booking_id FROM bookings b WHERE b.booking_id = ${bookingId} AND ${scope.scopeFilter} LIMIT 1
+    `;
+    if (!allowed) {
+      return err(res, 'Booking order not found or access unauthorized', 404);
+    }
+
+    const invoice = await createOrGetInvoice(bookingId);
+    return ok(res, { invoice }, 'Invoice generated successfully');
+  } catch (e) {
+    console.error('[UserPlotOrders] Error generating invoice:', e);
+    return err(res, e.message || 'Failed to generate invoice', 500);
   }
 });
 
