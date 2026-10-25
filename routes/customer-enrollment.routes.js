@@ -5,7 +5,21 @@ let dbClient = defaultSql;
 export function setDatabaseClient(client) {
   dbClient = client;
 }
-const sql = (...args) => dbClient(...args);
+const sql = new Proxy(function (...args) {
+  return dbClient(...args);
+}, {
+  get(target, prop, receiver) {
+    if (prop in target) return target[prop];
+    const val = dbClient[prop];
+    if (typeof val === "function") {
+      return val.bind(dbClient);
+    }
+    return val;
+  },
+  apply(target, thisArg, args) {
+    return dbClient(...args);
+  }
+});
 import { saveFileToVPS } from "../services/fileStorage.service.js";
 import jwt from "jsonwebtoken";
 import { generateCustomerPdf } from "../services/customerPdfService.js";
