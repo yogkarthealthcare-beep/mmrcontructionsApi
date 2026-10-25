@@ -1,12 +1,119 @@
 import express from "express";
 import sql from "../db.js";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 import { userAuth, adminAuth, optionalAuth } from "../middleware/auth.middleware.js";
 import PDFDocument from "pdfkit";
 import QRCode from "qrcode";
 import bwipjs from "bwip-js";
 
 const router = express.Router();
+
+const INVOICE_SIGN_SECRET = process.env.JWT_SECRET || process.env.INVOICE_SECRET || "mmr_secure_invoice_sign_key_2026_q89a";
+
+// ── Cryptographically secure HMAC-SHA256 Token for Invoice QR Code ────
+export function generateInvoiceToken(invoiceNumber, idOrBooking, totalAmount) {
+  const normNumber = String(invoiceNumber || "").trim().toUpperCase();
+  const normId = String(idOrBooking || "").trim();
+  const normAmt = Number(totalAmount || 0).toFixed(2);
+  const payload = `${normNumber}:${normId}:${normAmt}`;
+  return crypto.createHmac("sha256", INVOICE_SIGN_SECRET).update(payload).digest("hex");
+}
+
+export function verifyInvoiceToken(invoiceNumber, idOrBooking, totalAmount, candidateToken) {
+  if (!candidateToken || typeof candidateToken !== "string") return false;
+  const expected = generateInvoiceToken(invoiceNumber, idOrBooking, totalAmount);
+  try {
+    const a = Buffer.from(candidateToken.trim(), "hex");
+    const b = Buffer.from(expected, "hex");
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch (_) {
+    return false;
+  }
+}
+
+// ── Resolve Official Company Settings with Fallbacks & Auto-Sync ─────
+export async function getEffectiveInvoiceSettings() {
+  const defaults = {
+    id: 1,
+    company_name: "MMR Construction & Developers",
+    cin: "U68200UP2025PTC229203",
+    gst_number: "09AATCM6753A1Z5",
+    address: "Tribhuvan Kheda, Sheshpur, Unnao, Uttar Pradesh, India, 209801",
+    phone: "+91 95111 19879",
+    email: "official@mmrconstructions.in",
+    website: "www.mmrconstructions.in"
+  };
+
+  try {
+    // Ensure column cin exists
+    await sql`ALTER TABLE invoice_settings ADD COLUMN IF NOT EXISTS cin VARCHAR(100) DEFAULT 'U68200UP2025PTC229203'`.catch(() => {});
+    const [row] = await sql`SELECT * FROM invoice_settings WHERE id = 1`;
+
+    if (!row) {
+      await sql`
+        INSERT INTO invoice_settings (id, company_name, cin, gst_number, address, phone, email, website)
+        VALUES (1, ${defaults.company_name}, ${defaults.cin}, ${defaults.gst_number}, ${defaults.address}, ${defaults.phone}, ${defaults.email}, ${defaults.website})
+        ON CONFLICT (id) DO UPDATE SET
+          company_name = EXCLUDED.company_name,
+          cin = EXCLUDED.cin,
+          gst_number = EXCLUDED.gst_number,
+          address = EXCLUDED.address,
+          phone = EXCLUDED.phone,
+          email = EXCLUDED.email
+      `.catch(() => {});
+      return defaults;
+    }
+
+    // Auto-migrate outdated mock records to official company credentials
+    if (
+      row.gst_number === "09AAAAA0000A1Z5" ||
+      !row.cin ||
+      row.phone?.includes("98765") ||
+      row.address?.includes("Main Road, Lucknow") ||
+      row.email?.includes("info@mmrconstructions.com")
+    ) {
+      await sql`
+        UPDATE invoice_settings SET
+          company_name = 'MMR Construction & Developers',
+          cin = 'U68200UP2025PTC229203',
+          gst_number = '09AATCM6753A1Z5',
+          address = 'Tribhuvan Kheda, Sheshpur, Unnao, Uttar Pradesh, India, 209801',
+          phone = '+91 95111 19879',
+          email = 'official@mmrconstructions.in',
+          updated_at = NOW()
+        WHERE id = 1
+      `.catch(() => {});
+    }
+
+    return {
+      ...defaults,
+      ...row,
+      company_name: row.company_name || defaults.company_name,
+      cin: row.cin || defaults.cin,
+      gst_number: (row.gst_number && row.gst_number !== "09AAAAA0000A1Z5") ? row.gst_number : defaults.gst_number,
+      address: (row.address && !row.address.includes("Main Road, Lucknow")) ? row.address : defaults.address,
+      phone: (row.phone && !row.phone.includes("98765")) ? row.phone : defaults.phone,
+      email: (row.email && !row.email.includes("info@mmrconstructions.com")) ? row.email : defaults.email,
+    };
+  } catch (err) {
+    return defaults;
+  }
+}
+
+// ── Public Base URL resolution for QR Codes ─────────────────────────
+export function resolvePublicBaseUrl(req) {
+  if (process.env.PUBLIC_API_URL) {
+    return process.env.PUBLIC_API_URL.replace(/\/$/, "");
+  }
+  const reqHost = req?.get ? req.get("host") : (req?.headers?.host || "");
+  if (reqHost && !reqHost.includes("localhost") && !reqHost.includes("127.0.0.1")) {
+    const proto = req?.protocol === "http" && reqHost.includes(":") ? "http" : "https";
+    return `${proto}://${reqHost}`.replace(/\/$/, "");
+  }
+  return "https://api.mmrconstructions.in";
+}
 
 function ok(res, data = null, message = "Success", extra = {}) {
   return res.json({ success: true, message, data, ...extra });
@@ -581,14 +688,18 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
       }
     }
 
-    // Fetch Invoice Settings
-    const [settings] = await sql`SELECT * FROM invoice_settings WHERE id = 1`;
+    // Fetch Invoice Settings with official credentials & fallbacks
+    const settings = await getEffectiveInvoiceSettings();
 
-    // Generate QR Code Data URL
-    const host = req.headers.host || "localhost:4200";
-    const protocol = req.protocol || "http";
-    const verifyUrl = `${protocol}://${host}/verify-invoice?number=${invoice.invoice_number}`;
-    const qrDataUrl = await QRCode.toDataURL(verifyUrl, { margin: 1, width: 200 });
+    // Generate secure QR Code & Download URL for this current invoice
+    const publicBase = resolvePublicBaseUrl(req);
+    const downloadToken = generateInvoiceToken(
+      invoice.invoice_number,
+      invoice.invoice_id || invoice.booking_id,
+      invoice.grand_total
+    );
+    const downloadPdfUrl = `${publicBase}/api/public/invoice/download/${encodeURIComponent(invoice.invoice_number)}?token=${downloadToken}`;
+    const qrDataUrl = await QRCode.toDataURL(downloadPdfUrl, { margin: 1, width: 220, errorCorrectionLevel: 'M' });
 
     // Generate Barcode Data URL
     let barcodeDataUrl = "";
@@ -608,8 +719,8 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
 
     // Audit Log Entry
     try {
-      const actorId = req.user.user_id || req.user.admin_id || req.user.id || 0;
-      const actorRole = req.user.role || (req.user.admin_id ? 'Admin' : 'USER');
+      const actorId = req.user?.user_id || req.user?.admin_id || req.user?.id || 0;
+      const actorRole = req.user?.role || (req.user?.admin_id ? 'Admin' : 'USER');
       if (invoice.invoice_id) {
         await sql`
           INSERT INTO invoice_audit_log (log_id, invoice_id, invoice_number, action, performed_by_id, performed_by_role, ip_address)
@@ -628,7 +739,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
       settings: settings || {},
       qr_code: qrDataUrl,
       barcode: barcodeDataUrl,
-      verify_url: verifyUrl,
+      verify_url: downloadPdfUrl,
     });
   } catch (error) {
     console.error("GET /api/invoice/:invoiceNumber error:", error);
@@ -636,8 +747,188 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
   }
 });
 
+// ── Core PDF Streaming Engine with Landscape 2-Copy Layout & Embedded QR ──
+async function renderInvoicePdfStream({ invoice, settings, downloadUrl, res }) {
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="${invoice.invoice_number}.pdf"`);
+
+  let qrPngBuffer = null;
+  if (downloadUrl) {
+    try {
+      qrPngBuffer = await QRCode.toBuffer(downloadUrl, {
+        margin: 1,
+        width: 140,
+        errorCorrectionLevel: "M",
+      });
+    } catch (qrErr) {
+      console.warn("Failed to generate QR buffer for PDF:", qrErr);
+    }
+  }
+
+  const doc = new PDFDocument({ margin: 15, size: "A4", layout: "landscape" });
+  doc.pipe(res);
+
+  const margin = 15;
+  const colWidth = 390;
+  const colHeight = 565;
+  const data = invoice.invoice_data || {};
+
+  const renderCopy = (startX, copyTitleEn, copyTitleHi, isBuyer) => {
+    // 1. Outer Box
+    const topBarColor = isBuyer ? "#15803d" : "#0284c7";
+    doc.roundedRect(startX, margin, colWidth, colHeight, 5).lineWidth(1).strokeColor("#cbd5e1").stroke();
+    doc.rect(startX + 1, margin, colWidth - 2, 4).fill(topBarColor);
+
+    // 2. Company Brand & Header
+    doc.fillColor("#0f172a").fontSize(10.5).font("Helvetica-Bold").text(settings.company_name || "MMR Construction & Developers", startX + 10, margin + 9);
+    doc.fontSize(6.5).font("Helvetica").fillColor("#64748b").text(settings.address || "Tribhuvan Kheda, Sheshpur, Unnao, Uttar Pradesh, India, 209801", startX + 10, margin + 22, { width: colWidth - 145 });
+    doc.text(
+      `CIN: ${settings.cin || "U68200UP2025PTC229203"}  |  GSTIN: ${settings.gst_number || "09AATCM6753A1Z5"}  |  Ph: ${settings.phone || "+91 95111 19879"}  |  Email: ${settings.email || "official@mmrconstructions.in"}`,
+      startX + 10,
+      margin + 31,
+      { width: colWidth - 20 }
+    );
+
+    // Copy Tag Pill
+    const pillW = 125;
+    const pillH = 20;
+    const pillX = startX + colWidth - pillW - 10;
+    const pillY = margin + 8;
+    doc.roundedRect(pillX, pillY, pillW, pillH, 3).lineWidth(1).strokeColor(topBarColor).fillAndStroke(isBuyer ? "#ecfdf5" : "#f0f9ff", topBarColor);
+    doc.fillColor(topBarColor).fontSize(6).font("Helvetica-Bold").text(copyTitleEn, pillX, pillY + 3, { width: pillW, align: "center" });
+    doc.fontSize(5.5).font("Helvetica").text(copyTitleHi, pillX, pillY + 11, { width: pillW, align: "center" });
+
+    // 3. Meta Strip
+    const metaY = margin + 44;
+    doc.rect(startX + 10, metaY, colWidth - 20, 16).fillAndStroke("#f8fafc", "#e2e8f0");
+    doc.fontSize(7).font("Helvetica-Bold").fillColor("#64748b").text("INVOICE NO: ", startX + 14, metaY + 4, { continued: true });
+    doc.fillColor("#15803d").text(invoice.invoice_number, { continued: true });
+    doc.fillColor("#64748b").text("     DATE: ", { continued: true });
+    doc.fillColor("#0f172a").text(new Date(invoice.invoice_date).toLocaleDateString("en-IN"), { continued: true });
+    doc.fillColor("#64748b").text("     ORDER ID: ", { continued: true });
+    doc.fillColor("#0f172a").text(invoice.order_id || `BK-${invoice.booking_id}`);
+
+    // 4. Details 2-Column Grid (Buyer Info & Property Info)
+    const gridY = metaY + 22;
+    const subColW = (colWidth - 26) / 2;
+
+    // Buyer box
+    doc.roundedRect(startX + 10, gridY, subColW, 72, 3).fillAndStroke("#ffffff", "#e2e8f0");
+    doc.rect(startX + 10, gridY, subColW, 14).fill("#f1f5f9");
+    doc.fillColor("#0f172a").fontSize(7).font("Helvetica-Bold").text("BUYER / CUSTOMER DETAILS", startX + 14, gridY + 3);
+
+    let bY = gridY + 18;
+    const drawRow = (x, y, k, v, isBold = false) => {
+      doc.fontSize(6.5).font("Helvetica").fillColor("#64748b").text(k, x + 4, y, { width: 55 });
+      doc.font(isBold ? "Helvetica-Bold" : "Helvetica").fillColor(isBold ? "#0f172a" : "#334155").text(String(v || "-"), x + 60, y, { width: subColW - 65, height: 10, ellipsis: true });
+    };
+    drawRow(startX + 10, bY, "Buyer Name:", data.customer_name || "-", true);
+    bY += 12;
+    drawRow(startX + 10, bY, "Mobile No:", data.mobile_no || "-");
+    bY += 12;
+    drawRow(startX + 10, bY, "Email:", data.email || "-");
+    bY += 12;
+    drawRow(startX + 10, bY, "Address:", data.address || data.full_address || "-");
+
+    // Property & Seller box
+    const pX = startX + 10 + subColW + 6;
+    doc.roundedRect(pX, gridY, subColW, 72, 3).fillAndStroke("#ffffff", "#e2e8f0");
+    doc.rect(pX, gridY, subColW, 14).fill("#f1f5f9");
+    doc.fillColor("#0f172a").fontSize(7).font("Helvetica-Bold").text("PROPERTY & SELLER DETAILS", pX + 4, gridY + 3);
+
+    let pY = gridY + 18;
+    drawRow(pX, pY, "Site / Project:", data.site_name || "-", true);
+    pY += 12;
+    drawRow(pX, pY, "Plot No:", `#${data.plot_number || '-'} (Block: ${data.block || 'Main'})`, true);
+    pY += 12;
+    drawRow(pX, pY, "Size / Area:", data.plot_size || `${data.plot_area || 0} Gaj`);
+    pY += 12;
+    drawRow(pX, pY, "Seller Company:", settings.company_name || "MMR Construction");
+
+    // 5. Financial Summary Table
+    const tableY = gridY + 78;
+    doc.rect(startX + 10, tableY, colWidth - 20, 14).fill("#f8fafc");
+    doc.fontSize(7).font("Helvetica-Bold").fillColor("#475569").text("Description", startX + 14, tableY + 3);
+    doc.text("Amount (INR)", startX + colWidth - 85, tableY + 3, { width: 65, align: "right" });
+
+    let tY = tableY + 16;
+    const finRows = [
+      ["Agreed Plot Price", `INR ${Number(data.total_plot_price || invoice.subtotal || 0).toLocaleString("en-IN")}`],
+      ["Grand Total Plot Value", `INR ${Number(invoice.grand_total || data.total_plot_price || 0).toLocaleString("en-IN")}`, true],
+      ["Amount Paid (Advance / Received)", `INR ${Number(data.paid_amount || invoice.paid_amount || 0).toLocaleString("en-IN")}`, true, "#15803d"],
+      ["Remaining Balance Amount", Number(invoice.balance_amount || 0) === 0 ? "INR 0 (Paid in Full)" : `INR ${Number(invoice.balance_amount || 0).toLocaleString("en-IN")}`, true, Number(invoice.balance_amount || 0) === 0 ? "#15803d" : "#dc2626"]
+    ];
+
+    for (const [lbl, val, bold, color] of finRows) {
+      doc.lineWidth(0.5).strokeColor("#f1f5f9").moveTo(startX + 10, tY + 12).lineTo(startX + colWidth - 10, tY + 12).stroke();
+      doc.fontSize(6.8).font(bold ? "Helvetica-Bold" : "Helvetica").fillColor(color || (bold ? "#0f172a" : "#475569")).text(lbl, startX + 14, tY);
+      doc.text(val, startX + colWidth - 110, tY, { width: 90, align: "right" });
+      tY += 14;
+    }
+
+    // 6. Payment Mode & Status Bar
+    const payY = tY + 4;
+    doc.roundedRect(startX + 10, payY, colWidth - 20, 16, 3).fillAndStroke("#f1f5f9", "#e2e8f0");
+    doc.fontSize(6.8).font("Helvetica-Bold").fillColor("#64748b").text("Payment Mode: ", startX + 14, payY + 4, { continued: true });
+    doc.fillColor("#0f172a").text(`${data.payment_method || invoice.payment_method || 'Bank Transfer'}   |   Status: `, { continued: true });
+    doc.fillColor("#15803d").text(invoice.payment_status || "Paid in Full");
+
+    // 7. Notice / Note Box
+    const noteY = payY + 22;
+    doc.roundedRect(startX + 10, noteY, colWidth - 20, 24, 3).fillAndStroke("#f0fdf4", "#86efac");
+    doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#15803d").text("NOTE / महत्वपूर्ण निर्देश: Invoice ko sambhal kar rakhein. Payment dispute me saathi.", startX + 14, noteY + 4);
+    doc.font("Helvetica").fontSize(6).fillColor("#166534").text("This tax invoice is issued subject to MMR Construction plot booking terms & mutual agreement.", startX + 14, noteY + 13);
+
+    // 8. Dual Signatures & Stamps Footer + Embedded QR Code
+    const footY = margin + colHeight - 55;
+    doc.lineWidth(0.5).strokeColor("#e2e8f0").moveTo(startX + 10, footY).lineTo(startX + colWidth - 10, footY).stroke();
+
+    // Buyer Signature (Left)
+    const sigY = footY + 5;
+    doc.lineWidth(1).strokeColor("#94a3b8").dash(2, { space: 2 }).moveTo(startX + 14, sigY + 22).lineTo(startX + 115, sigY + 22).stroke().undash();
+    doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#0f172a").text("Buyer's Signature / Thumb", startX + 14, sigY + 26);
+    doc.fontSize(5.5).font("Helvetica").fillColor("#64748b").text(`(हस्ताक्षर / अँगूठा - क्रेता: ${data.customer_name || 'Buyer'})`, startX + 14, sigY + 35, { width: 105 });
+
+    // Center: Embedded Real QR Code & Verified Seal
+    if (qrPngBuffer) {
+      doc.image(qrPngBuffer, startX + 125, sigY + 2, { width: 36, height: 36 });
+      doc.rect(startX + 165, sigY + 2, 85, 36).fillAndStroke("#f8fafc", "#cbd5e1");
+      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#15803d").text("OFFICIALLY VERIFIED", startX + 165, sigY + 6, { width: 85, align: "center" });
+      doc.fontSize(5).font("Helvetica").fillColor("#475569").text("Scan QR to Download PDF", startX + 165, sigY + 16, { width: 85, align: "center" });
+      doc.fontSize(4.5).font("Helvetica").fillColor("#94a3b8").text("Tamper-Proof SHA-256", startX + 165, sigY + 25, { width: 85, align: "center" });
+    } else {
+      doc.rect(startX + 135, sigY + 5, 110, 30).fillAndStroke("#f8fafc", "#e2e8f0");
+      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#15803d").text("OFFICIALLY VERIFIED", startX + 135, sigY + 9, { width: 110, align: "center" });
+      doc.fontSize(5.5).font("Helvetica").fillColor("#64748b").text("Tax Invoice & Booking Record", startX + 135, sigY + 19, { width: 110, align: "center" });
+    }
+
+    // Seller Signature (Right)
+    const sellerSigX = startX + colWidth - 125;
+    doc.lineWidth(1).strokeColor("#94a3b8").dash(2, { space: 2 }).moveTo(sellerSigX, sigY + 22).lineTo(sellerSigX + 115, sigY + 22).stroke().undash();
+    doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#0f172a").text("Seller's Signatory & Stamp", sellerSigX, sigY + 26, { width: 115, align: "right" });
+    doc.fontSize(5.5).font("Helvetica").fillColor("#64748b").text(`(अधिकृत हस्ताक्षर - ${settings.company_name || 'MMR'})`, sellerSigX, sigY + 35, { width: 115, align: "right" });
+  };
+
+  // Render Part 1: Buyer Copy (Left)
+  renderCopy(margin, "BUYER COPY / CUSTOMER COPY", "(क्रेता प्रति — Original for Buyer)", true);
+
+  // Render Center Cut Divider
+  const cutX = margin + colWidth + 11;
+  doc.lineWidth(1).strokeColor("#94a3b8").dash(4, { space: 3 }).moveTo(cutX, margin).lineTo(cutX, margin + colHeight).stroke().undash();
+  doc.save();
+  doc.rect(cutX - 6, margin + (colHeight / 2) - 30, 12, 60).fill("#ffffff");
+  doc.fontSize(7).font("Helvetica-Bold").fillColor("#64748b").text("✂ CUT HERE", cutX - 25, margin + (colHeight / 2) - 4, { width: 50, align: "center" });
+  doc.restore();
+
+  // Render Part 2: Seller Copy (Right)
+  const rightStartX = margin + colWidth + 22;
+  renderCopy(rightStartX, "SELLER COPY / COMPANY COPY", "(विक्रेता प्रति — Original for Seller)", false);
+
+  doc.end();
+}
+
 // ----------------------------------------------------
-// 3. GET /api/invoice/:invoiceNumber/pdf (Download PDF)
+// 3. GET /api/invoice/:invoiceNumber/pdf (Download PDF for User/Admin)
 // ----------------------------------------------------
 router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
   try {
@@ -732,9 +1023,14 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
     const hasAccess = await canAccessInvoice(req.user, invoice);
     if (!hasAccess) return fail(res, "Unauthorized to access this invoice.", 403);
 
-    const [config] = await sql`SELECT * FROM invoice_settings WHERE id = 1`;
-    const settings = config || {};
-    const data = invoice.invoice_data || {};
+    const settings = await getEffectiveInvoiceSettings();
+    const publicBase = resolvePublicBaseUrl(req);
+    const token = generateInvoiceToken(
+      invoice.invoice_number,
+      invoice.invoice_id || invoice.booking_id,
+      invoice.grand_total
+    );
+    const downloadUrl = `${publicBase}/api/public/invoice/download/${encodeURIComponent(invoice.invoice_number)}?token=${token}`;
 
     // Audit Log Entry
     try {
@@ -747,165 +1043,145 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
           ${invoice.invoice_id || 0}, ${invoice.invoice_number || ''}, 'DOWNLOADED', ${actorId}, ${actorRole}, ${req.ip || ''}
         )
         ON CONFLICT DO NOTHING`;
-    } catch (auditErr) {
-      console.warn("Invoice download audit log non-critical warning:", auditErr.message);
-    }
+    } catch (_) {}
 
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${invoice.invoice_number}.pdf"`);
-
-    const doc = new PDFDocument({ margin: 15, size: "A4", layout: "landscape" });
-    doc.pipe(res);
-
-    // Page dimensions for A4 Landscape
-    const margin = 15;
-    const colWidth = 390;
-    const colHeight = 565;
-
-    // Helper to render one copy (Buyer or Seller)
-    const renderCopy = (startX, copyTitleEn, copyTitleHi, isBuyer) => {
-      // 1. Outer Box
-      const topBarColor = isBuyer ? "#15803d" : "#0284c7";
-      doc.roundedRect(startX, margin, colWidth, colHeight, 5).lineWidth(1).strokeColor("#cbd5e1").stroke();
-      doc.rect(startX + 1, margin, colWidth - 2, 4).fill(topBarColor);
-
-      // 2. Company Brand & Header
-      doc.fillColor("#0f172a").fontSize(11).font("Helvetica-Bold").text(settings.company_name || "MMR Constructions & Developers", startX + 10, margin + 10);
-      doc.fontSize(7).font("Helvetica").fillColor("#64748b").text(settings.address || "Head Office: Main Road, Lucknow, Uttar Pradesh - 226001", startX + 10, margin + 23);
-      doc.text(`Ph: ${settings.phone || "+91 98765 43210"}  |  Email: ${settings.email || "info@mmrconstructions.com"}  ${settings.gst_number ? "| GSTIN: " + settings.gst_number : ""}`, startX + 10, margin + 32);
-
-      // Copy Tag Pill
-      const pillW = 130;
-      const pillH = 22;
-      const pillX = startX + colWidth - pillW - 10;
-      const pillY = margin + 8;
-      doc.roundedRect(pillX, pillY, pillW, pillH, 3).lineWidth(1).strokeColor(topBarColor).fillAndStroke(isBuyer ? "#ecfdf5" : "#f0f9ff", topBarColor);
-      doc.fillColor(topBarColor).fontSize(6.5).font("Helvetica-Bold").text(copyTitleEn, pillX, pillY + 3, { width: pillW, align: "center" });
-      doc.fontSize(6).font("Helvetica").text(copyTitleHi, pillX, pillY + 12, { width: pillW, align: "center" });
-
-      // 3. Meta Strip
-      const metaY = margin + 45;
-      doc.rect(startX + 10, metaY, colWidth - 20, 16).fillAndStroke("#f8fafc", "#e2e8f0");
-      doc.fontSize(7).font("Helvetica-Bold").fillColor("#64748b").text("INVOICE NO: ", startX + 14, metaY + 4, { continued: true });
-      doc.fillColor("#15803d").text(invoice.invoice_number, { continued: true });
-      doc.fillColor("#64748b").text("     DATE: ", { continued: true });
-      doc.fillColor("#0f172a").text(new Date(invoice.invoice_date).toLocaleDateString("en-IN"), { continued: true });
-      doc.fillColor("#64748b").text("     ORDER ID: ", { continued: true });
-      doc.fillColor("#0f172a").text(invoice.order_id || `BK-${invoice.booking_id}`);
-
-      // 4. Details 2-Column Grid (Buyer Info & Property Info)
-      const gridY = metaY + 22;
-      const subColW = (colWidth - 26) / 2;
-
-      // Buyer box
-      doc.roundedRect(startX + 10, gridY, subColW, 72, 3).fillAndStroke("#ffffff", "#e2e8f0");
-      doc.rect(startX + 10, gridY, subColW, 14).fill("#f1f5f9");
-      doc.fillColor("#0f172a").fontSize(7).font("Helvetica-Bold").text("BUYER / CUSTOMER DETAILS", startX + 14, gridY + 3);
-
-      let bY = gridY + 18;
-      const drawRow = (x, y, k, v, isBold = false) => {
-        doc.fontSize(6.5).font("Helvetica").fillColor("#64748b").text(k, x + 4, y, { width: 55 });
-        doc.font(isBold ? "Helvetica-Bold" : "Helvetica").fillColor(isBold ? "#0f172a" : "#334155").text(String(v || "-"), x + 60, y, { width: subColW - 65, height: 10, ellipsis: true });
-      };
-      drawRow(startX + 10, bY, "Buyer Name:", data.customer_name || "-", true);
-      bY += 12;
-      drawRow(startX + 10, bY, "Mobile No:", data.mobile_no || "-");
-      bY += 12;
-      drawRow(startX + 10, bY, "Email:", data.email || "-");
-      bY += 12;
-      drawRow(startX + 10, bY, "Address:", data.address || data.full_address || "-");
-
-      // Property & Seller box
-      const pX = startX + 10 + subColW + 6;
-      doc.roundedRect(pX, gridY, subColW, 72, 3).fillAndStroke("#ffffff", "#e2e8f0");
-      doc.rect(pX, gridY, subColW, 14).fill("#f1f5f9");
-      doc.fillColor("#0f172a").fontSize(7).font("Helvetica-Bold").text("PROPERTY & SELLER DETAILS", pX + 4, gridY + 3);
-
-      let pY = gridY + 18;
-      drawRow(pX, pY, "Site / Project:", data.site_name || "-", true);
-      pY += 12;
-      drawRow(pX, pY, "Plot No:", `#${data.plot_number || '-'} (Block: ${data.block || 'Main'})`, true);
-      pY += 12;
-      drawRow(pX, pY, "Size / Area:", data.plot_size || `${data.plot_area || 0} Gaj`);
-      pY += 12;
-      drawRow(pX, pY, "Seller Company:", settings.company_name || "MMR Constructions");
-
-      // 5. Financial Summary Table
-      const tableY = gridY + 78;
-      doc.rect(startX + 10, tableY, colWidth - 20, 14).fill("#f8fafc");
-      doc.fontSize(7).font("Helvetica-Bold").fillColor("#475569").text("Description", startX + 14, tableY + 3);
-      doc.text("Amount (INR)", startX + colWidth - 85, tableY + 3, { width: 65, align: "right" });
-
-      let tY = tableY + 16;
-      const finRows = [
-        ["Agreed Plot Price", `INR ${Number(data.total_plot_price || invoice.subtotal || 0).toLocaleString("en-IN")}`],
-        ["Grand Total Plot Value", `INR ${Number(invoice.grand_total || data.total_plot_price || 0).toLocaleString("en-IN")}`, true],
-        ["Amount Paid (Advance / Received)", `INR ${Number(data.paid_amount || invoice.paid_amount || 0).toLocaleString("en-IN")}`, true, "#15803d"],
-        ["Remaining Balance Amount", Number(invoice.balance_amount || 0) === 0 ? "INR 0 (Paid in Full)" : `INR ${Number(invoice.balance_amount || 0).toLocaleString("en-IN")}`, true, Number(invoice.balance_amount || 0) === 0 ? "#15803d" : "#dc2626"]
-      ];
-
-      for (const [lbl, val, bold, color] of finRows) {
-        doc.lineWidth(0.5).strokeColor("#f1f5f9").moveTo(startX + 10, tY + 12).lineTo(startX + colWidth - 10, tY + 12).stroke();
-        doc.fontSize(6.8).font(bold ? "Helvetica-Bold" : "Helvetica").fillColor(color || (bold ? "#0f172a" : "#475569")).text(lbl, startX + 14, tY);
-        doc.text(val, startX + colWidth - 110, tY, { width: 90, align: "right" });
-        tY += 14;
-      }
-
-      // 6. Payment Mode & Status Bar
-      const payY = tY + 4;
-      doc.roundedRect(startX + 10, payY, colWidth - 20, 16, 3).fillAndStroke("#f1f5f9", "#e2e8f0");
-      doc.fontSize(6.8).font("Helvetica-Bold").fillColor("#64748b").text("Payment Mode: ", startX + 14, payY + 4, { continued: true });
-      doc.fillColor("#0f172a").text(`${data.payment_method || invoice.payment_method || 'Bank Transfer'}   |   Status: `, { continued: true });
-      doc.fillColor("#15803d").text(invoice.payment_status || "Paid in Full");
-
-      // 7. Notice / Note Box
-      const noteY = payY + 22;
-      doc.roundedRect(startX + 10, noteY, colWidth - 20, 24, 3).fillAndStroke("#f0fdf4", "#86efac");
-      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#15803d").text("NOTE / महत्वपूर्ण निर्देश: Invoice ko sambhal kar rakhein. Payment dispute me saathi.", startX + 14, noteY + 4);
-      doc.font("Helvetica").fontSize(6).fillColor("#166534").text("This tax invoice is issued subject to MMR Construction plot booking terms & mutual agreement.", startX + 14, noteY + 13);
-
-      // 8. Dual Signatures & Stamps Footer
-      const footY = margin + colHeight - 55;
-      doc.lineWidth(0.5).strokeColor("#e2e8f0").moveTo(startX + 10, footY).lineTo(startX + colWidth - 10, footY).stroke();
-
-      // Buyer Signature (Left)
-      const sigY = footY + 5;
-      doc.lineWidth(1).strokeColor("#94a3b8").dash(2, { space: 2 }).moveTo(startX + 14, sigY + 22).lineTo(startX + 120, sigY + 22).stroke().undash();
-      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#0f172a").text("Buyer's Signature / Thumb", startX + 14, sigY + 26);
-      doc.fontSize(5.5).font("Helvetica").fillColor("#64748b").text(`(हस्ताक्षर / अँगूठा - क्रेता: ${data.customer_name || 'Buyer'})`, startX + 14, sigY + 35, { width: 110 });
-
-      // Verified Badge (Center)
-      doc.rect(startX + 140, sigY + 8, 110, 28).fillAndStroke("#f8fafc", "#e2e8f0");
-      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#15803d").text("OFFICIALLY VERIFIED", startX + 140, sigY + 12, { width: 110, align: "center" });
-      doc.fontSize(5.5).font("Helvetica").fillColor("#64748b").text("Tax Invoice & Booking Record", startX + 140, sigY + 22, { width: 110, align: "center" });
-
-      // Seller Signature (Right)
-      const sellerSigX = startX + colWidth - 130;
-      doc.lineWidth(1).strokeColor("#94a3b8").dash(2, { space: 2 }).moveTo(sellerSigX, sigY + 22).lineTo(sellerSigX + 116, sigY + 22).stroke().undash();
-      doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#0f172a").text("Seller's Signatory & Stamp", sellerSigX, sigY + 26, { width: 116, align: "right" });
-      doc.fontSize(5.5).font("Helvetica").fillColor("#64748b").text(`(अधिकृत हस्ताक्षर - ${settings.company_name || 'MMR'})`, sellerSigX, sigY + 35, { width: 116, align: "right" });
-    };
-
-    // Render Part 1: Buyer Copy (Left)
-    renderCopy(margin, "BUYER COPY / CUSTOMER COPY", "(क्रेता प्रति — Original for Buyer)", true);
-
-    // Render Center Cut Divider
-    const cutX = margin + colWidth + 11;
-    doc.lineWidth(1).strokeColor("#94a3b8").dash(4, { space: 3 }).moveTo(cutX, margin).lineTo(cutX, margin + colHeight).stroke().undash();
-    // Center cut text
-    doc.save();
-    doc.rect(cutX - 6, margin + (colHeight / 2) - 30, 12, 60).fill("#ffffff");
-    doc.fontSize(7).font("Helvetica-Bold").fillColor("#64748b").text("✂ CUT HERE", cutX - 25, margin + (colHeight / 2) - 4, { width: 50, align: "center" });
-    doc.restore();
-
-    // Render Part 2: Seller Copy (Right)
-    const rightStartX = margin + colWidth + 22;
-    renderCopy(rightStartX, "SELLER COPY / COMPANY COPY", "(विक्रेता प्रति — Original for Seller)", false);
-
-    doc.end();
+    await renderInvoicePdfStream({ invoice, settings, downloadUrl, res });
   } catch (error) {
     console.error("GET /api/invoice/:invoiceNumber/pdf error:", error);
     if (!res.headersSent) return fail(res, error.message);
+  }
+});
+
+// ----------------------------------------------------
+// 3b. GET /api/public/invoice/download/:invoiceNumber (Tamper-Proof QR Code Scan PDF Download)
+// ----------------------------------------------------
+router.get("/public/invoice/download/:invoiceNumber", async (req, res) => {
+  try {
+    const { invoiceNumber } = req.params;
+    const { token } = req.query;
+
+    if (!token || typeof token !== "string") {
+      return res.status(403).send("<h1>403 Forbidden</h1><p>Missing security token. Access is only permitted via official QR code scan.</p>");
+    }
+
+    const cleanNum = String(invoiceNumber || "").replace(/^MMR-INV-/i, "").replace(/^BK-/i, "").replace(/^INV-/i, "").trim();
+    const trailingNumMatch = cleanNum.match(/(\d+)$/);
+    const cleanId = !isNaN(Number(cleanNum)) && cleanNum.length > 0 ? Number(cleanNum) : (trailingNumMatch ? Number(trailingNumMatch[1]) : null);
+
+    let [invoice] = await sql`
+      SELECT * FROM invoices
+      WHERE LOWER(invoice_number) = LOWER(${invoiceNumber})
+         OR LOWER(order_id) = LOWER(${invoiceNumber})
+         OR (CASE WHEN ${cleanId !== null} THEN invoice_id = ${cleanId} OR booking_id = ${cleanId} ELSE false END)
+         OR (invoice_data->>'booking_id')::text = ${cleanNum}
+         OR (invoice_data->>'booking_id')::text = ${String(cleanId)}
+         OR (invoice_data->>'invoice_number') ILIKE ${'%' + invoiceNumber + '%'}
+         OR invoice_number ILIKE ${'%' + invoiceNumber + '%'}
+      ORDER BY invoice_id ASC
+      LIMIT 1
+    `;
+
+    if (!invoice && cleanId !== null) {
+      const [booking] = await sql`
+        SELECT b.*, COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+               COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+               COALESCE(p.plot_category::text, 'Residential') AS plot_type,
+               COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
+               u.full_name, u.mobile_no, u.email
+        FROM bookings b
+        LEFT JOIN plots p ON b.plot_id = p.plot_id
+        LEFT JOIN sites s ON p.site_id = s.site_id
+        LEFT JOIN sites s2 ON b.site_id = s2.site_id
+        JOIN users u ON b.user_id = u.user_id
+        WHERE b.booking_id = ${cleanId}
+        LIMIT 1
+      `;
+      if (booking) {
+        const totalPlotPrice = Number(booking.base_price || (Number(booking.plot_area || 0) * 1000) || 0);
+        const downPayment = Number(booking.advance_amount || booking.required_booking_amount || 0);
+        const remainingBal = Math.max(0, totalPlotPrice - downPayment);
+        const formattedInvNum = `MMR-INV-${booking.booking_id}`;
+
+        const invData = {
+          invoice_number: formattedInvNum,
+          invoice_type: "Plot Booking Advance",
+          booking_id: booking.booking_id,
+          booking_serial: booking.booking_serial || `BK-${booking.booking_id}`,
+          customer_name: booking.full_name || "Valued Customer",
+          mobile_no: booking.mobile_no || "",
+          email: booking.email || "",
+          site_name: booking.site_name || "MMR City",
+          plot_number: booking.plot_number || "Plot",
+          plot_size: `${booking.plot_area || ''} Sq.Yd.`.trim(),
+          total_plot_price: totalPlotPrice,
+          down_payment: downPayment,
+          emi_amount: downPayment,
+          grand_total: downPayment,
+          paid_amount: downPayment,
+          total_paid_till_date: downPayment,
+          balance_amount: remainingBal,
+          payment_method: booking.payment_method || booking.payment_type || "Cash / Bank",
+          payment_date: booking.created_at ? new Date(booking.created_at).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
+          transaction_id: booking.booking_serial || `BK-${booking.booking_id}`,
+          payment_status: "Paid",
+          order_status: "Completed"
+        };
+
+        invoice = {
+          invoice_id: booking.booking_id,
+          invoice_number: formattedInvNum,
+          order_id: booking.booking_serial,
+          user_id: booking.user_id,
+          booking_id: booking.booking_id,
+          invoice_date: booking.created_at || new Date(),
+          grand_total: downPayment,
+          paid_amount: downPayment,
+          balance_amount: remainingBal,
+          payment_method: booking.payment_method || 'Cash / Bank',
+          payment_status: 'Paid',
+          order_status: 'Completed',
+          invoice_data: invData
+        };
+      }
+    }
+
+    if (!invoice) {
+      return res.status(404).send("<h1>404 Not Found</h1><p>Invoice was not found.</p>");
+    }
+
+    // Cryptographic token validation - immune to brute-force or IDOR tampering
+    const isValidToken = verifyInvoiceToken(
+      invoice.invoice_number,
+      invoice.invoice_id || invoice.booking_id,
+      invoice.grand_total,
+      token
+    );
+
+    if (!isValidToken) {
+      console.warn(`[Security Alert] Unauthorized QR download attempt on ${invoiceNumber} from IP: ${req.ip}`);
+      return res.status(403).send("<h1>403 Security Check Failed</h1><p>This invoice download link is invalid or has been tampered with. Please scan the genuine QR code on the invoice.</p>");
+    }
+
+    const settings = await getEffectiveInvoiceSettings();
+    const publicBase = resolvePublicBaseUrl(req);
+    const downloadUrl = `${publicBase}/api/public/invoice/download/${encodeURIComponent(invoice.invoice_number)}?token=${token}`;
+
+    try {
+      await sql`
+        INSERT INTO invoice_audit_log (log_id, invoice_id, invoice_number, action, performed_by_id, performed_by_role, ip_address)
+        VALUES (
+          (SELECT COALESCE(MAX(log_id), 0) + 1 FROM invoice_audit_log),
+          ${invoice.invoice_id || 0}, ${invoice.invoice_number || ''}, 'QR_DOWNLOAD', 0, 'GUEST_QR_SCAN', ${req.ip || ''}
+        )
+        ON CONFLICT DO NOTHING`;
+    } catch (_) {}
+
+    await renderInvoicePdfStream({ invoice, settings, downloadUrl, res });
+  } catch (error) {
+    console.error("GET /api/public/invoice/download error:", error);
+    if (!res.headersSent) {
+      res.status(500).send("<h1>500 Internal Error</h1><p>Unable to generate invoice PDF at this time.</p>");
+    }
   }
 });
 
@@ -960,7 +1236,7 @@ router.get("/verify-invoice/:invoiceNumber", async (req, res) => {
 // ----------------------------------------------------
 router.get("/admin/invoice-settings", adminAuth, async (req, res) => {
   try {
-    const [settings] = await sql`SELECT * FROM invoice_settings WHERE id = 1`;
+    const settings = await getEffectiveInvoiceSettings();
     return ok(res, settings || {});
   } catch (error) {
     console.error("GET /api/admin/invoice-settings error:", error);
@@ -975,6 +1251,7 @@ router.put("/admin/invoice-settings", adminAuth, async (req, res) => {
   try {
     const {
       company_name,
+      cin,
       company_logo,
       address,
       phone,
@@ -996,15 +1273,17 @@ router.put("/admin/invoice-settings", adminAuth, async (req, res) => {
       theme_color,
     } = req.body;
 
+    await sql`ALTER TABLE invoice_settings ADD COLUMN IF NOT EXISTS cin VARCHAR(100) DEFAULT 'U68200UP2025PTC229203'`.catch(() => {});
+
     const [updated] = await sql`
       INSERT INTO invoice_settings (
-        id, company_name, company_logo, address, phone, email, website, gst_number,
+        id, company_name, cin, company_logo, address, phone, email, website, gst_number,
         terms_and_conditions, notes, bank_name, account_no, ifsc_code, branch,
         upi_qr_url, signature_url, stamp_url, invoice_prefix, invoice_starting_number,
         invoice_footer, theme_color, updated_at
       ) VALUES (
-        1, ${company_name || 'MMR Constructions & Developers'}, ${company_logo || ''}, ${address || ''},
-        ${phone || ''}, ${email || ''}, ${website || ''}, ${gst_number || ''},
+        1, ${company_name || 'MMR Construction & Developers'}, ${cin || 'U68200UP2025PTC229203'}, ${company_logo || ''}, ${address || 'Tribhuvan Kheda, Sheshpur, Unnao, Uttar Pradesh, India, 209801'},
+        ${phone || '+91 95111 19879'}, ${email || 'official@mmrconstructions.in'}, ${website || 'www.mmrconstructions.in'}, ${gst_number || '09AATCM6753A1Z5'},
         ${terms_and_conditions || ''}, ${notes || ''}, ${bank_name || ''}, ${account_no || ''},
         ${ifsc_code || ''}, ${branch || ''}, ${upi_qr_url || ''}, ${signature_url || ''},
         ${stamp_url || ''}, ${invoice_prefix || 'MMR'}, ${Number(invoice_starting_number || 1)},
@@ -1012,6 +1291,7 @@ router.put("/admin/invoice-settings", adminAuth, async (req, res) => {
       )
       ON CONFLICT (id) DO UPDATE SET
         company_name = EXCLUDED.company_name,
+        cin = EXCLUDED.cin,
         company_logo = EXCLUDED.company_logo,
         address = EXCLUDED.address,
         phone = EXCLUDED.phone,
