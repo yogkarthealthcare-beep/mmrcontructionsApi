@@ -78,7 +78,7 @@ ensureSettlementSchema();
  * 1. GET /api/admin/payment-settlements
  * List eligible plot orders with rich referral/seller attribution and settlement tracking.
  */
-router.get('/admin/payment-settlements', verifyAdminToken, async (req, res) => {
+router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], verifyAdminToken, async (req, res) => {
   try {
     await ensureSettlementSchema();
 
@@ -192,6 +192,8 @@ router.get('/admin/payment-settlements', verifyAdminToken, async (req, res) => {
         seller.full_name AS seller_name,
         seller.member_id AS seller_member_id,
         seller.user_type AS seller_user_type,
+        seller.mobile_no AS seller_mobile,
+        seller.email AS seller_email,
 
         -- Team Member Details (if seller is Team Member or enrolled)
         CASE 
@@ -206,11 +208,21 @@ router.get('/admin/payment-settlements', verifyAdminToken, async (req, res) => {
           WHEN seller.user_type = 'Team Member' OR tm_record.id IS NOT NULL THEN seller.user_id
           ELSE NULL
         END AS team_member_user_id,
+        CASE 
+          WHEN seller.user_type = 'Team Member' OR tm_record.id IS NOT NULL THEN seller.mobile_no
+          ELSE NULL
+        END AS team_member_mobile,
+        CASE 
+          WHEN seller.user_type = 'Team Member' OR tm_record.id IS NOT NULL THEN seller.email
+          ELSE NULL
+        END AS team_member_email,
 
         -- Associate / SOC Details
         b.associate_user_id,
         COALESCE(assoc.full_name, tm_assoc.full_name) AS associate_name,
         COALESCE(assoc.member_id, tm_assoc.member_id) AS associate_member_id,
+        COALESCE(assoc.mobile_no, tm_assoc.mobile_no) AS associate_mobile,
+        COALESCE(assoc.email, tm_assoc.email) AS associate_email,
         COALESCE(b.associate_user_id, tm_record.associate_id) AS effective_associate_user_id,
 
         -- Referral ID
@@ -571,7 +583,7 @@ async function computeDistributionForBooking(bookingId) {
  * 2. GET /api/admin/payment-settlements/:id/preview
  * Returns full recipient-wise breakdown before final release confirmation.
  */
-router.get('/api/admin/payment-settlements/:id/preview', verifyAdminToken, async (req, res) => {
+router.get(['/admin/payment-settlements/:id/preview', '/api/admin/payment-settlements/:id/preview'], verifyAdminToken, async (req, res) => {
   try {
     await ensureSettlementSchema();
     const bookingId = Number(req.params.id);
@@ -590,7 +602,7 @@ router.get('/api/admin/payment-settlements/:id/preview', verifyAdminToken, async
  * Authorizes and records payment settlement & commission distribution with strict transaction isolation.
  */
 router.post(
-  '/api/admin/payment-settlements/:id/release',
+  ['/admin/payment-settlements/:id/release', '/api/admin/payment-settlements/:id/release'],
   verifyAdminToken,
   role('SuperAdmin', 'Admin', 'FinanceManager'),
   async (req, res) => {
@@ -773,7 +785,7 @@ router.post(
  * Cancels a settlement request with audit logging and safeguards.
  */
 router.post(
-  '/api/admin/payment-settlements/:id/cancel',
+  ['/admin/payment-settlements/:id/cancel', '/api/admin/payment-settlements/:id/cancel'],
   verifyAdminToken,
   role('SuperAdmin', 'Admin', 'FinanceManager'),
   async (req, res) => {

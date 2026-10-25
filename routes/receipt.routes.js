@@ -3,6 +3,9 @@ import sql from "../db.js";
 import { adminAuth, userAuth } from "../middleware/auth.middleware.js";
 import PDFDocument from "pdfkit";
 
+import commissionService from "../services/commissionService.js";
+import { resolveAssociate } from "../services/bookingService.js";
+
 const router = express.Router();
 
 function ok(res, data = null, message = "Success", extra = {}) {
@@ -52,6 +55,10 @@ export async function ensureReceiptsTable() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
+      ALTER TABLE receipts ADD COLUMN IF NOT EXISTS booking_id BIGINT;
+      ALTER TABLE receipts ADD COLUMN IF NOT EXISTS plot_id BIGINT;
+      ALTER TABLE receipts ADD COLUMN IF NOT EXISTS site_id BIGINT;
+
       CREATE INDEX IF NOT EXISTS idx_receipts_receipt_no ON receipts(receipt_no);
       CREATE INDEX IF NOT EXISTS idx_receipts_serial_no ON receipts(serial_no);
       CREATE INDEX IF NOT EXISTS idx_receipts_customer_name ON receipts(customer_name);
@@ -59,6 +66,8 @@ export async function ensureReceiptsTable() {
       CREATE INDEX IF NOT EXISTS idx_receipts_plot_no ON receipts(plot_no);
       CREATE INDEX IF NOT EXISTS idx_receipts_receipt_date ON receipts(receipt_date);
       CREATE INDEX IF NOT EXISTS idx_receipts_customer_id ON receipts(customer_id);
+      CREATE INDEX IF NOT EXISTS idx_receipts_booking_id ON receipts(booking_id);
+      CREATE INDEX IF NOT EXISTS idx_receipts_plot_id ON receipts(plot_id);
       CREATE INDEX IF NOT EXISTS idx_receipts_status ON receipts(status);
       CREATE INDEX IF NOT EXISTS idx_receipts_created_at ON receipts(created_at DESC);
 
@@ -166,13 +175,29 @@ router.get("/admin/receipts/customer-lookup", adminAuth, async (req, res) => {
 
     const searchPattern = `%${queryTerm.toLowerCase()}%`;
     const rows = await sql`
-      SELECT user_id, member_id, full_name, mobile_no, email, user_type
-      FROM users
-      WHERE LOWER(COALESCE(full_name, '')) LIKE ${searchPattern}
-         OR LOWER(COALESCE(mobile_no, '')) LIKE ${searchPattern}
-         OR LOWER(COALESCE(member_id, '')) LIKE ${searchPattern}
-         OR LOWER(COALESCE(email, '')) LIKE ${searchPattern}
-      ORDER BY user_id DESC
+      SELECT 
+        u.user_id, 
+        u.member_id, 
+        u.full_name, 
+        u.mobile_no, 
+        u.email, 
+        u.user_type,
+        u.referred_by_user_id,
+        u.sponsor_user_id,
+        -- Sponsor / Referrer resolution
+        COALESCE(ref.user_id, sp.user_id) AS sponsor_id,
+        COALESCE(ref.member_id, sp.member_id) AS sponsor_member_id,
+        COALESCE(ref.full_name, sp.full_name) AS sponsor_name,
+        COALESCE(ref.mobile_no, sp.mobile_no) AS sponsor_mobile,
+        COALESCE(ref.user_type, sp.user_type) AS sponsor_role
+      FROM users u
+      LEFT JOIN users ref ON ref.user_id = u.referred_by_user_id
+      LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
+      WHERE LOWER(COALESCE(u.full_name, '')) LIKE ${searchPattern}
+         OR LOWER(COALESCE(u.mobile_no, '')) LIKE ${searchPattern}
+         OR LOWER(COALESCE(u.member_id, '')) LIKE ${searchPattern}
+         OR LOWER(COALESCE(u.email, '')) LIKE ${searchPattern}
+      ORDER BY u.user_id DESC
       LIMIT 15
     `;
 
@@ -340,6 +365,8 @@ router.post("/admin/receipts", adminAuth, async (req, res) => {
       serial_no,
       plot_no,
       plot_area,
+      plot_id,
+      site_id,
       customer_id,
       customer_name,
       mobile_no,
@@ -413,6 +440,160 @@ router.post("/admin/receipts", adminAuth, async (req, res) => {
       finalReceiptNo = `MMR/REC/${year}/${String(finalSerial).padStart(4, "0")}`;
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Plot Validation & Cross-Panel Booking Integration
+    // ─────────────────────────────────────────────────────────────
+    let createdBookingId = null;
+    let resolvedPlotId = plot_id ? Number(plot_id) : null;
+    let resolvedSiteId = site_id ? Number(site_id) : null;
+
+    if (resolvedPlotId) {
+      const [plotRow] = await sql`
+        SELECT plot_id, site_id, plot_number, plot_area, base_price, plot_status
+        FROM plots
+        WHERE plot_id = ${resolvedPlotId}
+      `;
+
+      if (!plotRow) {
+        return fail(res, "Selected plot was not found in the property registry.", 404);
+      }
+
+      const pStatus = String(plotRow.plot_status || 'Vacant').toLowerCase();
+      if (!['vacant', 'available'].includes(pStatus)) {
+        return fail(res, `Selected plot #${plotRow.plot_number} is no longer available (Current Status: ${plotRow.plot_status}). Please select an available plot.`, 409);
+      }
+
+      resolvedSiteId = resolvedSiteId || plotRow.site_id;
+
+      // Resolve Referral Attribution from Database (Phase 2 & Phase 3)
+      let soldByUserId = null;
+      let associateUserId = null;
+      let isReferredCustomer = false;
+
+      if (customer_id) {
+        const [targetCustomer] = await sql`
+          SELECT user_id, member_id, full_name, user_type, referred_by_user_id, sponsor_user_id
+          FROM users WHERE user_id = ${Number(customer_id)}
+        `;
+
+        if (targetCustomer) {
+          const refUserId = targetCustomer.referred_by_user_id || targetCustomer.sponsor_user_id;
+          if (refUserId) {
+            const [refUser] = await sql`
+              SELECT user_id, member_id, full_name, user_type, account_status
+              FROM users WHERE user_id = ${refUserId}
+            `;
+            if (refUser) {
+              soldByUserId = refUser.user_id;
+              associateUserId = await resolveAssociate(sql, soldByUserId);
+              isReferredCustomer = true;
+            } else {
+              return fail(res, "Customer referral sponsor could not be verified in database.", 400);
+            }
+          }
+        }
+      }
+
+      // Financial figures for booking
+      const advAmt = Number(paid_amount || 0);
+      const totalPlotPrice = Number(receipt_amount || plotRow.base_price || advAmt);
+      const remBal = Math.max(0, totalPlotPrice - advAmt);
+      const normPayType = (payment_mode === 'Full Payment' || advAmt >= totalPlotPrice) ? 'FullPayment' : 'Partial';
+      const bSerial = `MMR-BK-${new Date().getFullYear()}-${String(finalSerial).padStart(5, '0')}`;
+
+      // Create Booking record visible across customer, associate, and admin panels (Phase 5)
+      const [newBooking] = await sql`
+        INSERT INTO bookings (
+          booking_serial,
+          user_id,
+          plot_id,
+          site_id,
+          advance_amount,
+          remaining_balance,
+          base_price,
+          booking_date,
+          booking_status,
+          workflow_status,
+          associate_approval_status,
+          payment_type,
+          payment_method,
+          booking_type,
+          booking_source,
+          sold_by_user_id,
+          associate_user_id,
+          booked_by_user_id,
+          notes,
+          confirmed_at,
+          created_at,
+          updated_at
+        ) VALUES (
+          ${bSerial},
+          ${customer_id ? Number(customer_id) : null},
+          ${plotRow.plot_id},
+          ${resolvedSiteId},
+          ${advAmt},
+          ${remBal},
+          ${totalPlotPrice},
+          ${receipt_date},
+          'Confirmed',
+          'Plot Allocated by Admin Receipt',
+          'Approved',
+          ${normPayType},
+          ${payment_type || 'Cash'},
+          ${isReferredCustomer ? 'ADMIN_REFERRED_SALE' : 'ADMIN_DIRECT_SALE'},
+          'Admin_Receipt',
+          ${soldByUserId},
+          ${associateUserId},
+          ${adminId},
+          ${notes || ('Allocated via Admin Receipt #' + finalReceiptNo)},
+          NOW(),
+          NOW(),
+          NOW()
+        )
+        RETURNING booking_id, booking_serial
+      `;
+
+      createdBookingId = newBooking.booking_id;
+
+      // Update plot status to Booked or Sold
+      const updatedPlotStatus = advAmt >= totalPlotPrice ? 'Sold' : 'Booked';
+      await sql`
+        UPDATE plots
+        SET plot_status = ${updatedPlotStatus},
+            sold_price = COALESCE(sold_price, ${totalPlotPrice}),
+            sold_at = CASE WHEN ${updatedPlotStatus} = 'Sold' THEN NOW() ELSE sold_at END,
+            updated_at = NOW()
+        WHERE plot_id = ${plotRow.plot_id}
+      `;
+
+      // Status history log
+      await sql`
+        INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
+        VALUES (${plotRow.plot_id}, ${plotRow.plot_status || 'Vacant'}, ${updatedPlotStatus}, ${adminId}, ${adminName}, ${'Allocated via Admin Receipt #' + finalReceiptNo})
+      `.catch(() => {});
+
+      // Commission Handling (Phase 3)
+      if (isReferredCustomer && soldByUserId && advAmt > 0) {
+        try {
+          await commissionService.generateCommissionForPayment({
+            bookingId: createdBookingId,
+            event: {
+              type: 'BookingAdvance',
+              sourceRef: `rec-${finalReceiptNo}`,
+              receivedAmount: advAmt,
+              paymentType: normPayType
+            },
+            adminId
+          });
+          console.log(`[AdminReceipt] Commission calculated for Booking #${createdBookingId} (Seller: #${soldByUserId}).`);
+        } catch (commErr) {
+          console.error('[AdminReceipt] Commission generation notice:', commErr.message);
+        }
+      } else {
+        console.log(`[AdminReceipt] Booking #${createdBookingId} is Individual Customer sale. No referral commission generated.`);
+      }
+    }
+
     const [created] = await sql`
       INSERT INTO receipts (
         receipt_no, serial_no, plot_no, plot_area, customer_id, customer_name,
@@ -420,6 +601,7 @@ router.post("/admin/receipts", adminAuth, async (req, res) => {
         bank_name, receipt_amount, paid_amount, inward_amount, amount_depositor_name,
         advisor_name, advisor_mobile, full_payment_time, receipt_date, plotting_place,
         depositor_signature, authorized_signature, notes, status, is_locked,
+        booking_id, plot_id, site_id,
         created_by, updated_by, created_at, updated_at
       ) VALUES (
         ${finalReceiptNo},
@@ -449,6 +631,9 @@ router.post("/admin/receipts", adminAuth, async (req, res) => {
         ${notes || null},
         'Active',
         TRUE,
+        ${createdBookingId},
+        ${resolvedPlotId},
+        ${resolvedSiteId},
         ${adminId},
         ${adminId},
         NOW(),
