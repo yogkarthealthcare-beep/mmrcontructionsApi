@@ -6354,7 +6354,11 @@ app.put("/api/profile", verifyUserToken, async (req, res) => {
     let cleanFullName = full_name && String(full_name).trim() ? String(full_name).trim() : null;
     const cleanPan = pan_number && String(pan_number).trim() ? String(pan_number).trim().toUpperCase() : null;
     const cleanAadhar = aadhar_number && String(aadhar_number).trim() ? String(aadhar_number).replace(/\D/g, "") : null;
-    const cleanGender = gender && String(gender).trim() ? String(gender).trim() : null;
+    const cleanGenderRaw = gender && String(gender).trim() ? String(gender).trim().toUpperCase() : null;
+    let cleanGender = null;
+    if (cleanGenderRaw === 'M' || cleanGenderRaw === 'MALE') cleanGender = 'Male';
+    else if (cleanGenderRaw === 'F' || cleanGenderRaw === 'FEMALE') cleanGender = 'Female';
+    else if (cleanGenderRaw === 'OTHER' || cleanGenderRaw === 'O') cleanGender = 'Other';
     const cleanDob = date_of_birth && String(date_of_birth).trim() ? date_of_birth : null;
 
     const cleanAccHolder = account_holder_name && String(account_holder_name).trim() ? String(account_holder_name).trim() : null;

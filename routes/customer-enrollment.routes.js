@@ -345,6 +345,18 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
     const coDobVal = parseDate(b.coDob);
     const txnDateVal = parseDate(b.txnDate);
 
+    const normalizeGenderForEnum = (val) => {
+      if (!val) return null;
+      const s = String(val).trim().toUpperCase();
+      if (s === 'M' || s === 'MALE') return 'Male';
+      if (s === 'F' || s === 'FEMALE') return 'Female';
+      if (s === 'OTHER' || s === 'O') return 'Other';
+      return null;
+    };
+    const cleanGender = normalizeGenderForEnum(b.gender) || (b.gender ? String(b.gender).trim() : null);
+    const cleanCoGender = normalizeGenderForEnum(b.coGender) || (b.coGender ? String(b.coGender).trim() : null);
+    const cleanUserGenderEnum = normalizeGenderForEnum(b.gender);
+
     // Process files
     const photoFirstUrl = await processBase64(b.photoFirstApplicant, `photo1_${Date.now()}.png`, user_id);
     const photoCoUrl = await processBase64(b.photoCoApplicant, `photo2_${Date.now()}.png`, user_id);
@@ -402,7 +414,7 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
             fh_name = ${cleanFhName},
             date_of_birth = ${dobVal},
             age = ${ageVal},
-            gender = ${b.gender || null},
+            gender = ${cleanGender || null},
             marital_status = ${b.maritalStatus || null},
             nationality = ${b.nationality || null},
             nationality_other = ${b.nationalityOther || null},
@@ -427,7 +439,7 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
             co_relation = ${b.coRelation || null},
             co_date_of_birth = ${coDobVal},
             co_age = ${coAgeVal},
-            co_gender = ${b.coGender || null},
+            co_gender = ${cleanCoGender || null},
             co_pan_no = ${b.coPan || null},
             co_aadhar_no = ${b.coAadhar || null},
             co_present_address = ${b.coPresentAddress || null},
@@ -470,9 +482,9 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
             declaration_accepted, signature_sole_first_applicant_url, signature_co_applicant_url, signature_authorized_signatory_url, terms_accepted, terms_accepted_at
           ) VALUES (
             ${user_id}, ${formDateVal}, ${b.applicationNo || appNo}, ${b.projectName || null}, ${b.propertyType || null}, ${b.propertyTypeOther || null}, ${b.plotFlatNo || null}, ${b.blockTower || null}, ${b.sizeArea || null}, ${rateVal}, ${bsp}, ${plc}, ${totalVal},
-            ${cleanApplicantName}, ${cleanFhName}, ${dobVal}, ${ageVal}, ${b.gender || null}, ${b.maritalStatus || null}, ${b.nationality || null}, ${b.nationalityOther || null}, ${b.religion || null}, ${isFinal}, ${b.pan || null}, ${b.aadhar || null}, ${b.occupation || null},
+            ${cleanApplicantName}, ${cleanFhName}, ${dobVal}, ${ageVal}, ${cleanGender || null}, ${b.maritalStatus || null}, ${b.nationality || null}, ${b.nationalityOther || null}, ${b.religion || null}, ${isFinal}, ${b.pan || null}, ${b.aadhar || null}, ${b.occupation || null},
             ${b.presentAddress || null}, ${b.presentCity || null}, ${b.presentStatePin || null}, ${b.permanentAddress || null}, ${b.permanentCity || null}, ${b.permanentStatePin || null}, ${b.mobile1}, ${b.mobile2 || null}, ${b.email1 || null}, ${photoFirstUrl},
-            ${cleanCoApplicantName}, ${cleanCoFhName}, ${b.coRelation || null}, ${coDobVal}, ${coAgeVal}, ${b.coGender || null}, ${b.coPan || null}, ${b.coAadhar || null}, ${b.coPresentAddress || null}, ${b.coMobile || null}, ${b.coEmail || null}, ${photoCoUrl},
+            ${cleanCoApplicantName}, ${cleanCoFhName}, ${b.coRelation || null}, ${coDobVal}, ${coAgeVal}, ${cleanCoGender || null}, ${b.coPan || null}, ${b.coAadhar || null}, ${b.coPresentAddress || null}, ${b.coMobile || null}, ${b.coEmail || null}, ${photoCoUrl},
             ${bookingAmountVal}, ${b.bookingAmountWords || null}, ${b.paymentMode || null}, ${b.txnNo || null}, ${txnDateVal}, ${b.drawnBankBranch || null},
             ${b.accHolderName || null}, ${b.accBankBranch || null}, ${b.accNumber || null}, ${b.ifscCode || null},
             ${b.associateName || null}, ${b.associateId || null}, ${b.associateMobile || null}, ${b.associateSignatureName || null},
@@ -509,7 +521,10 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
               WHEN ${Boolean(b.isFinalSubmitted || b.is_final_submitted)} THEN 'Completed'
               ELSE COALESCE(enrollment_status, 'Pending')
             END,
-            gender = COALESCE(${b.gender || null}, gender),
+            gender = CASE 
+              WHEN ${cleanUserGenderEnum} IS NOT NULL THEN ${cleanUserGenderEnum}::gender_enum 
+              ELSE gender 
+            END,
             date_of_birth = COALESCE(${dobVal || null}, date_of_birth),
             pan_number = COALESCE(${b.pan || null}, pan_number),
             aadhar_number = COALESCE(${b.aadhar || null}, aadhar_number),
