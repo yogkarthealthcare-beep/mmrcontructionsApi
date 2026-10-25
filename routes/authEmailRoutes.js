@@ -452,8 +452,14 @@ async function validateSignupInput(body) {
     sponsor_invite_code: rawSponsorCode,
   });
 
-  if (!fullName) validationErrors.push('Full name is required');
-  if (!email || !isEmail(email)) validationErrors.push('Valid email address is required');
+  if (!fullName) {
+    validationErrors.push('Full name is required');
+  } else if (!/^[a-zA-Z]+(\s[a-zA-Z]+)*$/.test(fullName)) {
+    validationErrors.push('Full name can only contain letters and spaces (no numbers or special characters)');
+  }
+  if (!email || !isEmail(email) || !/^[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*@[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)+$/.test(email)) {
+    validationErrors.push('Valid email address is required (only letters, numbers, @ and dot allowed; no dash or special characters)');
+  }
   if (!mobileNo || !isMobile(mobileNo)) {
     validationErrors.push('Valid 10-digit mobile number is required');
   }

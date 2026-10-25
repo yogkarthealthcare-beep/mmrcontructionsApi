@@ -380,12 +380,19 @@ async function handleInvestorRegistration(req, res) {
     if (!full_name || !rawMobile || !email || !password) {
       return err(res, "Full Name, Mobile Number, Email, and Password are required.", 400);
     }
-    if (!/^\S+@\S+\.\S+$/.test(String(email))) return err(res, "Please enter a valid email address.", 400);
-    if (!/^\d{10}$/.test(String(rawMobile).replace(/\D/g, ""))) return err(res, "Please enter a valid 10 digit mobile number.", 400);
-
+    const cleanName = String(full_name).trim();
+    if (!/^[a-zA-Z]+(\s[a-zA-Z]+)*$/.test(cleanName)) {
+      return err(res, "Full Name can only contain letters and single spaces (no numbers or special characters).", 400);
+    }
     const cleanEmail = String(email).trim().toLowerCase();
+    if (!/^[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*@[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)+$/.test(cleanEmail)) {
+      return err(res, "Valid email address is required (only letters, numbers, @ and dot allowed; no dash or special characters).", 400);
+    }
     const cleanMobile = String(rawMobile).replace(/\D/g, "");
-    const cleanMobile10 = cleanMobile.length >= 10 ? cleanMobile.slice(-10) : cleanMobile;
+    if (!/^[6-9]\d{9}$/.test(cleanMobile)) {
+      return err(res, "Please enter a valid 10-digit mobile number.", 400);
+    }
+    const cleanMobile10 = cleanMobile.slice(-10);
 
     const [dupInvestor] = await sql`
       SELECT id FROM investor_users WHERE deleted_at IS NULL AND (LOWER(email) = ${cleanEmail} OR RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile10}) LIMIT 1

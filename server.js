@@ -4484,8 +4484,20 @@ app.post("/api/auth/register-quick", async (req, res) => {
     if (!["Customer", "Associate", "Investor", "Team Member"].includes(user_type))
       return err(res, "user_type must be Customer, Associate, Investor, or Team Member", 400);
 
+    const cleanName = String(full_name).trim();
+    if (!/^[a-zA-Z]+(\s[a-zA-Z]+)*$/.test(cleanName)) {
+      return err(res, "Full Name can only contain letters and spaces (no numbers or special characters)", 400);
+    }
+
     const cleanEmail = String(email).trim().toLowerCase();
+    if (!/^[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*@[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)+$/.test(cleanEmail)) {
+      return err(res, "Valid email address is required (only letters, numbers, @ and dot allowed; no dash or special characters)", 400);
+    }
+
     const cleanMobile = String(mobile_no).replace(/\D/g, "");
+    if (!/^[6-9]\d{9}$/.test(cleanMobile)) {
+      return err(res, "Valid 10-digit mobile number required (starting with 6, 7, 8, or 9)", 400);
+    }
 
     // Duplicate checks
     const [dupMobile] = await sql`SELECT user_id FROM users WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}`;
