@@ -314,6 +314,7 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
       collector_name,
       cash_receipt_no,
       proof_document_url,
+      payer_name,
       customer_notes
     } = req.body;
 
@@ -449,13 +450,13 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
         payment_serial, user_id, booking_id, plot_id, site_id,
         payment_mode, payment_purpose, gross_amount, payment_date,
         payment_status, verification_status, utr_number, cheque_id,
-        proof_document_url, submitted_by_user_id, submitted_by_role,
+        proof_document_url, payer_name, submitted_by_user_id, submitted_by_role,
         admin_notes
       ) VALUES (
         ${paymentSerial}, ${targetUserId}, ${targetBookingId}, ${targetPlotId}, ${targetSiteId},
         ${payment_mode}, ${payment_purpose || 'EmiPayment'}, ${grossAmount}, CURRENT_DATE,
         'Submitted', 'Pending', ${utr_number || (payment_mode === 'Cash' ? (cash_receipt_no || null) : null)}, ${chequeId},
-        ${proof_document_url || null}, ${userId}, 'Customer',
+        ${proof_document_url || null}, ${payer_name || null}, ${userId}, 'Customer',
         ${finalNotes || null}
       )
       RETURNING *
@@ -765,6 +766,7 @@ router.get("/api/admin/payment-ledger", adminAuth, async (req, res) => {
           u.mobile_no ILIKE ${`%${search}%`} OR 
           pl.payment_serial ILIKE ${`%${search}%`} OR 
           pl.utr_number ILIKE ${`%${search}%`} OR 
+          pl.payer_name ILIKE ${`%${search}%`} OR 
           p.plot_number ILIKE ${`%${search}%`}
         )` : sql``}
       ORDER BY pl.payment_date DESC, pl.payment_id DESC

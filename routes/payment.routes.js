@@ -5,6 +5,11 @@ import sql from "../db.js";
 import { encrypt, decrypt } from "../utils/encryption.js";
 import GatewayFactory from "../payment/GatewayFactory.js";
 import { z } from "zod";
+import multer from "multer";
+import { saveFileToVPS } from "../services/fileStorage.service.js";
+import upiQrService from "../services/upiQrService.js";
+
+const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } });
 
 const router = express.Router();
 
@@ -414,6 +419,34 @@ router.get("/payment/gateways", async (req, res) => {
   } catch (e) {
     console.error("Load gateways error:", e);
     return err(res, "Failed to load payment gateways.");
+  }
+});
+
+// GET /api/payment/active-upi-qrs - Fetch active UPI QR configurations for buyers
+router.get("/payment/active-upi-qrs", async (req, res) => {
+  try {
+    const qrs = await upiQrService.getActiveQrConfigs();
+    return ok(res, qrs, "Active UPI QR configurations loaded.");
+  } catch (e) {
+    console.error("Load active UPI QRs error:", e);
+    return err(res, "Failed to load active UPI QR codes.");
+  }
+});
+
+// POST /api/payment/upload-proof - Upload a payment proof screenshot
+router.post("/payment/upload-proof", authUser, upload.single("proof_image"), async (req, res) => {
+  try {
+    if (!req.file) return err(res, "No file uploaded", 400);
+    const saved = await saveFileToVPS(req.file.buffer, {
+      module: "payment_proof",
+      entityId: req.user?.user_id || "buyer",
+      entityType: "PaymentProof",
+      originalName: req.file.originalname
+    });
+    return ok(res, { url: saved.url }, "Payment proof uploaded successfully.");
+  } catch (e) {
+    console.error("Upload proof error:", e);
+    return err(res, e.message || "Failed to upload proof.");
   }
 });
 
@@ -963,6 +996,50 @@ router.post("/admin/payment/settings", authAdmin, async (req, res) => {
   } catch (e) {
     console.error("Update payment settings failed:", e);
     return err(res, e.message || "Failed to update payment settings.");
+  }
+});
+
+// GET /api/admin/payment-gateways/upi-qr - Get all QR configurations (QR1, QR2)
+router.get("/admin/payment-gateways/upi-qr", authAdmin, async (req, res) => {
+  try {
+    const qrs = await upiQrService.getAllQrConfigs();
+    return ok(res, qrs, "UPI QR configurations loaded.");
+  } catch (e) {
+    console.error("Admin load UPI QRs error:", e);
+    return err(res, "Failed to load UPI QR configurations.");
+  }
+});
+
+// POST /api/admin/payment-gateways/upi-qr - Save or update a UPI QR config (supports image upload)
+router.post("/admin/payment-gateways/upi-qr", authAdmin, upload.single("qr_image"), async (req, res) => {
+  try {
+    const { qr_code_key, label, upi_id, is_active, is_primary } = req.body;
+    let qr_image_url = req.body.qr_image_url || null;
+
+    if (req.file) {
+      const saved = await saveFileToVPS(req.file.buffer, {
+        module: "payment_qr",
+        entityId: qr_code_key || "qr1",
+        entityType: "UPI_QR",
+        originalName: req.file.originalname
+      });
+      qr_image_url = saved?.url || qr_image_url;
+    }
+
+    const updated = await upiQrService.saveQrConfig({
+      qr_code_key,
+      label,
+      upi_id,
+      qr_image_url,
+      is_active: is_active === "true" || is_active === true,
+      is_primary: is_primary === "true" || is_primary === true
+    });
+
+    await logGatewayAudit(req.admin.admin_id, `upi_${qr_code_key}`, "UPDATE_UPI_QR", null, updated, req);
+    return ok(res, updated, "UPI QR configuration saved successfully.");
+  } catch (e) {
+    console.error("Save UPI QR error:", e);
+    return err(res, e.message || "Failed to save UPI QR configuration.");
   }
 });
 

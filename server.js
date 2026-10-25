@@ -7490,6 +7490,49 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
       buyer_name: result.buyer?.full_name
     };
 
+    // Capture UPI QR payment details if submitted with initial booking request
+    const payerName = req.body.payer_name || null;
+    const utrNumber = req.body.utr_number || req.body.reference_no || null;
+    const proofUrl = req.body.payment_proof_url || req.body.proof_url || null;
+    const qrCodeKey = req.body.qr_code_key || null;
+
+    if (payerName || utrNumber) {
+      await sql`
+        UPDATE bookings SET 
+          payer_name = COALESCE(${payerName}, payer_name),
+          utr_number = COALESCE(${utrNumber}, utr_number)
+        WHERE booking_id = ${booking.booking_id}
+      `;
+    }
+
+    if (proofUrl) {
+      await sql`
+        INSERT INTO booking_payment_proofs (
+          booking_id, file_path, cloudinary_public_id, payer_name, utr_number, qr_code_key
+        ) VALUES (
+          ${booking.booking_id}, ${proofUrl}, ${null}, ${payerName}, ${utrNumber}, ${qrCodeKey}
+        )
+      `;
+
+      const [pSeq] = await sql`SELECT COALESCE(MAX(payment_id), 0) + 1 AS pid FROM payment_ledger`;
+      const paymentSerial = `PL-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${String(pSeq.pid).padStart(6, '0')}`;
+
+      await sql`
+        INSERT INTO payment_ledger (
+          payment_serial, user_id, booking_id, plot_id, site_id,
+          payment_mode, payment_purpose, gross_amount, payment_date,
+          payment_status, verification_status, utr_number, proof_document_url,
+          payer_name, submitted_by_user_id, submitted_by_role, admin_notes, created_at, updated_at
+        ) VALUES (
+          ${paymentSerial}, ${req.user.user_id}, ${booking.booking_id}, ${plot_id}, ${req.body.site_id || 0},
+          'UPI', 'BookingAdvance', ${Number(advance_amount)}, CURRENT_DATE,
+          'Submitted', 'Pending', ${utrNumber}, ${proofUrl},
+          ${payerName}, ${req.user.user_id}, ${req.user.role || 'Customer'},
+          ${'Initial advance UPI proof submitted with booking'}, NOW(), NOW()
+        )
+      `;
+    }
+
     await safeInsertPlotStatusHistory({
       plot_id,
       old_status: result.plot?.plot_status || 'Vacant',
@@ -7544,9 +7587,16 @@ app.post("/api/bookings/:id/upload-proof",
     try {
       if (!req.file) return err(res, "No file uploaded", 400);
       const [booking] = await sql`
-        SELECT booking_id, plot_id, user_id, booking_serial FROM bookings
-        WHERE booking_id = ${req.params.id} AND user_id = ${req.user.user_id}`;
+        SELECT b.booking_id, b.plot_id, b.user_id, b.booking_serial, b.advance_amount, p.site_id
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        WHERE b.booking_id = ${req.params.id} AND b.user_id = ${req.user.user_id}`;
       if (!booking) return err(res, "Booking not found", 404);
+
+      const payerName = req.body.payer_name || null;
+      const utrNumber = req.body.utr_number || req.body.transaction_reference || req.body.reference_no || null;
+      const qrCodeKey = req.body.qr_code_key || null;
+      const amountPaid = Number(req.body.amount || booking.advance_amount || 0);
 
       // Save to VPS Storage
       const { url } = await saveFileToVPS(
@@ -7555,12 +7605,36 @@ app.post("/api/bookings/:id/upload-proof",
       );
 
       await sql`
-        INSERT INTO booking_payment_proofs (booking_id, file_path, cloudinary_public_id)
-        VALUES (${booking.booking_id}, ${url}, ${null})`;
+        INSERT INTO booking_payment_proofs (
+          booking_id, file_path, cloudinary_public_id, payer_name, utr_number, qr_code_key
+        )
+        VALUES (${booking.booking_id}, ${url}, ${null}, ${payerName}, ${utrNumber}, ${qrCodeKey})`;
 
       await sql`
-        UPDATE bookings SET booking_status = 'PaymentPending', updated_at = NOW()
+        UPDATE bookings SET 
+          booking_status = 'PaymentPending', 
+          payer_name = COALESCE(${payerName}, payer_name),
+          utr_number = COALESCE(${utrNumber}, utr_number),
+          updated_at = NOW()
         WHERE booking_id = ${booking.booking_id}`;
+
+      // Insert entry in payment_ledger for Admin ERP verification queue
+      const [pSeq] = await sql`SELECT COALESCE(MAX(payment_id), 0) + 1 AS pid FROM payment_ledger`;
+      const paymentSerial = `PL-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${String(pSeq.pid).padStart(6, '0')}`;
+
+      await sql`
+        INSERT INTO payment_ledger (
+          payment_serial, user_id, booking_id, plot_id, site_id,
+          payment_mode, payment_purpose, gross_amount, payment_date,
+          payment_status, verification_status, utr_number, proof_document_url,
+          payer_name, submitted_by_user_id, submitted_by_role, admin_notes, created_at, updated_at
+        ) VALUES (
+          ${paymentSerial}, ${booking.user_id}, ${booking.booking_id}, ${booking.plot_id}, ${booking.site_id || 0},
+          'UPI', 'BookingAdvance', ${amountPaid}, CURRENT_DATE,
+          'Submitted', 'Pending', ${utrNumber}, ${url},
+          ${payerName}, ${booking.user_id}, 'Customer', ${'Booking advance UPI proof uploaded by customer'}, NOW(), NOW()
+        )
+      `;
       await addPlotBookingHistory({
         plotId: booking.plot_id,
         bookingId: booking.booking_id,
