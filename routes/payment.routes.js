@@ -433,6 +433,17 @@ router.get("/payment/active-upi-qrs", async (req, res) => {
   }
 });
 
+// GET /api/payment/company-bank-details - Public endpoint for booking popups
+router.get("/payment/company-bank-details", async (req, res) => {
+  try {
+    const details = await upiQrService.getCompanyBankSettings();
+    return ok(res, details, "Company bank details and payment methods loaded.");
+  } catch (e) {
+    console.error("Load company bank details error:", e);
+    return err(res, "Failed to load company bank details.");
+  }
+});
+
 // POST /api/payment/upload-proof - Upload a payment proof screenshot
 router.post("/payment/upload-proof", authUser, upload.single("proof_image"), async (req, res) => {
   try {
@@ -1040,6 +1051,29 @@ router.post("/admin/payment-gateways/upi-qr", authAdmin, upload.single("qr_image
   } catch (e) {
     console.error("Save UPI QR error:", e);
     return err(res, e.message || "Failed to save UPI QR configuration.");
+  }
+});
+
+// GET /api/admin/payment-gateways/company-bank-details - Admin get bank details & method flags
+router.get("/admin/payment-gateways/company-bank-details", authAdmin, async (req, res) => {
+  try {
+    const details = await upiQrService.getCompanyBankSettings();
+    return ok(res, details, "Company bank settings fetched successfully.");
+  } catch (e) {
+    console.error("Admin load bank details error:", e);
+    return err(res, "Failed to load company bank settings.");
+  }
+});
+
+// POST /api/admin/payment-gateways/company-bank-details - Admin save bank details & method flags
+router.post("/admin/payment-gateways/company-bank-details", authAdmin, async (req, res) => {
+  try {
+    const updated = await upiQrService.saveCompanyBankSettings(req.body);
+    await logGatewayAudit(req.admin.admin_id, "company_bank_settings", "UPDATE_BANK_SETTINGS", null, updated, req);
+    return ok(res, updated, "Company bank settings updated successfully.");
+  } catch (e) {
+    console.error("Admin save bank details error:", e);
+    return err(res, e.message || "Failed to update company bank settings.");
   }
 });
 
