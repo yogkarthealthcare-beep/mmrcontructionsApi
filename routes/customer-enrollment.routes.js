@@ -509,6 +509,10 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
 
       // Update user's enrollment_status and sync profile info
       if (user_id) {
+        const genderUpdateSql = cleanUserGenderEnum
+          ? tx`gender = ${cleanUserGenderEnum}::gender_enum,`
+          : tx`gender = gender,`;
+
         await tx`
           UPDATE users SET
             user_type = 'Customer',
@@ -521,10 +525,7 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
               WHEN ${Boolean(b.isFinalSubmitted || b.is_final_submitted)} THEN 'Completed'
               ELSE COALESCE(enrollment_status, 'Pending')
             END,
-            gender = CASE 
-              WHEN ${cleanUserGenderEnum} IS NOT NULL THEN ${cleanUserGenderEnum}::gender_enum 
-              ELSE gender 
-            END,
+            ${genderUpdateSql}
             date_of_birth = COALESCE(${dobVal || null}, date_of_birth),
             pan_number = COALESCE(${b.pan || null}, pan_number),
             aadhar_number = COALESCE(${b.aadhar || null}, aadhar_number),
