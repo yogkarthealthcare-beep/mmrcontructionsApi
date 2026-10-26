@@ -14076,9 +14076,9 @@ app.get("/api/admin/team-members",
                    COALESCE(tm.associate_id, assoc.user_id, 1)::bigint AS associate_id, 
                    COALESCE(NULLIF(TRIM(tm.associate_name), ''), assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
                    tm.slot_number, tm.full_name,
-                   COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+                   COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
                    COALESCE(tm.date_of_birth, u.date_of_birth, aen.dob) AS date_of_birth,
-                   COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+                   COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
                    COALESCE(NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
                    COALESCE(NULLIF(TRIM(tm.pan_no), ''), NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
                    COALESCE(NULLIF(TRIM(tm.mobile_no), ''), u.mobile_no, '') AS mobile_no,
@@ -14087,7 +14087,7 @@ app.get("/api/admin/team-members",
                    COALESCE(NULLIF(TRIM(tm.nominee_name), ''), NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
                    COALESCE(NULLIF(TRIM(tm.nominee_relation), ''), NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
                    COALESCE(NULLIF(TRIM(tm.nominee_age_dob), ''), NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
-                   COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+                   COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
                    COALESCE(NULLIF(TRIM(tm.bank_name), ''), NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
                    COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
                    COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
@@ -14110,17 +14110,17 @@ app.get("/api/admin/team-members",
             LEFT JOIN user_bank_details b ON b.user_id = tm.user_id
             LEFT JOIN user_nominees n ON n.user_id = tm.user_id
             LEFT JOIN LATERAL (
-              SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+              SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                      ae.aadhar_no, ae.pan_no,
-                     COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
-                     ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
-                     an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+                     NULLIF(TRIM(aa.local_address), '') AS perm_address,
+                     ab.bank_name, ab.branch_name, ab.account_no, ab.ifsc_code,
+                     an.nominee_name, an.relationship AS nominee_relation, an.dob AS nominee_dob, NULL::varchar AS nominee_mobile
               FROM associate_enrollment ae
-              LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+              LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
               LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
               LEFT JOIN associate_nominee an ON an.associate_id = ae.id
               WHERE ae.user_id = tm.user_id
-                 OR (tm.mobile_no IS NOT NULL AND (ae.contact_no_1 = tm.mobile_no OR ae.contact_1 = tm.mobile_no))
+                 OR (tm.mobile_no IS NOT NULL AND ae.contact_no_1 = tm.mobile_no)
               ORDER BY (ae.user_id = tm.user_id) DESC, ae.created_at DESC LIMIT 1
             ) aen ON TRUE
 
@@ -14134,9 +14134,9 @@ app.get("/api/admin/team-members",
               COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
               NULL::smallint AS slot_number,
               u.full_name,
-              COALESCE(NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+              COALESCE(NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
               COALESCE(u.date_of_birth, aen.dob) AS date_of_birth,
-              COALESCE(NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+              COALESCE(NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
               COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
               COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
               COALESCE(u.mobile_no, '') AS mobile_no,
@@ -14145,7 +14145,7 @@ app.get("/api/admin/team-members",
               COALESCE(NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
               COALESCE(NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
               COALESCE(NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
-              COALESCE(NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+              COALESCE(NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
               COALESCE(NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
               COALESCE(NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
               COALESCE(NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
@@ -14169,17 +14169,17 @@ app.get("/api/admin/team-members",
             LEFT JOIN user_bank_details b ON b.user_id = u.user_id
             LEFT JOIN user_nominees n ON n.user_id = u.user_id
             LEFT JOIN LATERAL (
-              SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+              SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                      ae.aadhar_no, ae.pan_no,
-                     COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
-                     ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
-                     an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+                     NULLIF(TRIM(aa.local_address), '') AS perm_address,
+                     ab.bank_name, ab.branch_name, ab.account_no, ab.ifsc_code,
+                     an.nominee_name, an.relationship AS nominee_relation, an.dob AS nominee_dob, NULL::varchar AS nominee_mobile
               FROM associate_enrollment ae
-              LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+              LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
               LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
               LEFT JOIN associate_nominee an ON an.associate_id = ae.id
               WHERE ae.user_id = u.user_id
-                 OR (u.mobile_no IS NOT NULL AND (ae.contact_no_1 = u.mobile_no OR ae.contact_1 = u.mobile_no))
+                 OR (u.mobile_no IS NOT NULL AND ae.contact_no_1 = u.mobile_no)
               ORDER BY (ae.user_id = u.user_id) DESC, ae.created_at DESC LIMIT 1
             ) aen ON TRUE
             WHERE (
@@ -14204,7 +14204,7 @@ app.get("/api/admin/team-members",
           LEFT JOIN LATERAL (
             SELECT COUNT(b.booking_id)::int AS plots_sold_count
             FROM bookings b
-            WHERE b.sponsor_user_id = tm.user_id AND b.booking_status::text <> 'Cancelled'
+            WHERE (b.sold_by_user_id = tm.user_id OR b.associate_user_id = tm.user_id) AND b.booking_status::text <> 'Cancelled'
           ) b_stats ON true
           LEFT JOIN LATERAL (
             SELECT COUNT(c.user_id)::int AS customers_count
@@ -14212,24 +14212,24 @@ app.get("/api/admin/team-members",
             WHERE c.sponsor_user_id = tm.user_id AND c.user_type::text = 'Customer'
           ) cust_stats ON true
           LEFT JOIN LATERAL (
-            SELECT COUNT(e.schedule_id)::int AS pending_emi_count,
+            SELECT COUNT(*)::int AS pending_emi_count,
                    COALESCE(SUM(COALESCE(e.total_due, e.emi_amount, 0)), 0)::numeric AS pending_emi_amount
             FROM emi_schedules e
             JOIN bookings b_e ON b_e.booking_id = e.booking_id
-            WHERE b_e.sponsor_user_id = tm.user_id 
+            WHERE (b_e.sold_by_user_id = tm.user_id OR b_e.associate_user_id = tm.user_id) 
               AND e.emi_status::text IN ('Pending', 'Overdue', 'ProofSubmitted')
           ) emi_stats ON true
           LEFT JOIN LATERAL (
-            SELECT COALESCE(SUM(b_m.plot_size_gaj), 0)::numeric AS monthly_sales_gaj
+            SELECT COALESCE(SUM(b_m.plot_area), 0)::numeric AS monthly_sales_gaj
             FROM bookings b_m
-            WHERE b_m.sponsor_user_id = tm.user_id 
+            WHERE (b_m.sold_by_user_id = tm.user_id OR b_m.associate_user_id = tm.user_id) 
               AND b_m.booking_status::text <> 'Cancelled'
               AND TO_CHAR(COALESCE(b_m.created_at, NOW()), 'YYYY-MM') = TO_CHAR(CURRENT_DATE, 'YYYY-MM')
           ) m_sales ON true
           LEFT JOIN LATERAL (
-            SELECT COALESCE(SUM(b_y.plot_size_gaj), 0)::numeric AS yearly_sales_gaj
+            SELECT COALESCE(SUM(b_y.plot_area), 0)::numeric AS yearly_sales_gaj
             FROM bookings b_y
-            WHERE b_y.sponsor_user_id = tm.user_id 
+            WHERE (b_y.sold_by_user_id = tm.user_id OR b_y.associate_user_id = tm.user_id) 
               AND b_y.booking_status::text <> 'Cancelled'
               AND TO_CHAR(COALESCE(b_y.created_at, NOW()), 'YYYY') = TO_CHAR(CURRENT_DATE, 'YYYY')
           ) y_sales ON true
@@ -14261,9 +14261,9 @@ app.get("/api/admin/team-members",
                    COALESCE(tm.associate_id, assoc.user_id, 1)::bigint AS associate_id, 
                    COALESCE(NULLIF(TRIM(tm.associate_name), ''), assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
                    tm.slot_number, tm.full_name,
-                   COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+                   COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
                    COALESCE(tm.date_of_birth, u.date_of_birth, aen.dob) AS date_of_birth,
-                   COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+                   COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
                    COALESCE(NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
                    COALESCE(NULLIF(TRIM(tm.pan_no), ''), NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
                    COALESCE(NULLIF(TRIM(tm.mobile_no), ''), u.mobile_no, '') AS mobile_no,
@@ -14272,7 +14272,7 @@ app.get("/api/admin/team-members",
                    COALESCE(NULLIF(TRIM(tm.nominee_name), ''), NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
                    COALESCE(NULLIF(TRIM(tm.nominee_relation), ''), NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
                    COALESCE(NULLIF(TRIM(tm.nominee_age_dob), ''), NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
-                   COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+                   COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
                    COALESCE(NULLIF(TRIM(tm.bank_name), ''), NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
                    COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
                    COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
@@ -14294,17 +14294,17 @@ app.get("/api/admin/team-members",
             LEFT JOIN user_bank_details b ON b.user_id = tm.user_id
             LEFT JOIN user_nominees n ON n.user_id = tm.user_id
             LEFT JOIN LATERAL (
-              SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+              SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                      ae.aadhar_no, ae.pan_no,
-                     COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
-                     ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
-                     an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+                     NULLIF(TRIM(aa.local_address), '') AS perm_address,
+                     ab.bank_name, ab.branch_name, ab.account_no, ab.ifsc_code,
+                     an.nominee_name, an.relationship AS nominee_relation, an.dob AS nominee_dob, NULL::varchar AS nominee_mobile
               FROM associate_enrollment ae
-              LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+              LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
               LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
               LEFT JOIN associate_nominee an ON an.associate_id = ae.id
               WHERE ae.user_id = tm.user_id
-                 OR (tm.mobile_no IS NOT NULL AND (ae.contact_no_1 = tm.mobile_no OR ae.contact_1 = tm.mobile_no))
+                 OR (tm.mobile_no IS NOT NULL AND ae.contact_no_1 = tm.mobile_no)
               ORDER BY (ae.user_id = tm.user_id) DESC, ae.created_at DESC LIMIT 1
             ) aen ON TRUE
 
@@ -14318,9 +14318,9 @@ app.get("/api/admin/team-members",
               COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
               NULL::smallint AS slot_number,
               u.full_name,
-              COALESCE(NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+              COALESCE(NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
               COALESCE(u.date_of_birth, aen.dob) AS date_of_birth,
-              COALESCE(NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+              COALESCE(NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
               COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
               COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
               COALESCE(u.mobile_no, '') AS mobile_no,
@@ -14329,7 +14329,7 @@ app.get("/api/admin/team-members",
               COALESCE(NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
               COALESCE(NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
               COALESCE(NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
-              COALESCE(NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+              COALESCE(NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
               COALESCE(NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
               COALESCE(NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
               COALESCE(NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
@@ -14352,17 +14352,17 @@ app.get("/api/admin/team-members",
             LEFT JOIN user_bank_details b ON b.user_id = u.user_id
             LEFT JOIN user_nominees n ON n.user_id = u.user_id
             LEFT JOIN LATERAL (
-              SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+              SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                      ae.aadhar_no, ae.pan_no,
-                     COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
-                     ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
-                     an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+                     NULLIF(TRIM(aa.local_address), '') AS perm_address,
+                     ab.bank_name, ab.branch_name, ab.account_no, ab.ifsc_code,
+                     an.nominee_name, an.relationship AS nominee_relation, an.dob AS nominee_dob, NULL::varchar AS nominee_mobile
               FROM associate_enrollment ae
-              LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+              LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
               LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
               LEFT JOIN associate_nominee an ON an.associate_id = ae.id
               WHERE ae.user_id = u.user_id
-                 OR (u.mobile_no IS NOT NULL AND (ae.contact_no_1 = u.mobile_no OR ae.contact_1 = u.mobile_no))
+                 OR (u.mobile_no IS NOT NULL AND ae.contact_no_1 = u.mobile_no)
               ORDER BY (ae.user_id = u.user_id) DESC, ae.created_at DESC LIMIT 1
             ) aen ON TRUE
             WHERE (
@@ -14426,7 +14426,7 @@ app.get("/api/admin/team-members",
           FROM (
             SELECT status FROM team_members
             UNION ALL
-            SELECT CASE WHEN LOWER(COALESCE(account_status, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status
+            SELECT CASE WHEN LOWER(COALESCE(account_status::text, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status
             FROM users u
             WHERE (u.member_id ILIKE 'MMR-TM-%' OR u.member_id ILIKE 'TM-%' OR LOWER(u.user_type::TEXT) = 'teammember' OR LOWER(u.user_type::TEXT) = 'team member')
               AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id OR tm.team_member_uid = u.member_id)
@@ -14469,9 +14469,9 @@ app.get("/api/admin/team-members/:id",
                    COALESCE(tm.associate_id, assoc.user_id, 1)::bigint AS associate_id, 
                    COALESCE(NULLIF(TRIM(tm.associate_name), ''), assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
                    tm.slot_number, tm.full_name,
-                   COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+                   COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
                    COALESCE(tm.date_of_birth, u.date_of_birth, aen.dob) AS date_of_birth,
-                   COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+                   COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
                    COALESCE(NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
                    COALESCE(NULLIF(TRIM(tm.pan_no), ''), NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
                    COALESCE(NULLIF(TRIM(tm.mobile_no), ''), u.mobile_no, '') AS mobile_no,
@@ -14480,7 +14480,7 @@ app.get("/api/admin/team-members/:id",
                    COALESCE(NULLIF(TRIM(tm.nominee_name), ''), NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
                    COALESCE(NULLIF(TRIM(tm.nominee_relation), ''), NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
                    COALESCE(NULLIF(TRIM(tm.nominee_age_dob), ''), NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
-                   COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+                   COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
                    COALESCE(NULLIF(TRIM(tm.bank_name), ''), NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
                    COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
                    COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
@@ -14504,17 +14504,17 @@ app.get("/api/admin/team-members/:id",
             LEFT JOIN user_bank_details b ON b.user_id = tm.user_id
             LEFT JOIN user_nominees n ON n.user_id = tm.user_id
             LEFT JOIN LATERAL (
-              SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+              SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                      ae.aadhar_no, ae.pan_no,
-                     COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
-                     ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
-                     an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+                     NULLIF(TRIM(aa.local_address), '') AS perm_address,
+                     ab.bank_name, ab.branch_name, ab.account_no, ab.ifsc_code,
+                     an.nominee_name, an.relationship AS nominee_relation, an.dob AS nominee_dob, NULL::varchar AS nominee_mobile
               FROM associate_enrollment ae
-              LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+              LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
               LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
               LEFT JOIN associate_nominee an ON an.associate_id = ae.id
               WHERE ae.user_id = tm.user_id
-                 OR (tm.mobile_no IS NOT NULL AND (ae.contact_no_1 = tm.mobile_no OR ae.contact_1 = tm.mobile_no))
+                 OR (tm.mobile_no IS NOT NULL AND ae.contact_no_1 = tm.mobile_no)
               ORDER BY (ae.user_id = tm.user_id) DESC, ae.created_at DESC LIMIT 1
             ) aen ON TRUE
             LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
@@ -14525,9 +14525,9 @@ app.get("/api/admin/team-members/:id",
                    COALESCE(tm.associate_id, assoc.user_id, 1)::bigint AS associate_id, 
                    COALESCE(NULLIF(TRIM(tm.associate_name), ''), assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
                    tm.slot_number, tm.full_name,
-                   COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+                   COALESCE(NULLIF(TRIM(tm.father_husband_name), ''), NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
                    COALESCE(tm.date_of_birth, u.date_of_birth, aen.dob) AS date_of_birth,
-                   COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+                   COALESCE(NULLIF(TRIM(tm.gender), ''), NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
                    COALESCE(NULLIF(TRIM(tm.aadhar_no), ''), NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
                    COALESCE(NULLIF(TRIM(tm.pan_no), ''), NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
                    COALESCE(NULLIF(TRIM(tm.mobile_no), ''), u.mobile_no, '') AS mobile_no,
@@ -14536,7 +14536,7 @@ app.get("/api/admin/team-members/:id",
                    COALESCE(NULLIF(TRIM(tm.nominee_name), ''), NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
                    COALESCE(NULLIF(TRIM(tm.nominee_relation), ''), NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
                    COALESCE(NULLIF(TRIM(tm.nominee_age_dob), ''), NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
-                   COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+                   COALESCE(NULLIF(TRIM(tm.nominee_contact_no), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
                    COALESCE(NULLIF(TRIM(tm.bank_name), ''), NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
                    COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
                    COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
@@ -14560,17 +14560,17 @@ app.get("/api/admin/team-members/:id",
             LEFT JOIN user_bank_details b ON b.user_id = tm.user_id
             LEFT JOIN user_nominees n ON n.user_id = tm.user_id
             LEFT JOIN LATERAL (
-              SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+              SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                      ae.aadhar_no, ae.pan_no,
-                     COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
-                     ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
-                     an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+                     NULLIF(TRIM(aa.local_address), '') AS perm_address,
+                     ab.bank_name, ab.branch_name, ab.account_no, ab.ifsc_code,
+                     an.nominee_name, an.relationship AS nominee_relation, an.dob AS nominee_dob, NULL::varchar AS nominee_mobile
               FROM associate_enrollment ae
-              LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+              LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
               LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
               LEFT JOIN associate_nominee an ON an.associate_id = ae.id
               WHERE ae.user_id = tm.user_id
-                 OR (tm.mobile_no IS NOT NULL AND (ae.contact_no_1 = tm.mobile_no OR ae.contact_1 = tm.mobile_no))
+                 OR (tm.mobile_no IS NOT NULL AND (ae.contact_no_1 = tm.mobile_no OR ae.contact_no_1 = tm.mobile_no))
               ORDER BY (ae.user_id = tm.user_id) DESC, ae.created_at DESC LIMIT 1
             ) aen ON TRUE
             LEFT JOIN associate_sales_tracker t ON t.associate_user_id = tm.user_id
@@ -14587,9 +14587,9 @@ app.get("/api/admin/team-members/:id",
                      COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
                      NULL::smallint AS slot_number,
                      u.full_name,
-                     COALESCE(NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+                     COALESCE(NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
                      COALESCE(u.date_of_birth, aen.dob) AS date_of_birth,
-                     COALESCE(NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+                     COALESCE(NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
                      COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
                      COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
                      COALESCE(u.mobile_no, '') AS mobile_no,
@@ -14598,7 +14598,7 @@ app.get("/api/admin/team-members/:id",
                      COALESCE(NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
                      COALESCE(NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
                      COALESCE(NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
-                     COALESCE(NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+                     COALESCE(NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
                      COALESCE(NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
                      COALESCE(NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
                      COALESCE(NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
@@ -14622,17 +14622,17 @@ app.get("/api/admin/team-members/:id",
               LEFT JOIN user_bank_details b ON b.user_id = u.user_id
               LEFT JOIN user_nominees n ON n.user_id = u.user_id
               LEFT JOIN LATERAL (
-                SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+                SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                        ae.aadhar_no, ae.pan_no,
-                       COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
-                       ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
-                       an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+                       NULLIF(TRIM(aa.local_address), '') AS perm_address,
+                       ab.bank_name, ab.branch_name, ab.account_no, ab.ifsc_code,
+                       an.nominee_name, an.relationship AS nominee_relation, an.dob AS nominee_dob, NULL::varchar AS nominee_mobile
                 FROM associate_enrollment ae
-                LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+                LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
                 LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
                 LEFT JOIN associate_nominee an ON an.associate_id = ae.id
                 WHERE ae.user_id = u.user_id
-                   OR (u.mobile_no IS NOT NULL AND (ae.contact_no_1 = u.mobile_no OR ae.contact_1 = u.mobile_no))
+                   OR (u.mobile_no IS NOT NULL AND (ae.contact_no_1 = u.mobile_no OR ae.contact_no_1 = u.mobile_no))
                 ORDER BY (ae.user_id = u.user_id) DESC, ae.created_at DESC LIMIT 1
               ) aen ON TRUE
               WHERE u.member_id = ${String(id)}
@@ -14645,9 +14645,9 @@ app.get("/api/admin/team-members/:id",
                      COALESCE(assoc.full_name, 'Suraj Kumar Verma') AS associate_name,
                      NULL::smallint AS slot_number,
                      u.full_name,
-                     COALESCE(NULLIF(TRIM(u.father_husband_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
+                     COALESCE(NULLIF(TRIM(u.father_name), ''), NULLIF(TRIM(aen.father_husband_name), ''), '') AS father_husband_name,
                      COALESCE(u.date_of_birth, aen.dob) AS date_of_birth,
-                     COALESCE(NULLIF(TRIM(u.gender), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
+                     COALESCE(NULLIF(TRIM(u.gender::text), ''), NULLIF(TRIM(aen.gender), ''), 'Male') AS gender,
                      COALESCE(NULLIF(TRIM(u.aadhar_number), ''), NULLIF(TRIM(aen.aadhar_no), ''), '') AS aadhar_no,
                      COALESCE(NULLIF(TRIM(u.pan_number), ''), NULLIF(TRIM(aen.pan_no), ''), '') AS pan_no,
                      COALESCE(u.mobile_no, '') AS mobile_no,
@@ -14656,7 +14656,7 @@ app.get("/api/admin/team-members/:id",
                      COALESCE(NULLIF(TRIM(n.nominee_name), ''), NULLIF(TRIM(aen.nominee_name), ''), '') AS nominee_name,
                      COALESCE(NULLIF(TRIM(n.relationship), ''), NULLIF(TRIM(aen.nominee_relation), ''), '') AS nominee_relation,
                      COALESCE(NULLIF(TRIM(aen.nominee_dob::text), ''), '') AS nominee_age_dob,
-                     COALESCE(NULLIF(TRIM(n.contact_number), ''), NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
+                     COALESCE(NULLIF(TRIM(aen.nominee_mobile), ''), '') AS nominee_contact_no,
                      COALESCE(NULLIF(TRIM(b.bank_name), ''), NULLIF(TRIM(aen.bank_name), ''), '') AS bank_name,
                      COALESCE(NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
                      COALESCE(NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
@@ -14680,17 +14680,17 @@ app.get("/api/admin/team-members/:id",
               LEFT JOIN user_bank_details b ON b.user_id = u.user_id
               LEFT JOIN user_nominees n ON n.user_id = u.user_id
               LEFT JOIN LATERAL (
-                SELECT ae.id, ae.full_name, ae.father_husband_name, ae.dob, ae.gender,
+                SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                        ae.aadhar_no, ae.pan_no,
-                       COALESCE(NULLIF(TRIM(aa.address_line_1), ''), NULLIF(TRIM(ae.perm_address), '')) AS perm_address,
-                       ab.bank_name, ab.branch_name, ab.account_number AS account_no, ab.ifsc_code,
-                       an.nominee_name, an.relationship AS nominee_relation, an.date_of_birth AS nominee_dob, an.mobile_number AS nominee_mobile
+                       NULLIF(TRIM(aa.local_address), '') AS perm_address,
+                       ab.bank_name, ab.branch_name, ab.account_no, ab.ifsc_code,
+                       an.nominee_name, an.relationship AS nominee_relation, an.dob AS nominee_dob, NULL::varchar AS nominee_mobile
                 FROM associate_enrollment ae
-                LEFT JOIN associate_address aa ON aa.associate_id = ae.id
+                LEFT JOIN associate_address aa ON aa.associate_id = ae.id AND aa.address_type = 'permanent'
                 LEFT JOIN associate_bank_details ab ON ab.associate_id = ae.id
                 LEFT JOIN associate_nominee an ON an.associate_id = ae.id
                 WHERE ae.user_id = u.user_id
-                   OR (u.mobile_no IS NOT NULL AND (ae.contact_no_1 = u.mobile_no OR ae.contact_1 = u.mobile_no))
+                   OR (u.mobile_no IS NOT NULL AND (ae.contact_no_1 = u.mobile_no OR ae.contact_no_1 = u.mobile_no))
                 ORDER BY (ae.user_id = u.user_id) DESC, ae.created_at DESC LIMIT 1
               ) aen ON TRUE
               WHERE u.user_id = ${numId} OR u.member_id = ${String(id)}
