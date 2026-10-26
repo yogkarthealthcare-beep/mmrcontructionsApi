@@ -1544,7 +1544,7 @@ router.post("/admin/bookings/:id/move-plot", adminAuth, async (req, res) => {
         JOIN users u ON u.user_id = b.user_id
         LEFT JOIN sites s ON s.site_id = b.site_id
         WHERE b.booking_id = ${bookingId}
-        FOR UPDATE`;
+        FOR UPDATE OF b`;
       if (!booking) throw Object.assign(new Error("Booking not found."), { status: 404 });
 
       const oldPlotId = booking.plot_id;
@@ -1656,7 +1656,7 @@ router.post("/admin/bookings/:id/cancel-refund-due", adminAuth, async (req, res)
         LEFT JOIN plots p ON p.plot_id = b.plot_id
         LEFT JOIN sites s ON s.site_id = p.site_id
         WHERE b.booking_id = ${bookingId}
-        FOR UPDATE`;
+        FOR UPDATE OF b`;
       if (!booking) throw Object.assign(new Error("Booking not found."), { status: 404 });
 
       await db`

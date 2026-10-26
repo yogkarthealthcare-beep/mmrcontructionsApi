@@ -438,7 +438,14 @@ async function executePlotOrdersQuery(req, res, scopeFilter = sql`TRUE`, extraMe
         inv.invoice_id,
         inv.invoice_number,
         inv.payment_status AS invoice_payment_status,
-        inv.paid_amount AS invoice_paid_amount
+        inv.paid_amount AS invoice_paid_amount,
+
+        -- Payment Proof details (Task 6: booking_payment_proofs only)
+        proof.proof_url,
+        COALESCE(proof.proof_payer, b.payer_name, buyer.full_name, '') AS proof_payer,
+        COALESCE(proof.proof_utr, b.utr_number, '') AS proof_utr,
+        COALESCE(b.advance_amount, 0) AS proof_amount,
+        COALESCE(b.payment_method, b.payment_type, 'UPI') AS proof_mode
 
       FROM bookings b
       LEFT JOIN plots p ON p.plot_id = b.plot_id
@@ -455,6 +462,13 @@ async function executePlotOrdersQuery(req, res, scopeFilter = sql`TRUE`, extraMe
         ORDER BY invoice_id DESC
         LIMIT 1
       ) inv ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT file_path AS proof_url, payer_name AS proof_payer, utr_number AS proof_utr
+        FROM booking_payment_proofs
+        WHERE booking_id = b.booking_id
+        ORDER BY id DESC
+        LIMIT 1
+      ) proof ON TRUE
       WHERE ${scopeFilter}
         AND ${searchFilter}
         AND ${statusFilter}
@@ -748,11 +762,14 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
         `.catch(() => {});
       }
 
-      // 3. Ensure Invoice exists
-      try {
-        await createOrGetInvoice(bookingId);
-      } catch (invErr) {
-        console.error('[AdminPlotOrders] Invoice creation warning:', invErr.message);
+      // 3. Task 7: Ensure EMI schedules exist for EMI orders (No invoices at approval)
+      if (booking.payment_type === 'EMI') {
+        try {
+          const { ensureEmiSchedulesForBooking } = await import('../services/emi.service.js');
+          await ensureEmiSchedulesForBooking(sql, booking);
+        } catch (emiErr) {
+          console.error('[AdminPlotOrders] EMI schedule generation notice:', emiErr.message);
+        }
       }
 
       // 4. Commission check:

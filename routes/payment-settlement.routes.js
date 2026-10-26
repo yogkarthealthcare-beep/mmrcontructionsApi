@@ -631,7 +631,7 @@ router.post(
           LEFT JOIN sites s ON s.site_id = p.site_id
           LEFT JOIN users buyer ON buyer.user_id = b.user_id
           WHERE b.booking_id = ${bookingId}
-          FOR UPDATE
+          FOR UPDATE OF b
         `;
 
         if (!booking) {

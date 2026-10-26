@@ -8221,12 +8221,25 @@ app.post("/api/emi/:emiId/upload-proof",
       const emiId = Number(req.params.emiId);
       const userId = req.user.user_id;
 
-      const [emi] = await sql`
-        SELECT e.*, b.plot_id, b.site_id, b.plot_number
+      const [initialEmi] = await sql`
+        SELECT e.*, b.plot_id, b.site_id, b.plot_number, b.booking_id
         FROM emi_schedules e
         JOIN bookings b ON e.booking_id = b.booking_id
         WHERE e.emi_id = ${emiId} AND b.user_id = ${userId}`;
-      if (!emi) return err(res, "EMI not found", 404);
+      if (!initialEmi) return err(res, "EMI not found", 404);
+
+      // Task 4: Target the oldest unpaid installment without a pending proof for this booking
+      const [oldestUnpaid] = await sql`
+        SELECT e.*, b.plot_id, b.site_id, b.plot_number, b.booking_id
+        FROM emi_schedules e
+        JOIN bookings b ON e.booking_id = b.booking_id
+        WHERE e.booking_id = ${initialEmi.booking_id}
+          AND e.emi_status NOT IN ('Paid', 'ProofSubmitted')
+        ORDER BY e.installment_no ASC
+        LIMIT 1
+      `.catch(() => []);
+
+      const emi = oldestUnpaid || initialEmi;
 
       const emiAmount = Number(amount || emi.emi_amount || 0);
 
@@ -8265,7 +8278,12 @@ app.post("/api/emi/:emiId/upload-proof",
         )
       `;
 
-      return ok(res, { url, emi_status: 'ProofSubmitted' }, "EMI payment proof submitted successfully. Under verification by MMR Accounts.");
+      return ok(res, { 
+        url, 
+        emi_status: 'ProofSubmitted',
+        installment_no: emi.installment_no,
+        emi_id: emi.emi_id
+      }, `EMI payment proof submitted successfully for Installment #${emi.installment_no}. Under verification by MMR Accounts.`);
     } catch (e) {
       return err(res, e.message);
     }
@@ -11039,6 +11057,7 @@ async function ensurePlotAllocationSchema() {
         END IF;
       END $$;
     `).catch(() => {});
+    await sql.unsafe(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(14,2) DEFAULT NULL; ALTER TABLE bookings ADD COLUMN IF NOT EXISTS area_unit VARCHAR(50) DEFAULT NULL;`).catch(() => {});
     await sql`ALTER TABLE notification_log ALTER COLUMN channel TYPE VARCHAR(60) USING channel::text`.catch(() => {});
     await sql`ALTER TYPE booking_status_enum ADD VALUE IF NOT EXISTS 'Allocated'`.catch(() => {});
     await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'Full'`.catch(() => {});
