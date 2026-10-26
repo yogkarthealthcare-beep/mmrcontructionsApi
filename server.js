@@ -7231,7 +7231,7 @@ app.get("/api/bookings", verifyUserToken, async (req, res) => {
              COALESCE(b.base_price, p.base_price, 0)::numeric AS total_price,
              COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
              COALESCE(b.plot_area, p.plot_area, 0)::numeric AS plot_area,
-             COALESCE(b.area_unit, p.area_unit, 'Gaj') AS area_unit,
+             COALESCE(b.area_unit, 'Gaj') AS area_unit,
              COALESCE(p.plot_category::text, 'Residential') AS plot_category,
              COALESCE(s.site_name, s2.site_name, 'MMR Green Valley') AS site_name,
              COALESCE(s.city, s2.city, 'Lucknow') AS city,
@@ -11057,7 +11057,7 @@ async function ensurePlotAllocationSchema() {
         END IF;
       END $$;
     `).catch(() => {});
-    await sql.unsafe(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(14,2) DEFAULT NULL; ALTER TABLE bookings ADD COLUMN IF NOT EXISTS area_unit VARCHAR(50) DEFAULT NULL;`).catch(() => {});
+    await sql.unsafe(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(14,2) DEFAULT NULL; ALTER TABLE bookings ADD COLUMN IF NOT EXISTS area_unit VARCHAR(50) DEFAULT NULL; ALTER TABLE plots ADD COLUMN IF NOT EXISTS area_unit VARCHAR(50) DEFAULT 'Gaj';`).catch(() => {});
     await sql`ALTER TABLE notification_log ALTER COLUMN channel TYPE VARCHAR(60) USING channel::text`.catch(() => {});
     await sql`ALTER TYPE booking_status_enum ADD VALUE IF NOT EXISTS 'Allocated'`.catch(() => {});
     await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'Full'`.catch(() => {});
