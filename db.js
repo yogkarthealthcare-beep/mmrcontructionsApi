@@ -48,6 +48,9 @@ const sql = postgres(getDatabaseUrl(), {
   idle_timeout: 30,
   connect_timeout: 10,
   ssl: resolveSsl(getDatabaseUrl()),
+  transform: {
+    undefined: null,
+  },
   onnotice: () => {},
 });
 

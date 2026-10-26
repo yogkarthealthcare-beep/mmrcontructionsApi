@@ -712,6 +712,9 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
     const isReject = (status === 'Rejected');
     const effectiveStatus = isApprove ? 'Confirmed' : (isReject ? 'Rejected' : status);
 
+    const cleanRemarks = remarks ? String(remarks).trim() : (reason ? String(reason).trim() : '');
+    const cleanReason = reason ? String(reason).trim() : (remarks ? String(remarks).trim() : '');
+
     let updatedOrder = null;
 
     if (isApprove) {
@@ -723,7 +726,7 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
           associate_approval_status = 'Approved',
           confirmed_at = COALESCE(confirmed_at, NOW()),
           notes = CASE
-            WHEN ${remarks || reason || ''} != '' THEN CONCAT(COALESCE(notes, ''), ' | Admin Note: ', ${remarks || reason})
+            WHEN ${cleanRemarks} != '' THEN CONCAT(COALESCE(notes, ''), ' | Admin Note: ', ${cleanRemarks})
             ELSE notes
           END
         WHERE booking_id = ${bookingId}
@@ -741,7 +744,7 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
         // Log plot status history
         await sql`
           INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
-          VALUES (${booking.plot_id}, ${booking.plot_status || 'Vacant'}, 'Sold', ${adminId}, ${adminName}, ${remarks || 'Approved by Admin in Plot Orders'})
+          VALUES (${booking.plot_id}, ${booking.plot_status || 'Vacant'}, 'Sold', ${adminId}, ${adminName}, ${cleanRemarks || 'Approved by Admin in Plot Orders'})
         `.catch(() => {});
       }
 
@@ -783,9 +786,9 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
         SET
           booking_status = 'Rejected',
           associate_approval_status = 'Rejected',
-          associate_rejection_reason = ${reason || remarks || 'Rejected by Admin'},
+          associate_rejection_reason = ${cleanReason || 'Rejected by Admin'},
           notes = CASE
-            WHEN ${reason || remarks || ''} != '' THEN CONCAT(COALESCE(notes, ''), ' | Rejection Reason: ', ${reason || remarks})
+            WHEN ${cleanReason} != '' THEN CONCAT(COALESCE(notes, ''), ' | Rejection Reason: ', ${cleanReason})
             ELSE notes
           END
         WHERE booking_id = ${bookingId}
@@ -809,7 +812,7 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
 
         await sql`
           INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
-          VALUES (${booking.plot_id}, ${booking.plot_status || 'InProcess'}, 'Vacant', ${adminId}, ${adminName}, ${reason || 'Rejected by Admin in Plot Orders'})
+          VALUES (${booking.plot_id}, ${booking.plot_status || 'InProcess'}, 'Vacant', ${adminId}, ${adminName}, ${cleanReason || 'Rejected by Admin in Plot Orders'})
         `.catch(() => {});
       }
     } else if (status === 'Submitted' || status === 'Choose') {
@@ -820,7 +823,7 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
           associate_approval_status = 'Pending',
           confirmed_at = NULL,
           notes = CASE
-            WHEN ${remarks || reason || ''} != '' THEN CONCAT(COALESCE(notes, ''), ' | Status Reset: ', ${remarks || reason})
+            WHEN ${cleanRemarks} != '' THEN CONCAT(COALESCE(notes, ''), ' | Status Reset: ', ${cleanRemarks})
             ELSE notes
           END
         WHERE booking_id = ${bookingId}
@@ -841,7 +844,7 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
         SET
           booking_status = ${effectiveStatus},
           notes = CASE
-            WHEN ${remarks || ''} != '' THEN CONCAT(COALESCE(notes, ''), ' | Status Update: ', ${remarks})
+            WHEN ${cleanRemarks} != '' THEN CONCAT(COALESCE(notes, ''), ' | Status Update: ', ${cleanRemarks})
             ELSE notes
           END
         WHERE booking_id = ${bookingId}
