@@ -731,6 +731,10 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
     let updatedOrder = null;
 
     if (isApprove) {
+      const notesApprove = cleanRemarks
+        ? sql`CONCAT(COALESCE(notes, ''), ' | Admin Note: ', ${cleanRemarks}::text)`
+        : sql`notes`;
+
       // 1. Mark booking confirmed and associate approval approved
       [updatedOrder] = await sql`
         UPDATE bookings
@@ -738,10 +742,7 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
           booking_status = 'Confirmed',
           associate_approval_status = 'Approved',
           confirmed_at = COALESCE(confirmed_at, NOW()),
-          notes = CASE
-            WHEN ${cleanRemarks} != '' THEN CONCAT(COALESCE(notes, ''), ' | Admin Note: ', ${cleanRemarks})
-            ELSE notes
-          END
+          notes = ${notesApprove}
         WHERE booking_id = ${bookingId}
         RETURNING *
       `;
@@ -757,7 +758,7 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
         // Log plot status history
         await sql`
           INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
-          VALUES (${booking.plot_id}, ${booking.plot_status || 'Vacant'}, 'Sold', ${adminId}, ${adminName}, ${cleanRemarks || 'Approved by Admin in Plot Orders'})
+          VALUES (${booking.plot_id}, ${booking.plot_status || 'Vacant'}, 'Sold', ${adminId}, ${adminName}, ${cleanRemarks || 'Approved by Admin in Plot Orders'}::text)
         `.catch(() => {});
       }
 
@@ -796,17 +797,18 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
       }
 
     } else if (isReject) {
+      const notesReject = cleanReason
+        ? sql`CONCAT(COALESCE(notes, ''), ' | Rejection Reason: ', ${cleanReason}::text)`
+        : sql`notes`;
+
       // 1. Mark booking rejected
       [updatedOrder] = await sql`
         UPDATE bookings
         SET
           booking_status = 'Rejected',
           associate_approval_status = 'Rejected',
-          associate_rejection_reason = ${cleanReason || 'Rejected by Admin'},
-          notes = CASE
-            WHEN ${cleanReason} != '' THEN CONCAT(COALESCE(notes, ''), ' | Rejection Reason: ', ${cleanReason})
-            ELSE notes
-          END
+          associate_rejection_reason = ${cleanReason || 'Rejected by Admin'}::text,
+          notes = ${notesReject}
         WHERE booking_id = ${bookingId}
         RETURNING *
       `;
@@ -828,20 +830,21 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
 
         await sql`
           INSERT INTO plot_status_history (plot_id, old_status, new_status, changed_by_user_id, admin_name, remarks)
-          VALUES (${booking.plot_id}, ${booking.plot_status || 'InProcess'}, 'Vacant', ${adminId}, ${adminName}, ${cleanReason || 'Rejected by Admin in Plot Orders'})
+          VALUES (${booking.plot_id}, ${booking.plot_status || 'InProcess'}, 'Vacant', ${adminId}, ${adminName}, ${cleanReason || 'Rejected by Admin in Plot Orders'}::text)
         `.catch(() => {});
       }
     } else if (status === 'Submitted' || status === 'Choose') {
+      const notesReset = cleanRemarks
+        ? sql`CONCAT(COALESCE(notes, ''), ' | Status Reset: ', ${cleanRemarks}::text)`
+        : sql`notes`;
+
       [updatedOrder] = await sql`
         UPDATE bookings
         SET
           booking_status = 'Submitted',
           associate_approval_status = 'Pending',
           confirmed_at = NULL,
-          notes = CASE
-            WHEN ${cleanRemarks} != '' THEN CONCAT(COALESCE(notes, ''), ' | Status Reset: ', ${cleanRemarks})
-            ELSE notes
-          END
+          notes = ${notesReset}
         WHERE booking_id = ${bookingId}
         RETURNING *
       `;
@@ -854,15 +857,16 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
         `.catch(() => {});
       }
     } else {
+      const notesDirect = cleanRemarks
+        ? sql`CONCAT(COALESCE(notes, ''), ' | Status Update: ', ${cleanRemarks}::text)`
+        : sql`notes`;
+
       // Direct status update (Pending / Under Process)
       [updatedOrder] = await sql`
         UPDATE bookings
         SET
           booking_status = ${effectiveStatus},
-          notes = CASE
-            WHEN ${cleanRemarks} != '' THEN CONCAT(COALESCE(notes, ''), ' | Status Update: ', ${cleanRemarks})
-            ELSE notes
-          END
+          notes = ${notesDirect}
         WHERE booking_id = ${bookingId}
         RETURNING *
       `;
