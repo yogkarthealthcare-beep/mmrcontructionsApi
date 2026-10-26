@@ -466,7 +466,6 @@ async function executePlotOrdersQuery(req, res, scopeFilter = sql`TRUE`, extraMe
         SELECT file_path AS proof_url, payer_name AS proof_payer, utr_number AS proof_utr
         FROM booking_payment_proofs
         WHERE booking_id = b.booking_id
-        ORDER BY id DESC
         LIMIT 1
       ) proof ON TRUE
       WHERE ${scopeFilter}
