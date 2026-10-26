@@ -4637,6 +4637,7 @@ app.post("/api/auth/register-quick", async (req, res) => {
       } else {
         const memberId = await genMemberID(user_type);
 
+        const userAccountStatus = user_type === "Customer" ? "Active" : "Pending";
         const [createdUser] = await sql`
           INSERT INTO users (
             member_id, user_type, full_name, mobile_no, email, password_hash,
@@ -4646,7 +4647,7 @@ app.post("/api/auth/register-quick", async (req, res) => {
             referred_by_user_id, referred_by_source, referred_by_set_at
           ) VALUES (
             ${memberId}, ${user_type}, ${full_name.trim()}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
-            ${sponsorUserId}, 'Active', true, true,
+            ${sponsorUserId}, ${userAccountStatus}, true, true,
             '0', false,
             NOW(), NOW(),
             ${referredByUserId}, ${referredBySource}, ${referredBySetAt}
@@ -4672,10 +4673,10 @@ app.post("/api/auth/register-quick", async (req, res) => {
             await sql`
               INSERT INTO team_members (
                 team_member_uid, associate_id, associate_name, user_id, slot_number,
-                full_name, mobile_no, email_id, status, created_at, updated_at
+                full_name, mobile_no, email_id, status, is_final_submitted, created_at, updated_at
               ) VALUES (
                 ${createdUser.member_id}, ${sponsorUserId}, ${assocName}, ${createdUser.user_id}, ${assignedSlot},
-                ${createdUser.full_name}, ${cleanMobile}, ${cleanEmail}, 'approved', NOW(), NOW()
+                ${createdUser.full_name}, ${cleanMobile}, ${cleanEmail}, 'pending', FALSE, NOW(), NOW()
               )
               ON CONFLICT (team_member_uid) DO UPDATE
               SET user_id = EXCLUDED.user_id, status = EXCLUDED.status, updated_at = NOW()
@@ -4877,10 +4878,10 @@ app.post("/api/auth/verify-email-otp", async (req, res) => {
         await sql`
           INSERT INTO team_members (
             team_member_uid, associate_id, associate_name, user_id, slot_number,
-            full_name, mobile_no, email_id, status, created_at, updated_at
+            full_name, mobile_no, email_id, status, is_final_submitted, created_at, updated_at
           ) VALUES (
             ${createdUser.member_id}, ${pending.sponsor_user_id}, ${assocName}, ${createdUser.user_id}, ${assignedSlot},
-            ${createdUser.full_name}, ${pending.mobile_no}, ${pending.email}, 'approved', NOW(), NOW()
+            ${createdUser.full_name}, ${pending.mobile_no}, ${pending.email}, 'pending', FALSE, NOW(), NOW()
           )
           ON CONFLICT (team_member_uid) DO UPDATE
           SET user_id = EXCLUDED.user_id, status = EXCLUDED.status, updated_at = NOW()

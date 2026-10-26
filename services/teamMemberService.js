@@ -13,7 +13,7 @@ let tableInitialized = false;
  * To enable, set ENFORCE_TM_FINAL_SUBMIT=true in environment.
  */
 export const isEnforceTmFinalSubmitEnabled = () => {
-    return process.env.ENFORCE_TM_FINAL_SUBMIT === "true" || process.env.ENFORCE_TM_FINAL_SUBMIT === "1";
+    return process.env.ENFORCE_TM_FINAL_SUBMIT !== "false" && process.env.ENFORCE_TM_FINAL_SUBMIT !== "0";
 };
 export async function ensureTeamMembersTable() {
     if (tableInitialized)
@@ -1396,7 +1396,7 @@ export async function registerTeamMemberQuick(associateId, data) {
         registered_at, updated_at
       ) VALUES (
         ${uid}, 'Team Member', ${cleanName}, ${cleanMobile}, ${cleanEmail}, ${passwordHash},
-        ${associateId}, 'Active', true, true, true,
+        ${associateId}, 'Pending', true, true, true,
         NOW(), NOW()
       )
       RETURNING user_id, member_id, user_type, full_name, email, mobile_no, account_status, registered_at
@@ -1405,10 +1405,10 @@ export async function registerTeamMemberQuick(associateId, data) {
         const [insertedMember] = await tx `
       INSERT INTO team_members (
         team_member_uid, associate_id, associate_name, user_id, slot_number,
-        full_name, mobile_no, email_id, status, created_at, updated_at
+        full_name, mobile_no, email_id, status, is_final_submitted, created_at, updated_at
       ) VALUES (
         ${uid}, ${associateId}, ${assocUser.full_name}, ${createdUser.user_id}, ${assignedSlot},
-        ${cleanName}, ${cleanMobile}, ${cleanEmail}, 'approved', NOW(), NOW()
+        ${cleanName}, ${cleanMobile}, ${cleanEmail}, 'pending', FALSE, NOW(), NOW()
       )
       RETURNING id, team_member_uid, associate_id, associate_name, user_id, slot_number, full_name, mobile_no, email_id, status, created_at
     `;
