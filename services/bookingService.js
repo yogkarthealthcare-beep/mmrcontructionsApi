@@ -84,6 +84,8 @@ export async function ensureBookingTableSchema(db = sql) {
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_approved_at TIMESTAMPTZ;
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_admin_counter NUMERIC(14,2);
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_rejection_reason TEXT;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(14,2) DEFAULT NULL;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS area_unit VARCHAR(50) DEFAULT NULL;
 
       CREATE TABLE IF NOT EXISTS plot_price_history (
         id SERIAL PRIMARY KEY,
@@ -240,7 +242,11 @@ export async function createBooking({
   custom_plot_price = null,
   plotPrice: incomingPlotPrice = null,
   plot_price = null,
-  base_price = null
+  base_price = null,
+  plotArea = null,
+  plot_area = null,
+  areaUnit = null,
+  area_unit = null
 }) {
   const runner = customDb || sql;
   await ensureBookingTableSchema(runner);
@@ -697,7 +703,8 @@ export async function createBooking({
         associate_approval_status, associate_approved_by, associate_approved_at,
         required_booking_amount, remaining_balance, base_price, booking_date, created_at, updated_at,
         installment_plan_id, plan_snapshot, part_wise_deadline_at,
-        list_price, price_overridden, price_set_by_user_id, requested_price, price_approval_status
+        list_price, price_overridden, price_set_by_user_id, requested_price, price_approval_status,
+        plot_area, area_unit
       ) VALUES (
         ${serialNumber}, ${derivedBuyerUserId}, ${normalizedPlotId}, ${siteId || plot.site_id},
         ${normPaymentType}, ${initialAdvance}, ${initialBookingStatus}, ${initWorkflow},
@@ -708,7 +715,9 @@ export async function createBooking({
         ${autoApproved ? new Date() : null},
         ${requiredBookingAmount || initialAdvance}, ${remainingBalance}, ${finalStoredBasePrice}, CURRENT_DATE, NOW(), NOW(),
         ${selectedPlan ? selectedPlan.id : null}, ${planSnapshot ? tx.json(planSnapshot) : null}, ${partWiseDeadlineAt},
-        ${listPrice > 0 ? listPrice : null}, ${priceOverridden}, ${priceSetByUserId}, ${requestedPrice}, ${priceApprovalStatus}
+        ${listPrice > 0 ? listPrice : null}, ${priceOverridden}, ${priceSetByUserId}, ${requestedPrice}, ${priceApprovalStatus},
+        ${plotArea || plot_area ? Number(plotArea || plot_area) : (plot?.plot_area ? Number(plot.plot_area) : null)},
+        ${areaUnit || area_unit ? String(areaUnit || area_unit) : (plot?.area_unit ? String(plot.area_unit) : 'Gaj')}
       )
       RETURNING *
     `;

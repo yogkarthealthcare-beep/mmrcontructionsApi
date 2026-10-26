@@ -7231,6 +7231,7 @@ app.get("/api/bookings", verifyUserToken, async (req, res) => {
              COALESCE(b.base_price, p.base_price, 0)::numeric AS total_price,
              COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
              COALESCE(b.plot_area, p.plot_area, 0)::numeric AS plot_area,
+             COALESCE(b.area_unit, p.area_unit, 'Gaj') AS area_unit,
              COALESCE(p.plot_category::text, 'Residential') AS plot_category,
              COALESCE(s.site_name, s2.site_name, 'MMR Green Valley') AS site_name,
              COALESCE(s.city, s2.city, 'Lucknow') AS city,
@@ -7478,7 +7479,9 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
       advanceAmount: advance_amount,
       paymentMethod: req.body.payment_method || "Online",
       notes: notes || "Booking submitted by user",
-      customPlotPrice: req.body.custom_plot_price || req.body.plot_price || req.body.base_price || req.body.customPlotPrice
+      customPlotPrice: req.body.custom_plot_price || req.body.plot_price || req.body.base_price || req.body.customPlotPrice,
+      plotArea: req.body.plot_area || req.body.plotArea,
+      areaUnit: req.body.area_unit || req.body.areaUnit
     });
 
     const booking = {
