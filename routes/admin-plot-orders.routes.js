@@ -25,7 +25,7 @@ function err(res, message = 'Error', code = 400) {
   return res.status(code).json({ success: false, message });
 }
 
-// Automatically ensure sequence and default on invoices.invoice_id in DB if missing
+// Automatically ensure sequence and default on invoices.invoice_id in DB if missing, and ensure sponsor_id on users
 (async () => {
   try {
     await sql`
@@ -41,12 +41,25 @@ function err(res, message = 'Error', code = 400) {
             ALTER TABLE invoices ALTER COLUMN invoice_id SET DEFAULT nextval('invoices_invoice_id_seq');
           END IF;
         END IF;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'users' AND column_name = 'sponsor_id'
+        ) THEN
+          ALTER TABLE users ADD COLUMN sponsor_id INTEGER;
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns 
+            WHERE table_name = 'users' AND column_name = 'sponsor_user_id'
+          ) THEN
+            UPDATE users SET sponsor_id = sponsor_user_id WHERE sponsor_id IS NULL AND sponsor_user_id IS NOT NULL;
+          END IF;
+        END IF;
       EXCEPTION WHEN OTHERS THEN
         NULL;
       END $$;
     `;
   } catch (schemaErr) {
-    console.warn('[AdminPlotOrders] invoice_id sequence auto-setup notice:', schemaErr.message);
+    console.warn('[AdminPlotOrders] schema auto-setup notice:', schemaErr.message);
   }
 })();
 
@@ -195,7 +208,7 @@ async function resolvePlotOrderScope(req) {
   }
 
   const [caller] = await sql`
-    SELECT user_id, user_type, member_id, sponsor_id, referred_by_user_id, account_status
+    SELECT user_id, user_type, member_id, referred_by_user_id, account_status
     FROM users
     WHERE user_id = ${userId}
     LIMIT 1
@@ -248,7 +261,7 @@ async function resolvePlotOrderScope(req) {
       )
       OR b.sold_by_user_id IN (
         SELECT u2.user_id FROM users u2 
-        WHERE (u2.sponsor_id = ${userId} OR u2.referred_by_user_id = ${userId})
+        WHERE (u2.sponsor_user_id = ${userId} OR u2.referred_by_user_id = ${userId})
           AND u2.user_id IS NOT NULL
       )
       OR b.booked_by_user_id IN (
@@ -257,12 +270,12 @@ async function resolvePlotOrderScope(req) {
       )
       OR b.booked_by_user_id IN (
         SELECT u3.user_id FROM users u3 
-        WHERE (u3.sponsor_id = ${userId} OR u3.referred_by_user_id = ${userId})
+        WHERE (u3.sponsor_user_id = ${userId} OR u3.referred_by_user_id = ${userId})
           AND u3.user_id IS NOT NULL
       )
       OR b.user_id IN (
         SELECT u4.user_id FROM users u4 
-        WHERE (u4.sponsor_id = ${userId} OR u4.referred_by_user_id = ${userId})
+        WHERE (u4.sponsor_user_id = ${userId} OR u4.referred_by_user_id = ${userId})
           AND u4.user_id IS NOT NULL
       )
     )`;

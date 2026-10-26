@@ -17066,6 +17066,8 @@ if (shouldStartServer) {
           try {
             await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE`.catch(() => {});
             await sql`ALTER TABLE users ALTER COLUMN is_verified SET DEFAULT FALSE`.catch(() => {});
+            await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS sponsor_id INTEGER`.catch(() => {});
+            await sql`UPDATE users SET sponsor_id = sponsor_user_id WHERE sponsor_id IS NULL AND sponsor_user_id IS NOT NULL`.catch(() => {});
             // 1. Reset unverified associates (who do NOT have an approved enrollment in associate_enrollment)
             await sql`
               UPDATE users
