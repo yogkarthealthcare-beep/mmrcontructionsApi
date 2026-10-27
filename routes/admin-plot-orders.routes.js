@@ -54,6 +54,18 @@ function err(res, message = 'Error', code = 400) {
             UPDATE users SET sponsor_id = sponsor_user_id WHERE sponsor_id IS NULL AND sponsor_user_id IS NOT NULL;
           END IF;
         END IF;
+
+        -- Auto-heal zero-price bookings and invoices
+        UPDATE bookings 
+        SET base_price = COALESCE(NULLIF(requested_price, 0), NULLIF(remaining_balance + advance_amount, 0), 2000000)
+        WHERE (base_price = 0 OR base_price IS NULL) AND (requested_price > 0 OR (remaining_balance + advance_amount) > 0);
+
+        UPDATE invoices i
+        SET total_amount = b.base_price,
+            subtotal = b.base_price,
+            remaining_balance = GREATEST(0, b.base_price - COALESCE(i.paid_amount, b.advance_amount, 0))
+        FROM bookings b
+        WHERE i.booking_id = b.booking_id AND (i.total_amount = 0 OR i.total_amount IS NULL) AND b.base_price > 0;
       EXCEPTION WHEN OTHERS THEN
         NULL;
       END $$;
@@ -83,17 +95,34 @@ async function createOrGetInvoice(bookingId) {
 
   if (!booking) throw new Error('Booking order not found');
 
-  // Check if invoice already exists
-  let [existingInv] = await sql`
-    SELECT * FROM invoices WHERE booking_id = ${bookingId} LIMIT 1
-  `.catch(() => []);
+  const saleVal = Number(
+    (booking.base_price > 0 ? booking.base_price : null) || 
+    (booking.requested_price > 0 ? booking.requested_price : null) ||
+    (booking.sold_price > 0 ? booking.sold_price : null) || 
+    (booking.plot_base_price > 0 ? booking.plot_base_price : null) || 
+    (Number(booking.advance_amount || 0) + Number(booking.remaining_balance || 0) > 0 ? Number(booking.advance_amount || 0) + Number(booking.remaining_balance || 0) : null) || 
+    0
+  );
 
   if (existingInv) {
+    if (Number(existingInv.total_amount || 0) <= 0 && saleVal > 0) {
+      const advVal = Number(booking.advance_amount || 0);
+      const remBal = Math.max(0, saleVal - advVal);
+      const paymentStatus = advVal >= saleVal ? 'Paid' : (advVal > 0 ? 'Partially Paid' : 'Unpaid');
+      await sql`
+        UPDATE invoices 
+        SET total_amount = ${saleVal}, subtotal = ${saleVal}, remaining_balance = ${remBal}, payment_status = ${paymentStatus}, updated_at = NOW()
+        WHERE invoice_id = ${existingInv.invoice_id}
+      `.catch(() => {});
+      existingInv.total_amount = saleVal;
+      existingInv.subtotal = saleVal;
+      existingInv.remaining_balance = remBal;
+      existingInv.payment_status = paymentStatus;
+    }
     return existingInv;
   }
 
   const invNum = `MMR-INV-${new Date().getFullYear()}-${String(bookingId).padStart(6, '0')}`;
-  const saleVal = Number(booking.base_price || booking.sold_price || booking.plot_base_price || booking.advance_amount || 0);
   const advVal = Number(booking.advance_amount || 0);
   const remBal = Math.max(0, saleVal - advVal);
   const paymentStatus = advVal >= saleVal ? 'Paid' : (advVal > 0 ? 'Partially Paid' : 'Unpaid');
@@ -354,7 +383,7 @@ async function executePlotOrdersQuery(req, res, scopeFilter = sql`TRUE`, extraMe
         COUNT(CASE WHEN b.booking_status = 'Rejected' THEN 1 END)::int AS rejected_count,
         COUNT(CASE WHEN (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id OR b.user_id = b.booked_by_user_id) THEN 1 END)::int AS self_purchase_count,
         COUNT(CASE WHEN (b.booking_type != 'SELF_PURCHASE' AND b.user_id != COALESCE(b.sold_by_user_id, 0)) THEN 1 END)::int AS customer_sale_count,
-        COALESCE(SUM(COALESCE(b.base_price, p.sold_price, p.base_price, (b.advance_amount + b.remaining_balance), 0)), 0)::numeric AS total_sales_volume,
+        COALESCE(SUM(COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (b.advance_amount + b.remaining_balance), 0)), 0)::numeric AS total_sales_volume,
         COALESCE(SUM(COALESCE(b.advance_amount, 0)), 0)::numeric AS total_advance_volume
       FROM bookings b
       LEFT JOIN plots p ON p.plot_id = b.plot_id
@@ -388,7 +417,7 @@ async function executePlotOrdersQuery(req, res, scopeFilter = sql`TRUE`, extraMe
         b.payment_method,
         COALESCE(b.advance_amount, 0) AS advance_amount,
         COALESCE(b.remaining_balance, 0) AS remaining_balance,
-        COALESCE(b.base_price, p.sold_price, p.base_price, (b.advance_amount + b.remaining_balance), 0) AS total_agreed_price,
+        COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (b.advance_amount + b.remaining_balance), 0) AS total_agreed_price,
         b.notes,
         b.created_at,
         b.confirmed_at,
@@ -518,7 +547,7 @@ async function executePlotOrderDetailQuery(req, res, bookingId, scopeFilter = sq
       SELECT
         b.*,
         (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id OR b.user_id = b.booked_by_user_id) AS is_self_purchase,
-        COALESCE(b.base_price, p.sold_price, p.base_price, (b.advance_amount + b.remaining_balance), 0) AS total_agreed_price,
+        COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (b.advance_amount + b.remaining_balance), 0) AS total_agreed_price,
 
         -- Buyer
         buyer.full_name AS buyer_name,

@@ -485,7 +485,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
                COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
                COALESCE(p.plot_category::text, 'Residential') AS plot_type,
                COALESCE(p.plot_category::text, 'Residential') AS plot_category,
-               COALESCE(p.base_price, b.total_amount, b.base_price, (Number(b.plot_area || 0) * 1000)) AS calc_price,
+               COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), NULLIF(b.total_amount, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) AS calc_price,
                COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
                u.full_name, u.mobile_no, u.email, u.father_name, u.address,
                assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile, assoc.user_id AS associate_user_id
@@ -500,7 +500,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
       `;
 
       if (booking) {
-        const totalPlotPrice = Number(booking.calc_price || booking.base_price || booking.total_amount || (Number(booking.plot_area || 0) * 1000) || 0);
+        const totalPlotPrice = Number(booking.calc_price || booking.base_price || booking.requested_price || booking.total_amount || 0);
         const downPayment = Number(booking.advance_amount || booking.required_booking_amount || 0);
         
         const payType = String(booking.payment_type || booking.payment_method || '').toLowerCase();
@@ -623,7 +623,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
         const [targetBooking] = await sql`
           SELECT b.*, COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
                  COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
-                 COALESCE(p.base_price, b.total_amount, b.base_price, (Number(b.plot_area || 0) * 1000)) AS calc_price,
+                 COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), NULLIF(b.total_amount, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) AS calc_price,
                  COALESCE(s.site_name, 'MMR City') AS site_name,
                  u.father_name, u.address,
                  assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile, assoc.user_id AS associate_user_id
@@ -657,6 +657,45 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
 
           // Ensure invoice_data is an object
           invoice.invoice_data = typeof invoice.invoice_data === 'string' ? JSON.parse(invoice.invoice_data) : (invoice.invoice_data || {});
+
+          const effectivePrice = Number(
+            targetBooking.calc_price || 
+            targetBooking.base_price || 
+            targetBooking.requested_price || 
+            targetBooking.sold_price || 
+            (Number(targetBooking.advance_amount || 0) + Number(targetBooking.remaining_balance || 0)) || 
+            0
+          );
+
+          if (effectivePrice > 0 && (Number(invoice.grand_total || 0) <= 0 || Number(invoice.subtotal || 0) <= 0 || Number(invoice.invoice_data.total_plot_price || 0) <= 0)) {
+            const downPay = Number(targetBooking.advance_amount || invoice.paid_amount || invoice.invoice_data.paid_amount || 0);
+            const remBal = Math.max(0, effectivePrice - downPay);
+            invoice.grand_total = effectivePrice;
+            invoice.total_amount = effectivePrice;
+            invoice.subtotal = effectivePrice;
+            invoice.balance_amount = remBal;
+            if (!invoice.paid_amount || Number(invoice.paid_amount) <= 0) {
+              invoice.paid_amount = downPay;
+            }
+            invoice.invoice_data.total_plot_price = effectivePrice;
+            invoice.invoice_data.grand_total = effectivePrice;
+            invoice.invoice_data.down_payment = downPay;
+            invoice.invoice_data.paid_amount = invoice.paid_amount;
+            invoice.invoice_data.balance_amount = remBal;
+
+            // Persist heal back to DB asynchronously
+            await sql`
+              UPDATE invoices SET
+                grand_total = ${effectivePrice},
+                total_amount = ${effectivePrice},
+                subtotal = ${effectivePrice},
+                balance_amount = ${remBal},
+                paid_amount = ${invoice.paid_amount},
+                invoice_data = ${JSON.stringify(invoice.invoice_data)}::jsonb,
+                updated_at = NOW()
+              WHERE invoice_id = ${invoice.invoice_id}
+            `.catch(() => {});
+          }
           
           if (isOneTime) {
             invoice.balance_amount = 0;
@@ -970,7 +1009,7 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
       `;
 
       if (booking) {
-        const totalPlotPrice = Number(booking.base_price || (Number(booking.plot_area || 0) * 1000) || 0);
+        const totalPlotPrice = Number(booking.base_price || booking.requested_price || (COALESCE_PRICE => COALESCE_PRICE)(booking.total_amount) || 0);
         const downPayment = Number(booking.advance_amount || booking.required_booking_amount || 0);
         const remainingBal = Math.max(0, totalPlotPrice - downPayment);
         const formattedInvNum = `MMR-INV-${booking.booking_id}`;
@@ -989,7 +1028,7 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
           total_plot_price: totalPlotPrice,
           down_payment: downPayment,
           emi_amount: downPayment,
-          grand_total: downPayment,
+          grand_total: totalPlotPrice > 0 ? totalPlotPrice : downPayment,
           paid_amount: downPayment,
           total_paid_till_date: downPayment,
           balance_amount: remainingBal,
@@ -1007,7 +1046,7 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
           user_id: booking.user_id,
           booking_id: booking.booking_id,
           invoice_date: booking.created_at || new Date(),
-          grand_total: downPayment,
+          grand_total: totalPlotPrice > 0 ? totalPlotPrice : downPayment,
           paid_amount: downPayment,
           balance_amount: remainingBal,
           payment_method: booking.payment_method || 'Cash / Bank',
@@ -1022,6 +1061,36 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
 
     const hasAccess = await canAccessInvoice(req.user, invoice);
     if (!hasAccess) return fail(res, "Unauthorized to access this invoice.", 403);
+
+    // Ensure invoice_data is an object and auto-heal if grand_total or total_plot_price is 0
+    invoice.invoice_data = typeof invoice.invoice_data === 'string' ? JSON.parse(invoice.invoice_data) : (invoice.invoice_data || {});
+    if (Number(invoice.grand_total || 0) <= 0 || Number(invoice.invoice_data?.total_plot_price || 0) <= 0) {
+      const bId = invoice.booking_id || invoice.invoice_data.booking_id || cleanId;
+      if (bId) {
+        const [hb] = await sql`
+          SELECT b.*, COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) AS calc_price
+          FROM bookings b
+          LEFT JOIN plots p ON b.plot_id = p.plot_id
+          WHERE b.booking_id = ${bId}
+          LIMIT 1
+        `;
+        if (hb) {
+          const bp = Number(hb.calc_price || hb.base_price || hb.requested_price || 0);
+          if (bp > 0) {
+            const downPay = Number(hb.advance_amount || invoice.paid_amount || invoice.invoice_data.paid_amount || 0);
+            invoice.grand_total = bp;
+            invoice.subtotal = bp;
+            invoice.total_amount = bp;
+            invoice.balance_amount = Math.max(0, bp - downPay);
+            invoice.invoice_data.total_plot_price = bp;
+            invoice.invoice_data.grand_total = bp;
+            invoice.invoice_data.down_payment = downPay;
+            invoice.invoice_data.paid_amount = downPay;
+            invoice.invoice_data.balance_amount = invoice.balance_amount;
+          }
+        }
+      }
+    }
 
     const settings = await getEffectiveInvoiceSettings();
     const publicBase = resolvePublicBaseUrl(req);

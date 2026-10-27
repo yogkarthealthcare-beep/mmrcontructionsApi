@@ -578,44 +578,20 @@ export async function createBooking({
     let isPendingPriceApproval = false;
     let priceApprovalStatus = null;
 
-    if (isStaff) {
-      // Staff / Team Member / Associate booking
-      if (incomingPrice > 0) {
-        agreedPrice = incomingPrice;
-        priceOverridden = listPrice > 0 && Math.abs(incomingPrice - listPrice) > 0.01;
-        priceSetByUserId = dbActor.user_id;
-      } else if (listPrice > 0) {
-        agreedPrice = listPrice;
-        priceOverridden = false;
-        priceSetByUserId = null;
-      } else {
-        throw createBookingError(`Plot price is unconfigured. Please enter the agreed plot price to proceed.`, 400);
-      }
-
-      // Staff warning threshold: if below minPlotPrice, log audit warning but allow override
-      if (agreedPrice < minPlotPrice) {
-        console.warn(`[BookingService] Staff ${dbActor.user_id} (${normalizedActorType}) overrode plot price to ₹${agreedPrice} (below ₹${minPlotPrice})`);
-      }
+    if (incomingPrice > 0) {
+      agreedPrice = incomingPrice;
+      priceOverridden = listPrice > 0 && Math.abs(incomingPrice - listPrice) > 0.01;
+      priceSetByUserId = dbActor.user_id;
+    } else if (listPrice > 0) {
+      agreedPrice = listPrice;
+      priceOverridden = false;
+      priceSetByUserId = null;
     } else {
-      // Direct Customer booking workflow
-      if (incomingPrice > 0 && (listPrice <= 0 || Math.abs(incomingPrice - listPrice) > 0.01)) {
-        if (incomingPrice < minPlotPrice) {
-          throw createBookingError(`Proposed plot price (₹${incomingPrice.toLocaleString('en-IN')}) cannot be less than the minimum required limit of ₹${minPlotPrice.toLocaleString('en-IN')}.`, 400);
-        }
-        requestedPrice = incomingPrice;
-        agreedPrice = incomingPrice; // Used for provisional installment preview calculations
-        isPendingPriceApproval = true;
-        priceApprovalStatus = 'Pending';
-      } else {
-        // Customer accepted list price
-        if (listPrice <= 0) {
-          throw createBookingError(`Plot price is not configured. Please enter your proposed rate to proceed with admin approval.`, 400);
-        }
-        if (listPrice < minPlotPrice) {
-          throw createBookingError(`Plot base price (₹${listPrice.toLocaleString('en-IN')}) is below minimum threshold ₹${minPlotPrice.toLocaleString('en-IN')}.`, 400);
-        }
-        agreedPrice = listPrice;
-      }
+      throw createBookingError(`Plot price is unconfigured. Please enter the agreed plot price to proceed.`, 400);
+    }
+
+    if (agreedPrice < minPlotPrice && isStaff) {
+      console.warn(`[BookingService] Staff ${dbActor.user_id} (${normalizedActorType}) overrode plot price to ₹${agreedPrice} (below ₹${minPlotPrice})`);
     }
 
     if (normalizedAdvance > agreedPrice && agreedPrice > 0) {
@@ -676,7 +652,7 @@ export async function createBooking({
       initialAdvance = planSnapshot.down_payment_amount;
     }
 
-    const finalStoredBasePrice = isPendingPriceApproval ? 0 : agreedPrice;
+    const finalStoredBasePrice = agreedPrice;
     const remainingBalance = planSnapshot && !isPendingPriceApproval
       ? planSnapshot.installment_base_amount
       : Math.max(0, agreedPrice - initialAdvance);
