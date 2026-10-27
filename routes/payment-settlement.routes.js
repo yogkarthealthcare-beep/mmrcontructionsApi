@@ -683,29 +683,58 @@ router.post(
               AND commission_status IN ('Pending', 'Approved')
           `;
 
-          // Credit recipients' user_wallets if available
+          // Credit recipients' user_wallets and create wallet_transactions ledger entries
           for (const recipient of calculation.recipients) {
             if (recipient.user_id && recipient.amount > 0) {
-              await tx`
-                INSERT INTO user_wallets (user_id, user_role, available_balance, total_commission)
-                VALUES (${recipient.user_id}, ${recipient.user_type}, ${recipient.amount}, ${recipient.amount})
-                ON CONFLICT (user_id) DO UPDATE SET
-                  available_balance = user_wallets.available_balance + ${recipient.amount},
-                  total_commission = user_wallets.total_commission + ${recipient.amount},
-                  updated_at = NOW()
-              `.catch(() => {});
+              const recRole = recipient.user_type || (recipient.role?.includes('Team Member') || recipient.role === 'TeamMember' ? 'Team Member' : 'Associate');
+              
+              // 1. Upsert wallet and retrieve updated row with lock
+              let [wallet] = await tx`
+                SELECT * FROM user_wallets WHERE user_id = ${recipient.user_id} FOR UPDATE
+              `.catch(() => []);
 
-              // Log in wallet_transactions if table exists
+              let balanceBefore = 0;
+              let balanceAfter = recipient.amount;
+
+              if (!wallet) {
+                [wallet] = await tx`
+                  INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
+                  VALUES (${recipient.user_id}, ${recRole}, ${recipient.amount}, 0.00, 0.00, 0.00, ${recipient.amount})
+                  RETURNING *
+                `;
+                balanceBefore = 0;
+                balanceAfter = Number(wallet.available_balance);
+              } else {
+                balanceBefore = Number(wallet.available_balance);
+                balanceAfter = balanceBefore + Number(recipient.amount);
+                const newTotalCommission = Number(wallet.total_commission || 0) + Number(recipient.amount);
+
+                [wallet] = await tx`
+                  UPDATE user_wallets SET
+                    available_balance = ${balanceAfter},
+                    total_commission = ${newTotalCommission},
+                    user_role = ${recRole},
+                    updated_at = NOW()
+                  WHERE id = ${wallet.id}
+                  RETURNING *
+                `;
+              }
+
+              // 2. Insert ledger into wallet_transactions adhering to all schema constraints
               await tx`
                 INSERT INTO wallet_transactions (
-                  wallet_id, user_id, transaction_type, amount, balance_after,
-                  reference_id, description, status, created_at
+                  wallet_id, user_id, user_role, transaction_type, source,
+                  amount, balance_before, balance_after, payment_order_id,
+                  status, remarks, created_at
+                ) VALUES (
+                  ${wallet.id}, ${recipient.user_id}, ${recRole},
+                  'credit', 'Commission Settlement', ${recipient.amount},
+                  ${balanceBefore}, ${balanceAfter}, ${settlementRef},
+                  'success', ${'Commission settlement for Booking #' + (booking.booking_serial || bookingId)}, NOW()
                 )
-                SELECT w.id, w.user_id, 'Credit', ${recipient.amount}, w.available_balance,
-                       ${settlementRef}, ${'Commission settlement for Booking #' + (booking.booking_serial || bookingId)}, 'Completed', NOW()
-                FROM user_wallets w
-                WHERE w.user_id = ${recipient.user_id}
-              `.catch(() => {});
+              `.catch((txErr) => {
+                console.error(`[PaymentSettlement] Wallet transaction insert error for user ${recipient.user_id}:`, txErr.message);
+              });
             }
           }
         }

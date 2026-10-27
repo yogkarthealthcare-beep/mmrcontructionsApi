@@ -107,9 +107,10 @@ export const associateEnrollmentSchema = z.object({
         .transform(v => (v ? normalizeHumanName(v) : v))),
     nomineeDob: z.preprocess(normalizeDate, z.string().optional().nullable()
         .refine(v => {
-            if (!v) return true;
-            return validateNomineeDob(v).valid;
-        }, { message: "Nominee must be at least 18 years old and Date of Birth cannot be in the future" })),
+        if (!v)
+            return true;
+        return validateNomineeDob(v).valid;
+    }, { message: "Nominee must be at least 18 years old and Date of Birth cannot be in the future" })),
     nomineeGender: z.preprocess(cleanString, z.string().optional().nullable()),
     nomineeNationality: z.preprocess((v) => cleanString(v) ?? "Indian", z.string().default("Indian")),
     nomineeResStatus: z.preprocess(cleanString, z.string().optional().nullable()),

@@ -16,7 +16,10 @@ const err = (res, msg = "Server error", status = 500) =>
 
 const getWalletRole = (user = {}) => {
   const role = user.user_type || user.role;
-  return role === "Associate" ? "Associate" : "Customer";
+  if (role === "Team Member" || role === "TeamMember") return "Team Member";
+  if (role === "Associate") return "Associate";
+  if (role === "Investor") return "Investor";
+  return "Customer";
 };
 
 const isAdminPrincipal = (principal = {}) => {
@@ -391,7 +394,7 @@ router.all("/wallet/add-fund/verify-callback", async (req, res) => {
     }
 
     const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:4200";
-    const panelPath = txRecord.user_role.toLowerCase() === "associate" ? "associate" : "user";
+    const panelPath = txRecord?.user_role?.toLowerCase() === "associate" ? "associate" : (txRecord?.user_role?.toLowerCase().includes("team") ? "team-member" : "user");
 
     if (txRecord.status === "success") {
       return res.redirect(`${FRONTEND_URL}/${panelPath}/wallet?payment=success&order_id=${order_id}`);
@@ -479,7 +482,7 @@ router.all("/wallet/add-fund/verify-callback", async (req, res) => {
       WHERE payment_order_id = ${order_id} AND status = 'pending'
     `.catch(() => {});
     const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:4200";
-    const panelPath = txRecord?.user_role?.toLowerCase() === "associate" ? "associate" : "user";
+    const panelPath = txRecord?.user_role?.toLowerCase() === "associate" ? "associate" : (txRecord?.user_role?.toLowerCase().includes("team") ? "team-member" : "user");
     return res.redirect(`${FRONTEND_URL}/${panelPath}/wallet?payment=failed&order_id=${order_id}&reason=${encodeURIComponent(e.message)}`);
   }
 });

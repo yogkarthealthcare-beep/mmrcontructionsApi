@@ -833,7 +833,7 @@ export async function updateAdminAssociateEnrollment(req, res) {
         if (nomineeDob) {
             const nomCheck = validateNomineeDob(nomineeDob);
             if (!nomCheck.valid) {
-                return err(res, nomCheck.message, 400);
+                return res.status(400).json({ success: false, message: nomCheck.message });
             }
         }
         const nomineeGender = b.nominee_gender || b.nomineeGender || 'Male';

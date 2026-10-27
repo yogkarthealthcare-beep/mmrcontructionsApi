@@ -253,7 +253,23 @@ export async function canApproveCustomer(sql, actor, customerId, item = 'all') {
   }
 
   // 7. Resolve Customer's Sponsor (users.referred_by_user_id as source of truth)
-  const sponsorUserId = customer.referred_by_user_id || customer.sponsor_user_id;
+  let sponsorUserId = customer.referred_by_user_id || customer.sponsor_user_id;
+
+  if (!sponsorUserId) {
+    const [subRow] = await sql`
+      SELECT associate_id FROM customer_enrollment_submissions
+      WHERE user_id = ${targetCustomerId} AND associate_id IS NOT NULL AND associate_id != ''
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    if (subRow && subRow.associate_id) {
+      const [sponsorByCode] = await sql`
+        SELECT user_id FROM users WHERE member_id = ${subRow.associate_id}
+      `;
+      if (sponsorByCode) {
+        sponsorUserId = sponsorByCode.user_id;
+      }
+    }
+  }
 
   // Rule: If sponsor is NULL, DEFAULT_ADMIN_USER_ID (1), or Admin -> Admin's customer -> Admin only
   if (!sponsorUserId || sponsorUserId === ADMIN_CONFIG.DEFAULT_ADMIN_USER_ID) {

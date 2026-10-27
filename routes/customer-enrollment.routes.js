@@ -1622,11 +1622,15 @@ router.get("/portal/my-customers-for-approval", authUser, async (req, res) => {
             ELSE 'TEAM_MEMBER'
           END as relationship
         FROM users c
-        JOIN users ref ON ref.user_id = COALESCE(c.referred_by_user_id, c.sponsor_user_id)
+        LEFT JOIN users ref ON ref.user_id = COALESCE(c.referred_by_user_id, c.sponsor_user_id)
         WHERE c.user_type = 'Customer'
           AND (
             c.referred_by_user_id = ${actorInfo.userId}
             OR c.sponsor_user_id = ${actorInfo.userId}
+            OR c.user_id IN (
+              SELECT sub.user_id FROM customer_enrollment_submissions sub 
+              WHERE sub.associate_id = ${actorInfo.memberId} OR sub.associate_id = ${String(actorInfo.userId)}
+            )
             OR c.referred_by_user_id IN (
               SELECT tm.user_id FROM team_members tm 
               WHERE tm.associate_id = ${actorInfo.userId} AND LOWER(tm.status) IN ('approved', 'active')
@@ -1648,9 +1652,16 @@ router.get("/portal/my-customers-for-approval", authUser, async (req, res) => {
           ref.user_id as sponsor_user_id, ref.member_id as sponsor_id, ref.full_name as sponsor_name,
           'DIRECT' as relationship
         FROM users c
-        JOIN users ref ON ref.user_id = COALESCE(c.referred_by_user_id, c.sponsor_user_id)
+        LEFT JOIN users ref ON ref.user_id = COALESCE(c.referred_by_user_id, c.sponsor_user_id)
         WHERE c.user_type = 'Customer'
-          AND (c.referred_by_user_id = ${actorInfo.userId} OR c.sponsor_user_id = ${actorInfo.userId})
+          AND (
+            c.referred_by_user_id = ${actorInfo.userId} 
+            OR c.sponsor_user_id = ${actorInfo.userId}
+            OR c.user_id IN (
+              SELECT sub.user_id FROM customer_enrollment_submissions sub 
+              WHERE sub.associate_id = ${actorInfo.memberId} OR sub.associate_id = ${String(actorInfo.userId)}
+            )
+          )
           ${s ? sql`AND (c.full_name ILIKE ${s} OR c.mobile_no ILIKE ${s} OR c.member_id ILIKE ${s})` : sql``}
         ORDER BY c.registered_at DESC
         LIMIT ${limitNum} OFFSET ${offset}
