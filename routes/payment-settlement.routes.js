@@ -714,7 +714,15 @@ router.post(
 
         // 3. Compute distribution
         const calculation = await computeDistributionForBooking(bookingId);
-        const settlementRef = `MMR-STL-${new Date().getFullYear()}-${String(bookingId).padStart(6, '0')}`;
+
+        // Ensure settlement reference is unique (handles re-distribution of previously released orders)
+        let settlementRef = `MMR-STL-${new Date().getFullYear()}-${String(bookingId).padStart(6, '0')}`;
+        const [existingRef] = await tx`
+          SELECT settlement_id FROM plot_order_settlements WHERE settlement_reference = ${settlementRef} LIMIT 1
+        `.catch(() => []);
+        if (existingRef) {
+          settlementRef = `MMR-STL-${new Date().getFullYear()}-${String(bookingId).padStart(6, '0')}-R${Date.now().toString().slice(-4)}`;
+        }
 
         // 4. If booking has an attributed seller, generate canonical commission records
         if (!calculation.isCompanyDirect && !calculation.isSelfPurchase && calculation.totalDistributionAmount > 0) {
@@ -733,7 +741,7 @@ router.post(
             bookingId,
             event: {
               type: 'PaymentSettlement',
-              key: `settlement:${bookingId}`,
+              key: `settlement:${bookingId}:${Date.now()}`,
               principalAmount: amountReceived,
               sourceRef: settlementRef,
               paymentType: booking.payment_type || 'Standard'
@@ -851,7 +859,7 @@ router.post(
           RETURNING *
         `;
 
-        // 6. Record immutable settlement in plot_order_settlements table
+        // 6. Record immutable settlement in plot_order_settlements table (upsert safe)
         await tx`
           INSERT INTO plot_order_settlements (
             booking_id, settlement_reference, admin_id, admin_name,
@@ -865,6 +873,18 @@ router.post(
             ${booking.settlement_status || 'Pending'}, 'Released',
             ${remarks || 'Authorized settlement release'}
           )
+          ON CONFLICT (settlement_reference) DO UPDATE SET
+            admin_id = EXCLUDED.admin_id,
+            admin_name = EXCLUDED.admin_name,
+            total_plot_price = EXCLUDED.total_plot_price,
+            amount_received = EXCLUDED.amount_received,
+            pool_amount = EXCLUDED.pool_amount,
+            total_distributed = EXCLUDED.total_distributed,
+            company_share = EXCLUDED.company_share,
+            recipient_breakdown = EXCLUDED.recipient_breakdown,
+            new_status = EXCLUDED.new_status,
+            notes = EXCLUDED.notes,
+            created_at = NOW()
         `;
 
         return {
