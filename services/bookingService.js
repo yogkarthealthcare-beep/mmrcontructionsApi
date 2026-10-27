@@ -563,7 +563,10 @@ export async function createBooking({
     const deadlineMonths = Number(workflowSettings?.part_wise_deadline_months ?? 3);
 
     const staffRoles = ['Associate', 'Team Member', 'Admin', 'SuperAdmin', 'FinanceManager', 'SiteManager'];
-    const isStaff = staffRoles.includes(normalizedActorType) || isRoleAdmin(normalizedActorType) || Boolean(dbActor.is_admin || dbActor.admin_id);
+    const isRoleAdmin = (r) => ['admin', 'superadmin', 'super_admin'].includes(String(r || '').toLowerCase());
+    const isStaff = staffRoles.some(r => r.toLowerCase() === normalizedActorType.toLowerCase()) || 
+                    isRoleAdmin(normalizedActorType) || 
+                    Boolean(dbActor.is_admin || dbActor.admin_id);
 
     const listPrice = Number(plot.sold_price || plot.base_price || 0);
     const incomingPrice = Number(customPlotPrice || custom_plot_price || incomingPlotPrice || plot_price || base_price || 0);
