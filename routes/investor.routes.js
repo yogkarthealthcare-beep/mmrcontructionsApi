@@ -254,7 +254,22 @@ async function ensureInvestorSchema() {
     await sql`CREATE INDEX IF NOT EXISTS idx_investor_transactions_investor ON investor_transactions(investor_id, created_at)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_settlement_requests_status ON settlement_change_requests(status, created_at)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_investor_notifications_investor ON investor_notifications(investor_id, created_at)`;
+    await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS ifsc_code VARCHAR(20)`;
+    await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS account_number VARCHAR(100)`;
+    await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS corr_address TEXT`;
+    await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS corr_city VARCHAR(100)`;
+    await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS corr_state VARCHAR(100)`;
+    await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS corr_pin_code VARCHAR(20)`;
+    await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS religion VARCHAR(50)`;
     await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS is_final_submitted BOOLEAN DEFAULT FALSE`;
+    await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS rejection_reason TEXT`;
+    await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS updated_by_user_id INTEGER`;
+
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS enrollment_status VARCHAR(50) DEFAULT 'Pending'`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS father_husband_name VARCHAR(255)`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS date_of_birth DATE`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS gender VARCHAR(20)`;
+    await sql`ALTER TABLE investor_users ADD COLUMN IF NOT EXISTS alternate_mobile VARCHAR(50)`;
   })().catch((error) => {
     investorSchemaReady = null;
     throw error;
@@ -1711,88 +1726,173 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
   try {
     const investor_id = req.investor.id;
     const body = req.body;
-    
-    if (!body.invFirstName || !body.mobile) {
-      return err(res, "First name and mobile number are required.");
+
+    // 1. Mandatory Validations (Part 3A & 3B)
+    const valErrors = {};
+    if (!body.invFirstName || !String(body.invFirstName).trim()) {
+      valErrors.invFirstName = "Investor First Name is required.";
+    } else if (!isValidHumanName(body.invFirstName)) {
+      valErrors.invFirstName = "First Name must contain only alphabets and spaces.";
     }
 
-    // Human name validation & normalization
-    if (!isValidHumanName(body.invFirstName)) {
-      return err(res, "First Name must contain only alphabets and spaces (no numbers or special characters).");
-    }
-    body.invFirstName = normalizeHumanName(body.invFirstName);
-
-    if (body.invMiddleName && String(body.invMiddleName).trim()) {
-      if (!isValidHumanName(body.invMiddleName)) {
-        return err(res, "Middle Name must contain only alphabets and spaces (no numbers or special characters).");
-      }
-      body.invMiddleName = normalizeHumanName(body.invMiddleName);
+    if (body.invMiddleName && !isValidHumanName(body.invMiddleName)) {
+      valErrors.invMiddleName = "Middle Name must contain only alphabets and spaces.";
     }
 
-    if (body.invSurname && String(body.invSurname).trim()) {
-      if (!isValidHumanName(body.invSurname)) {
-        return err(res, "Surname must contain only alphabets and spaces (no numbers or special characters).");
-      }
-      body.invSurname = normalizeHumanName(body.invSurname);
+    if (!body.invSurname || !String(body.invSurname).trim()) {
+      valErrors.invSurname = "Investor Surname is required.";
+    } else if (!isValidHumanName(body.invSurname)) {
+      valErrors.invSurname = "Surname must contain only alphabets and spaces.";
     }
 
-    if (body.fhFirstName && String(body.fhFirstName).trim()) {
-      if (!isValidHumanName(body.fhFirstName)) {
-        return err(res, "Father/Husband First Name must contain only alphabets and spaces (no numbers or special characters).");
-      }
-      body.fhFirstName = normalizeHumanName(body.fhFirstName);
+    if (!body.fhFirstName || !String(body.fhFirstName).trim()) {
+      valErrors.fhFirstName = "Father's/Husband's First Name is required.";
+    } else if (!isValidHumanName(body.fhFirstName)) {
+      valErrors.fhFirstName = "Father's First Name must contain only alphabets and spaces.";
     }
 
-    if (body.fhMiddleName && String(body.fhMiddleName).trim()) {
-      if (!isValidHumanName(body.fhMiddleName)) {
-        return err(res, "Father/Husband Middle Name must contain only alphabets and spaces (no numbers or special characters).");
-      }
-      body.fhMiddleName = normalizeHumanName(body.fhMiddleName);
+    if (body.fhMiddleName && !isValidHumanName(body.fhMiddleName)) {
+      valErrors.fhMiddleName = "Father's Middle Name must contain only alphabets and spaces.";
     }
 
-    if (body.fhSurname && String(body.fhSurname).trim()) {
-      if (!isValidHumanName(body.fhSurname)) {
-        return err(res, "Father/Husband Surname must contain only alphabets and spaces (no numbers or special characters).");
-      }
-      body.fhSurname = normalizeHumanName(body.fhSurname);
+    if (!body.fhSurname || !String(body.fhSurname).trim()) {
+      valErrors.fhSurname = "Father's/Husband's Surname is required.";
+    } else if (!isValidHumanName(body.fhSurname)) {
+      valErrors.fhSurname = "Father's Surname must contain only alphabets and spaces.";
     }
 
-    if (body.declSignatureName && String(body.declSignatureName).trim()) {
-      if (!isValidHumanName(body.declSignatureName)) {
-        return err(res, "Declaration Signature Name must contain only alphabets and spaces.");
-      }
-      body.declSignatureName = normalizeHumanName(body.declSignatureName);
-    }
-
-    if (body.firstApplicantName && String(body.firstApplicantName).trim()) {
-      if (!isValidHumanName(body.firstApplicantName)) {
-        return err(res, "First Applicant Name must contain only alphabets and spaces.");
-      }
-      body.firstApplicantName = normalizeHumanName(body.firstApplicantName);
-    }
-
-    if (body.jointApplicantName && String(body.jointApplicantName).trim()) {
-      if (!isValidHumanName(body.jointApplicantName)) {
-        return err(res, "Joint Applicant Name must contain only alphabets and spaces.");
-      }
-      body.jointApplicantName = normalizeHumanName(body.jointApplicantName);
-    }
-
-    // Minimum Age 18 check
-    if (body.dob) {
+    if (!body.dob) {
+      valErrors.dob = "Date of Birth is required.";
+    } else {
       const age = calculateAge(body.dob);
       if (age < 18) {
-        return err(res, `Applicant must be at least 18 years old (current calculated age: ${age}).`);
+        valErrors.dob = `Applicant must be at least 18 years old (current calculated age: ${age}).`;
       }
     }
 
-    // State check
-    if (body.state && !isValidState(body.state)) {
-      return err(res, "Selected state is not valid. Please select from approved Indian states.");
+    if (!body.address || !String(body.address).trim()) valErrors.address = "Permanent Address is required.";
+    if (!body.city || !String(body.city).trim()) valErrors.city = "Permanent City is required.";
+    if (!body.state || !isValidState(body.state)) valErrors.state = "Valid Indian State is required.";
+    if (!body.pinCode || !/^[0-9]{6}$/.test(String(body.pinCode).trim())) valErrors.pinCode = "Pin Code must be exactly 6 digits.";
+
+    const sameAsPerm = Boolean(body.sameAsPermanent === true || body.sameAsPermanent === 'true');
+    if (!sameAsPerm) {
+      if (!body.corrAddress || !String(body.corrAddress).trim()) valErrors.corrAddress = "Correspondence Address is required.";
+      if (!body.corrCity || !String(body.corrCity).trim()) valErrors.corrCity = "Correspondence City is required.";
+      if (!body.corrState || !isValidState(body.corrState)) valErrors.corrState = "Valid Correspondence State is required.";
+      if (!body.corrPinCode || !/^[0-9]{6}$/.test(String(body.corrPinCode).trim())) valErrors.corrPinCode = "Correspondence Pin Code must be 6 digits.";
     }
 
+    if (!body.mobile || !/^[6-9][0-9]{9}$/.test(String(body.mobile).replace(/\D/g, ""))) {
+      valErrors.mobile = "Mobile number must be a valid 10-digit number starting with 6-9.";
+    }
+    if (body.altTel && !/^[6-9][0-9]{9}$/.test(String(body.altTel).replace(/\D/g, ""))) {
+      valErrors.altTel = "Alt. Tel. No. must be a valid 10-digit number.";
+    }
+    if (!body.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(body.email).trim())) {
+      valErrors.email = "Valid Email ID is required.";
+    }
+
+    if (!body.pan || !/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/i.test(String(body.pan).trim())) {
+      valErrors.pan = "Valid PAN Card Number is required (e.g. ABCDE1234F).";
+    }
+    if (!body.aadhar || !/^[0-9]{12}$/.test(String(body.aadhar).trim().replace(/\s/g, ""))) {
+      valErrors.aadhar = "Aadhaar Number must be exactly 12 digits.";
+    }
+
+    const numAmount = Number(body.amount);
+    if (!body.amount || isNaN(numAmount) || numAmount <= 0) {
+      valErrors.amount = "Investment Amount must be greater than 0.";
+    }
+    if (!body.paymentMode) {
+      valErrors.paymentMode = "Payment Mode is required.";
+    } else if (body.paymentMode !== "Cash") {
+      if (!body.txnNo || !String(body.txnNo).trim()) valErrors.txnNo = "TXN / Cheque No. is required.";
+      if (!body.txnDate) valErrors.txnDate = "Payment Date is required.";
+    }
+
+    if (!body.bankBranch || !String(body.bankBranch).trim()) valErrors.bankBranch = "Bank & Branch Name is required.";
+    if (!body.accountNumber || !/^[0-9]{9,18}$/.test(String(body.accountNumber).trim())) {
+      valErrors.accountNumber = "Account Number must be between 9 and 18 digits.";
+    }
+    if (!body.ifscCode || !/^[A-Z]{4}0[A-Z0-9]{6}$/i.test(String(body.ifscCode).trim())) {
+      valErrors.ifscCode = "Valid IFSC Code is required (e.g. SBIN0001234).";
+    }
+
+    if (!body.declPlace || !String(body.declPlace).trim()) {
+      valErrors.declPlace = "Place of signing is required.";
+    }
+
+    // Nominees check
+    if (Array.isArray(body.nominees) && body.nominees.length > 0) {
+      let filledRows = 0;
+      let totalProp = 0;
+      body.nominees.forEach((n, idx) => {
+        if (n.name || n.relationship || n.age || n.proportion) {
+          filledRows++;
+          if (!n.name || !String(n.name).trim()) valErrors[`nominee_${idx}_name`] = `Nominee #${idx + 1} Name is required.`;
+          if (!n.relationship || !String(n.relationship).trim()) valErrors[`nominee_${idx}_relationship`] = `Nominee #${idx + 1} Relationship is required.`;
+          if (!n.age || Number(n.age) <= 0) valErrors[`nominee_${idx}_age`] = `Nominee #${idx + 1} Age is required.`;
+          const prop = Number(n.proportion);
+          if (isNaN(prop) || prop <= 0 || prop > 100) {
+            valErrors[`nominee_${idx}_proportion`] = `Nominee #${idx + 1} Proportion must be 1-100%.`;
+          } else {
+            totalProp += prop;
+          }
+        }
+      });
+      if (filledRows > 0 && totalProp !== 100) {
+        valErrors.nominees_total = `Total Nominee Proportion must be exactly 100% (current total: ${totalProp}%).`;
+      }
+    }
+
+    const [existing] = await sql`
+      SELECT id, is_final_submitted, app_status, photo_url, signature_first_url, signature_joint_url 
+      FROM investor_enrollments 
+      WHERE investor_id = ${investor_id} 
+      ORDER BY created_at DESC LIMIT 1
+    `;
+
+    // Photo & Signature requirement check
+    const hasPhoto = Boolean(body.photo || existing?.photo_url);
+    const hasSig = Boolean(body.signature || body.declSignature || body.signatureFirstApplicant || existing?.signature_first_url);
+    if (!hasPhoto) valErrors.photo = "Investor Passport-size photo is required.";
+    if (!hasSig) valErrors.signature = "Investor Signature is required.";
+
+    if (Object.keys(valErrors).length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: Object.values(valErrors)[0],
+        errors: valErrors
+      });
+    }
+
+    // Workflow Check (Part 3F)
+    const isApproved = existing && String(existing.app_status).toLowerCase() === 'approved';
+    const isRejected = existing && String(existing.app_status).toLowerCase() === 'rejected';
+
+    if (existing && existing.is_final_submitted && !isRejected) {
+      return res.status(403).json({
+        success: false,
+        message: isApproved 
+          ? "Investor Enrollment is approved and permanently locked." 
+          : "Investor Enrollment is final submitted and locked pending Admin approval."
+      });
+    }
+
+    // Normalize Human Names
+    body.invFirstName = normalizeHumanName(body.invFirstName);
+    if (body.invMiddleName) body.invMiddleName = normalizeHumanName(body.invMiddleName);
+    body.invSurname = normalizeHumanName(body.invSurname);
+    body.fhFirstName = normalizeHumanName(body.fhFirstName);
+    if (body.fhMiddleName) body.fhMiddleName = normalizeHumanName(body.fhMiddleName);
+    body.fhSurname = normalizeHumanName(body.fhSurname);
+    if (body.firstApplicantName) body.firstApplicantName = normalizeHumanName(body.firstApplicantName);
+    if (body.jointApplicantName) body.jointApplicantName = normalizeHumanName(body.jointApplicantName);
+    if (body.declSignatureName) body.declSignatureName = normalizeHumanName(body.declSignatureName);
+
     const processBase64 = async (dataUrl, filename) => {
-      if (!dataUrl) return null;
+      if (!dataUrl || !dataUrl.startsWith("data:")) return null;
       const matches = dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
       if (!matches || matches.length !== 3) return null;
       const buffer = Buffer.from(matches[2], 'base64');
@@ -1803,30 +1903,25 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
       return fileUrl;
     };
 
-    try {
-      await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS ifsc_code VARCHAR(20)`;
-      await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS account_number VARCHAR(100)`;
-      await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS corr_address TEXT`;
-      await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS corr_city VARCHAR(100)`;
-      await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS corr_state VARCHAR(100)`;
-      await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS corr_pin_code VARCHAR(20)`;
-      await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS religion VARCHAR(50)`;
-      await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS is_final_submitted BOOLEAN DEFAULT FALSE`;
-    } catch (e) {}
-
-    const photoUrl = await processBase64(body.photo, `photo_${Date.now()}.png`);
-    const sigFirstUrl = await processBase64(body.signatureFirstApplicant, `sig1_${Date.now()}.png`);
-    const sigJointUrl = await processBase64(body.signatureJointApplicant, `sig2_${Date.now()}.png`);
+    const photoUrl = await processBase64(body.photo, `photo_${Date.now()}.png`) || (body.photo && !body.photo.startsWith("data:") ? body.photo : null);
+    const sigFirstUrl = await processBase64(body.signatureFirstApplicant || body.signature || body.declSignature, `sig1_${Date.now()}.png`) 
+      || ((body.signatureFirstApplicant || body.signature) && !String(body.signature || '').startsWith("data:") ? (body.signatureFirstApplicant || body.signature) : null);
+    const sigJointUrl = await processBase64(body.signatureJointApplicant, `sig2_${Date.now()}.png`) 
+      || (body.signatureJointApplicant && !body.signatureJointApplicant.startsWith("data:") ? body.signatureJointApplicant : null);
 
     const isFinalSubmit = body.is_final_submitted === true || body.is_final_submitted === 'true' || body.isFinalSubmit === true || body.isFinalSubmit === 'true';
 
-    const [existing] = await sql`SELECT id, is_final_submitted FROM investor_enrollments WHERE investor_id = ${investor_id} ORDER BY created_at DESC LIMIT 1`;
-    if (existing && existing.is_final_submitted) {
-      return res.status(403).json({
-        success: false,
-        message: "Enrollment is permanently finalized and cannot be modified."
-      });
-    }
+    // Status logic:
+    // If final submit: status becomes 'Hold/Pending KYC' (visible to admin approval queue)
+    // If save/submit in review stage: status is 'Submitted' (NOT in admin pending queue)
+    const newAppStatus = isFinalSubmit ? 'Hold/Pending KYC' : 'Submitted';
+
+    // Correspondence values
+    const finalCorrAddress = sameAsPerm ? body.address : (body.corrAddress || body.address);
+    const finalCorrCity = sameAsPerm ? body.city : (body.corrCity || body.city);
+    const finalCorrState = sameAsPerm ? body.state : (body.corrState || body.state);
+    const finalCorrPin = sameAsPerm ? body.pinCode : (body.corrPinCode || body.pinCode);
+
     let resultId;
     if (existing) {
       await sql`
@@ -1844,31 +1939,31 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
           fh_surname = ${body.fhSurname || null},
           dob = ${body.dob || null},
           age = ${body.age || null},
-          gender = ${body.gender || null},
-          occupation = ${body.occupation || null},
+          gender = ${body.gender || 'M'},
+          occupation = ${body.occupation || 'Service'},
           occupation_other = ${body.occupationOther || null},
           address = ${body.address || null},
           city = ${body.city || null},
           state = ${body.state || null},
           pin_code = ${body.pinCode || null},
-          corr_address = ${body.corrAddress || body.corr_address || null},
-          corr_city = ${body.corrCity || body.corr_city || null},
-          corr_state = ${body.corrState || body.corr_state || null},
-          corr_pin_code = ${body.corrPinCode || body.corr_pin_code || null},
+          corr_address = ${finalCorrAddress || null},
+          corr_city = ${finalCorrCity || null},
+          corr_state = ${finalCorrState || null},
+          corr_pin_code = ${finalCorrPin || null},
           religion = ${body.religion || null},
           mobile = ${body.mobile},
           alt_tel = ${body.altTel || null},
           email = ${body.email || null},
-          pan = ${body.pan || null},
+          pan = ${body.pan ? String(body.pan).toUpperCase() : null},
           aadhar = ${body.aadhar || null},
           amount = ${body.amount || null},
           amount_words = ${body.amountWords || null},
           payment_mode = ${body.paymentMode || null},
-          txn_no = ${body.txnNo || null},
-          txn_date = ${body.txnDate || null},
+          txn_no = ${body.paymentMode === 'Cash' ? null : (body.txnNo || null)},
+          txn_date = ${body.paymentMode === 'Cash' ? null : (body.txnDate || null)},
           bank_branch = ${body.bankBranch || null},
-          ifsc_code = ${body.ifscCode || body.ifsc_code || null},
-          account_number = ${body.accountNumber || body.account_number || null},
+          ifsc_code = ${body.ifscCode ? String(body.ifscCode).toUpperCase() : null},
+          account_number = ${body.accountNumber || null},
           nominees = ${body.nominees ? (typeof body.nominees === 'string' ? body.nominees : JSON.stringify(body.nominees)) : null},
           decl_date = ${body.declDate || null},
           decl_place = ${body.declPlace || null},
@@ -1878,7 +1973,9 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
           photo_url = COALESCE(${photoUrl}, photo_url),
           signature_first_url = COALESCE(${sigFirstUrl}, signature_first_url),
           signature_joint_url = COALESCE(${sigJointUrl}, signature_joint_url),
-          is_final_submitted = (is_final_submitted OR ${isFinalSubmit}),
+          is_final_submitted = ${isFinalSubmit},
+          app_status = ${newAppStatus},
+          rejection_reason = ${isRejected ? null : existing.rejection_reason},
           updated_at = NOW()
         WHERE id = ${existing.id}
       `;
@@ -1892,31 +1989,60 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
           corr_address, corr_city, corr_state, corr_pin_code, religion,
           mobile, alt_tel, email, pan, aadhar, amount, amount_words, payment_mode, txn_no, txn_date, bank_branch, ifsc_code, account_number,
           nominees, decl_date, decl_place, decl_signature_name, first_applicant_name, joint_applicant_name,
-          photo_url, signature_first_url, signature_joint_url, is_final_submitted
+          photo_url, signature_first_url, signature_joint_url, is_final_submitted, app_status
         ) VALUES (
           ${investor_id}, ${body.formNo || null}, ${body.formDate || null}, ${body.branchCode || null}, ${body.branchName || null}, ${body.investorId || null}, ${body.projectName || null},
           ${body.invFirstName}, ${body.invMiddleName || null}, ${body.invSurname || null}, ${body.fhFirstName || null}, ${body.fhMiddleName || null}, ${body.fhSurname || null},
-          ${body.dob || null}, ${body.age || null}, ${body.gender || null}, ${body.occupation || null}, ${body.occupationOther || null}, ${body.address || null}, ${body.city || null}, ${body.state || null}, ${body.pinCode || null},
-          ${body.corrAddress || body.corr_address || null}, ${body.corrCity || body.corr_city || null}, ${body.corrState || body.corr_state || null}, ${body.corrPinCode || body.corr_pin_code || null}, ${body.religion || null},
-          ${body.mobile}, ${body.altTel || null}, ${body.email || null}, ${body.pan || null}, ${body.aadhar || null}, ${body.amount || null}, ${body.amountWords || null}, ${body.paymentMode || null}, ${body.txnNo || null}, ${body.txnDate || null}, ${body.bankBranch || null}, ${body.ifscCode || body.ifsc_code || null}, ${body.accountNumber || body.account_number || null},
+          ${body.dob || null}, ${body.age || null}, ${body.gender || 'M'}, ${body.occupation || 'Service'}, ${body.occupationOther || null}, ${body.address || null}, ${body.city || null}, ${body.state || null}, ${body.pinCode || null},
+          ${finalCorrAddress || null}, ${finalCorrCity || null}, ${finalCorrState || null}, ${finalCorrPin || null}, ${body.religion || null},
+          ${body.mobile}, ${body.altTel || null}, ${body.email || null}, ${body.pan ? String(body.pan).toUpperCase() : null}, ${body.aadhar || null}, ${body.amount || null}, ${body.amountWords || null}, ${body.paymentMode || null}, ${body.paymentMode === 'Cash' ? null : (body.txnNo || null)}, ${body.paymentMode === 'Cash' ? null : (body.txnDate || null)}, ${body.bankBranch || null}, ${body.ifscCode ? String(body.ifscCode).toUpperCase() : null}, ${body.accountNumber || null},
           ${body.nominees ? (typeof body.nominees === 'string' ? body.nominees : JSON.stringify(body.nominees)) : null}, ${body.declDate || null}, ${body.declPlace || null}, ${body.declSignatureName || null}, ${body.firstApplicantName || null}, ${body.jointApplicantName || null},
-          ${photoUrl || null}, ${sigFirstUrl || null}, ${sigJointUrl || null}, ${isFinalSubmit}
+          ${photoUrl || null}, ${sigFirstUrl || null}, ${sigJointUrl || null}, ${isFinalSubmit}, ${newAppStatus}
         ) RETURNING id
       `;
       resultId = newRow?.id;
     }
 
-    // Mark enrollment_status in investor_users
-    if (isFinalSubmit) {
-      await sql`UPDATE investor_users SET enrollment_status = 'Completed' WHERE id = ${investor_id}`;
-    } else {
-      await sql`UPDATE investor_users SET enrollment_status = COALESCE(enrollment_status, 'Pending') WHERE id = ${investor_id}`;
+    // Auto-Sync to investor_users profile (Rule 3G)
+    // NEVER overwrite email or mobile_number (auth identifiers)!
+    // Non-empty values update profile; empty optional fields do NOT overwrite existing profile data.
+    const fullName = [body.invFirstName, body.invMiddleName, body.invSurname].filter(Boolean).join(" ");
+    const fhFullName = [body.fhFirstName, body.fhMiddleName, body.fhSurname].filter(Boolean).join(" ");
+    let firstNomineeName = null;
+    if (Array.isArray(body.nominees) && body.nominees.length > 0 && body.nominees[0].name) {
+      firstNomineeName = body.nominees[0].name;
     }
 
-    return ok(res, { id: resultId }, "Investor enrollment submitted successfully.");
+    await sql`
+      UPDATE investor_users
+      SET
+        full_name = COALESCE(NULLIF(${fullName}, ''), full_name),
+        father_husband_name = COALESCE(NULLIF(${fhFullName}, ''), father_husband_name),
+        date_of_birth = COALESCE(${body.dob ? new Date(body.dob) : null}, date_of_birth),
+        gender = COALESCE(NULLIF(${body.gender || null}, ''), gender),
+        alternate_mobile = COALESCE(NULLIF(${body.altTel || null}, ''), alternate_mobile),
+        address = COALESCE(NULLIF(${body.address || null}, ''), address),
+        city = COALESCE(NULLIF(${body.city || null}, ''), city),
+        state = COALESCE(NULLIF(${body.state || null}, ''), state),
+        pincode = COALESCE(NULLIF(${body.pinCode || null}, ''), pincode),
+        pan_number = COALESCE(NULLIF(${body.pan ? String(body.pan).toUpperCase() : null}, ''), pan_number),
+        aadhaar_number = COALESCE(NULLIF(${body.aadhar || null}, ''), aadhaar_number),
+        bank_name = COALESCE(NULLIF(${body.bankBranch || null}, ''), bank_name),
+        account_number = COALESCE(NULLIF(${body.accountNumber || null}, ''), account_number),
+        ifsc_code = COALESCE(NULLIF(${body.ifscCode ? String(body.ifscCode).toUpperCase() : null}, ''), ifsc_code),
+        nominee_name = COALESCE(NULLIF(${firstNomineeName}, ''), nominee_name),
+        profile_picture_url = COALESCE(${photoUrl || null}, profile_picture_url),
+        enrollment_status = ${isFinalSubmit ? 'Pending' : 'Submitted'},
+        updated_at = NOW()
+      WHERE id = ${investor_id}
+    `;
+
+    return ok(res, { id: resultId, is_final_submitted: isFinalSubmit, app_status: newAppStatus }, 
+      isFinalSubmit ? "Investor enrollment finalized successfully." : "Investor enrollment saved successfully in review mode."
+    );
   } catch (e) {
     console.error("Investor Enrollment Error:", e);
-    return err(res, "Failed to submit enrollment form.");
+    return err(res, "Failed to submit enrollment form: " + e.message);
   }
 });
 
@@ -1991,6 +2117,7 @@ router.get(["/admin/investor-enrollment", "/admin/investor-enrollments"], authAd
         SELECT 
           u.id as investor_id,
           u.id as user_id,
+          u.member_id,
           u.full_name,
           u.email,
           u.mobile_number as mobile_no,
@@ -1998,18 +2125,32 @@ router.get(["/admin/investor-enrollment", "/admin/investor-enrollments"], authAd
           u.created_at as registered_at,
           u.status as account_status,
           e.id as submission_id,
+          e.id as enrollment_id,
           e.investor_enrollment_id,
           e.form_no,
+          e.form_date,
+          e.branch_code,
+          e.branch_name,
           e.project_name,
+          e.inv_first_name,
+          e.inv_surname,
+          e.amount,
+          e.payment_mode,
+          e.payment_status,
           e.app_status,
+          e.photo_url,
+          e.signature_first_url,
+          e.is_final_submitted,
+          e.rejection_reason,
           e.created_at as submitted_at,
           CASE 
-            WHEN e.id IS NOT NULL AND e.is_final_submitted = TRUE AND LOWER(COALESCE(e.app_status, '')) = 'approved' THEN 'Completed'
-            WHEN e.id IS NOT NULL AND LOWER(COALESCE(e.app_status, '')) IN ('rejected') THEN 'Rejected'
-            WHEN e.id IS NOT NULL THEN 'Pending'
+            WHEN e.id IS NOT NULL AND LOWER(COALESCE(e.app_status, '')) IN ('approved', 'completed') THEN 'Completed'
+            WHEN e.id IS NOT NULL AND LOWER(COALESCE(e.app_status, '')) = 'rejected' THEN 'Rejected'
+            WHEN e.id IS NOT NULL AND e.is_final_submitted = TRUE THEN 'Pending'
+            WHEN e.id IS NOT NULL THEN 'Submitted'
             ELSE '0'
           END as enrollment_status,
-          CASE WHEN e.id IS NOT NULL AND e.is_final_submitted = TRUE AND LOWER(COALESCE(e.app_status, '')) = 'approved' THEN TRUE ELSE FALSE END AS is_verified
+          CASE WHEN e.id IS NOT NULL AND e.is_final_submitted = TRUE AND LOWER(COALESCE(e.app_status, '')) IN ('approved', 'completed') THEN TRUE ELSE FALSE END AS is_verified
         FROM investor_users u
         LEFT JOIN investor_enrollments e ON u.id = e.investor_id
         WHERE u.deleted_at IS NULL
@@ -2017,6 +2158,7 @@ router.get(["/admin/investor-enrollment", "/admin/investor-enrollments"], authAd
             u.full_name ILIKE ${s}
             OR u.mobile_number ILIKE ${s}
             OR u.email ILIKE ${s}
+            OR u.member_id ILIKE ${s}
             OR e.investor_enrollment_id ILIKE ${s}
             OR e.form_no ILIKE ${s}
           )
@@ -2027,6 +2169,7 @@ router.get(["/admin/investor-enrollment", "/admin/investor-enrollments"], authAd
         SELECT 
           u.id as investor_id,
           u.id as user_id,
+          u.member_id,
           u.full_name,
           u.email,
           u.mobile_number as mobile_no,
@@ -2034,18 +2177,32 @@ router.get(["/admin/investor-enrollment", "/admin/investor-enrollments"], authAd
           u.created_at as registered_at,
           u.status as account_status,
           e.id as submission_id,
+          e.id as enrollment_id,
           e.investor_enrollment_id,
           e.form_no,
+          e.form_date,
+          e.branch_code,
+          e.branch_name,
           e.project_name,
+          e.inv_first_name,
+          e.inv_surname,
+          e.amount,
+          e.payment_mode,
+          e.payment_status,
           e.app_status,
+          e.photo_url,
+          e.signature_first_url,
+          e.is_final_submitted,
+          e.rejection_reason,
           e.created_at as submitted_at,
           CASE 
-            WHEN e.id IS NOT NULL AND e.is_final_submitted = TRUE AND LOWER(COALESCE(e.app_status, '')) = 'approved' THEN 'Completed'
-            WHEN e.id IS NOT NULL AND LOWER(COALESCE(e.app_status, '')) IN ('rejected') THEN 'Rejected'
-            WHEN e.id IS NOT NULL THEN 'Pending'
+            WHEN e.id IS NOT NULL AND LOWER(COALESCE(e.app_status, '')) IN ('approved', 'completed') THEN 'Completed'
+            WHEN e.id IS NOT NULL AND LOWER(COALESCE(e.app_status, '')) = 'rejected' THEN 'Rejected'
+            WHEN e.id IS NOT NULL AND e.is_final_submitted = TRUE THEN 'Pending'
+            WHEN e.id IS NOT NULL THEN 'Submitted'
             ELSE '0'
           END as enrollment_status,
-          CASE WHEN e.id IS NOT NULL AND e.is_final_submitted = TRUE AND LOWER(COALESCE(e.app_status, '')) = 'approved' THEN TRUE ELSE FALSE END AS is_verified
+          CASE WHEN e.id IS NOT NULL AND e.is_final_submitted = TRUE AND LOWER(COALESCE(e.app_status, '')) IN ('approved', 'completed') THEN TRUE ELSE FALSE END AS is_verified
         FROM investor_users u
         LEFT JOIN investor_enrollments e ON u.id = e.investor_id
         WHERE u.deleted_at IS NULL
@@ -2062,137 +2219,188 @@ router.get(["/admin/investor-enrollment", "/admin/investor-enrollments"], authAd
 // GET /api/admin/investor-enrollment/:id (Admin - Detail)
 router.get("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
   try {
-    const { id } = req.params;
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id).trim());
-    let row;
-    if (isUuid) {
-      const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE id = ${id}`;
-      row = resRow;
-    } else {
-      const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE investor_id = ${Number(id) || 0} OR investor_enrollment_id = ${String(id)} ORDER BY created_at DESC LIMIT 1`;
-      row = resRow;
+    const rawId = String(req.params.id || "").trim();
+    const numId = Number(rawId) || 0;
+
+    // 1. Comprehensive lookup: match by UUID, investor_id, investor_enrollment_id, form_no, or user member_id
+    const [row] = await sql`
+      SELECT ie.*,
+             iu.id AS user_pk_id,
+             iu.member_id AS user_member_id,
+             iu.full_name AS user_full_name,
+             iu.email AS user_email,
+             iu.mobile_number AS user_mobile_number,
+             iu.status AS user_account_status
+      FROM investor_enrollments ie
+      LEFT JOIN investor_users iu ON ie.investor_id = iu.id
+      WHERE (ie.id::text = ${rawId})
+         OR (ie.investor_id = ${numId} AND ${numId} > 0)
+         OR (ie.investor_enrollment_id = ${rawId})
+         OR (ie.form_no = ${rawId})
+         OR (iu.id = ${numId} AND ${numId} > 0)
+         OR (iu.member_id = ${rawId})
+      ORDER BY ie.created_at DESC
+      LIMIT 1
+    `;
+
+    if (row) {
+      return ok(res, row);
     }
 
-    if (!row) {
-      // Check if user exists in investor_users
-      const [invUser] = await sql`SELECT * FROM investor_users WHERE id = ${Number(id) || 0} AND deleted_at IS NULL`;
-      if (invUser) {
-        return ok(res, {
-          investor_id: invUser.id,
-          inv_first_name: invUser.full_name,
-          email: invUser.email,
-          mobile: invUser.mobile_number,
-          pan: invUser.pan_number,
-          aadhar: invUser.aadhaar_number,
-          address: invUser.address,
-          city: invUser.city,
-          state: invUser.state,
-          pin_code: invUser.pincode,
-          nominees: invUser.nominee_name ? [{ name: invUser.nominee_name, relationship: '', age: '', proportion: 100 }] : [],
-          is_new: true
-        });
-      }
-      return err(res, "Enrollment not found.", 404);
-    }
-    return ok(res, row);
-  } catch (e) {
-    return err(res, "Failed to fetch enrollment.");
-  }
-});
+    // 2. If no enrollment record exists yet, load basic investor user data
+    const [invUser] = await sql`
+      SELECT * FROM investor_users 
+      WHERE ((id = ${numId} AND ${numId} > 0) OR member_id = ${rawId})
+        AND deleted_at IS NULL
+      LIMIT 1
+    `;
 
-// Helper for validating Investor Enrollment before approval
-function validateInvestorEnrollmentForApproval(record) {
-  const missing = [];
-  if (!record.inv_first_name && !record.invFirstName && !record.first_name) missing.push("Investor Name");
-  if (!record.dob && !record.date_of_birth) missing.push("Date of Birth");
-  if (!record.gender) missing.push("Gender");
-  if (!record.mobile && !record.mobile_no && !record.mobile_number) missing.push("Contact / Mobile");
-  if (!record.pan && !record.pan_no && !record.pan_number) missing.push("PAN Number");
-  if (!record.aadhar && !record.aadhar_no && !record.aadhaar_number) missing.push("Aadhar Number");
-
-  if (!record.address) missing.push("Address");
-  if (!record.city) missing.push("City");
-  if (!record.state) missing.push("State");
-  if (!record.pin_code && !record.pincode && !record.pinCode) missing.push("PIN Code");
-
-  if (!record.account_number && !record.acc_number && !record.accountNumber) missing.push("Bank Account Number");
-  if (!record.ifsc_code && !record.ifsc && !record.ifscCode) missing.push("Bank IFSC Code");
-  if (!record.bank_branch && !record.bank_name && !record.bankBranch) missing.push("Bank Name / Branch");
-
-  // Check Nominees
-  let hasNominee = false;
-  if (record.nominees) {
-    try {
-      const parsed = typeof record.nominees === 'string' ? JSON.parse(record.nominees) : record.nominees;
-      if (Array.isArray(parsed) && parsed.length > 0 && (parsed[0].name || parsed[0].nominee_name || parsed[0].nomineeName)) {
-        hasNominee = true;
-      }
-    } catch (e) {}
-  }
-  if (!hasNominee && !record.nominee_name) missing.push("Nominee Details");
-
-  if (!record.photo_url && !record.photo) missing.push("Applicant Photo");
-  if (!record.signature_first_url && !record.signatureFirstApplicant) missing.push("Applicant Signature");
-
-  return missing;
-}
-
-// PUT /api/admin/investor-enrollment/:id (Admin - Update)
-router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const b = req.body;
-    
-    try {
-      await sql`ALTER TABLE investor_enrollments ADD COLUMN IF NOT EXISTS ifsc_code VARCHAR(20)`;
-    } catch (e) {}
-
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-    let existing;
-    if (isUuid) {
-      const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE id = ${id}`;
-      existing = resRow;
-    } else {
-      const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE investor_id = ${Number(id)} ORDER BY created_at DESC LIMIT 1`;
-      existing = resRow;
-    }
-
-    const appStatusVal = b.appStatus ?? b.app_status ?? b.enrollment_status ?? existing?.app_status ?? 'Pending';
-    const isApproving = appStatusVal && ['approved', 'completed'].includes(String(appStatusVal).toLowerCase());
-
-    if (isApproving) {
-      if (!existing) {
-        return res.status(422).json({
-          success: false,
-          message: "Enrollment Form has not been completed yet. Please complete and final-submit the Enrollment Form before approving."
-        });
-      }
-
-      const isFinal = existing.is_final_submitted || Boolean(b.is_final_submitted || b.isFinalSubmit);
-      if (!isFinal) {
-        return res.status(422).json({
-          success: false,
-          message: "Enrollment cannot be approved because Final Submit has not been completed."
-        });
-      }
-
-      const merged = { ...existing, ...b };
-      const missing = validateInvestorEnrollmentForApproval(merged);
-      if (missing.length > 0) {
-        return res.status(422).json({
-          success: false,
-          message: `Enrollment cannot be approved. Missing:\n- ${missing.join("\n- ")}\n\nPlease complete the enrollment form and Final Submit it before approval.`
-        });
-      }
-    }
-
-    if (!existing) {
-      return res.status(422).json({
-        success: false,
-        message: "Enrollment Form has not been completed yet. Please complete and final-submit the Enrollment Form before approving."
+    if (invUser) {
+      return ok(res, {
+        investor_id: invUser.id,
+        investor_enrollment_id: invUser.member_id,
+        inv_first_name: invUser.full_name,
+        email: invUser.email,
+        mobile: invUser.mobile_number,
+        pan: invUser.pan_number,
+        aadhar: invUser.aadhaar_number,
+        address: invUser.address,
+        city: invUser.city,
+        state: invUser.state,
+        pin_code: invUser.pincode,
+        bank_branch: invUser.bank_name,
+        account_number: invUser.account_number,
+        ifsc_code: invUser.ifsc_code,
+        nominees: invUser.nominee_name ? [{ name: invUser.nominee_name, relationship: '', age: '', proportion: 100 }] : [],
+        photo_url: invUser.profile_picture_url,
+        is_new: true
       });
     }
 
+    return err(res, "Enrollment not found.", 404);
+  } catch (e) {
+    console.error("GET /api/admin/investor-enrollment/:id error:", e);
+    return err(res, "Failed to fetch enrollment: " + e.message);
+  }
+});
+
+// PUT /api/admin/investor-enrollment/:id (Admin - Unlimited Edit & Save)
+router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
+  try {
+    const rawId = String(req.params.id || "").trim();
+    const numId = Number(rawId) || 0;
+    const b = req.body;
+
+    // Comprehensive lookup to locate existing record
+    const [existing] = await sql`
+      SELECT ie.*, iu.id as user_pk_id, iu.member_id as user_member_id
+      FROM investor_enrollments ie
+      LEFT JOIN investor_users iu ON ie.investor_id = iu.id
+      WHERE (ie.id::text = ${rawId})
+         OR (ie.investor_id = ${numId} AND ${numId} > 0)
+         OR (ie.investor_enrollment_id = ${rawId})
+         OR (ie.form_no = ${rawId})
+         OR (iu.id = ${numId} AND ${numId} > 0)
+         OR (iu.member_id = ${rawId})
+      ORDER BY ie.created_at DESC
+      LIMIT 1
+    `;
+
+    // Process photo and signatures if base64 sent
+    const processBase64 = async (dataUrl, filename) => {
+      if (!dataUrl || !dataUrl.startsWith("data:")) return dataUrl;
+      const matches = dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+      if (!matches || matches.length !== 3) return dataUrl;
+      const buffer = Buffer.from(matches[2], 'base64');
+      const fileUrl = await saveFileToVPS(buffer, filename, "investor", {
+        entityId: existing?.investor_id || numId,
+        subCategory: "enrollments"
+      });
+      return fileUrl;
+    };
+
+    let photoUrl = existing?.photo_url || null;
+    if (b.photo && b.photo.startsWith("data:")) {
+      photoUrl = await processBase64(b.photo, `photo_${Date.now()}.png`);
+    } else if (b.photo !== undefined) {
+      photoUrl = b.photo || null;
+    }
+
+    let sigFirstUrl = existing?.signature_first_url || null;
+    if (b.signatureFirstApplicant && b.signatureFirstApplicant.startsWith("data:")) {
+      sigFirstUrl = await processBase64(b.signatureFirstApplicant, `sig1_${Date.now()}.png`);
+    } else if (b.signature && b.signature.startsWith("data:")) {
+      sigFirstUrl = await processBase64(b.signature, `sig1_${Date.now()}.png`);
+    } else if (b.signatureFirstApplicant !== undefined) {
+      sigFirstUrl = b.signatureFirstApplicant || null;
+    } else if (b.signature !== undefined) {
+      sigFirstUrl = b.signature || null;
+    }
+
+    let sigJointUrl = existing?.signature_joint_url || null;
+    if (b.signatureJointApplicant && b.signatureJointApplicant.startsWith("data:")) {
+      sigJointUrl = await processBase64(b.signatureJointApplicant, `sig2_${Date.now()}.png`);
+    } else if (b.signatureJointApplicant !== undefined) {
+      sigJointUrl = b.signatureJointApplicant || null;
+    }
+
+    // Backend validation of mandatory fields (Part 3A & 3B)
+    const missing = [];
+    if (!b.invFirstName && !b.inv_first_name) missing.push("Investor First Name");
+    if (!b.invSurname && !b.inv_surname) missing.push("Investor Surname");
+    if (!b.fhFirstName && !b.fh_first_name) missing.push("Father's/Husband's First Name");
+    if (!b.fhSurname && !b.fh_surname) missing.push("Father's/Husband's Surname");
+    if (!b.dob && !b.date_of_birth) missing.push("Date of Birth");
+    if (!b.address) missing.push("Permanent Address");
+    if (!b.city) missing.push("City");
+    if (!b.state) missing.push("State");
+    if (!b.pinCode && !b.pin_code) missing.push("Pin Code");
+    if (!b.mobile && !b.mobile_no && !b.mobile_number) missing.push("Mobile No.");
+    if (!b.email) missing.push("Email ID");
+    if (!b.pan && !b.pan_number) missing.push("PAN Card No.");
+    if (!b.aadhar && !b.aadhaar_number) missing.push("Aadhaar Card No.");
+    if (!b.amount || Number(b.amount) <= 0) missing.push("Investment Amount (> 0)");
+    if (!b.paymentMode && !b.payment_mode) missing.push("Mode of Payment");
+    if (b.paymentMode !== 'Cash' && b.payment_mode !== 'Cash') {
+      if (!b.txnNo && !b.txn_no) missing.push("TXN / Cheque No.");
+      if (!b.txnDate && !b.txn_date) missing.push("Payment Date");
+    }
+    if (!b.bankBranch && !b.bank_branch) missing.push("Bank & Branch");
+    if (!b.accountNumber && !b.account_number) missing.push("Account Number");
+    if (!b.ifscCode && !b.ifsc_code) missing.push("IFSC Code");
+    if (!b.declPlace && !b.decl_place) missing.push("Place");
+    if (!photoUrl) missing.push("Passport Photo");
+    if (!sigFirstUrl) missing.push("Investor Signature");
+
+    // Office Use validations (Part 3H.6)
+    const appStatusVal = b.appStatus ?? b.app_status ?? existing?.app_status ?? 'Hold/Pending KYC';
+    const isRejecting = String(appStatusVal).toLowerCase() === 'rejected';
+    const rejectionReasonVal = b.rejectionReason ?? b.rejection_reason ?? existing?.rejection_reason ?? null;
+    if (isRejecting && (!rejectionReasonVal || !String(rejectionReasonVal).trim())) {
+      return res.status(400).json({
+        success: false,
+        message: "Application status 'Rejected' chunne par Reject Reason darj karna zaroori hai (Rejection reason is required when rejecting)."
+      });
+    }
+
+    const paymentStatusVal = b.paymentStatus ?? b.payment_status ?? existing?.payment_status ?? null;
+    const paymentStatusDateVal = b.paymentStatusDate ?? b.payment_status_date ?? existing?.payment_status_date ?? null;
+    if ((paymentStatusVal === 'Cleared' || paymentStatusVal === 'Bounced') && !paymentStatusDateVal) {
+      return res.status(400).json({
+        success: false,
+        message: `Payment status '${paymentStatusVal}' chunne par Payment Date darj karna zaroori hai (Payment Date is required).`
+      });
+    }
+
+    if (missing.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Validation Error: Please fill required fields: ${missing.join(", ")}`,
+        missingFields: missing
+      });
+    }
+
+    // Format and normalize values
     const formNoVal = b.formNo ?? b.form_no ?? existing?.form_no ?? null;
     const formDateVal = b.formDate ?? b.form_date ?? existing?.form_date ?? null;
     const branchCodeVal = b.branchCode ?? b.branch_code ?? existing?.branch_code ?? null;
@@ -2200,44 +2408,45 @@ router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
     const investorEnrollmentIdVal = b.investorId ?? b.investor_enrollment_id ?? existing?.investor_enrollment_id ?? null;
     const projectNameVal = b.projectName ?? b.project_name ?? existing?.project_name ?? null;
 
-    const invFirstNameVal = b.invFirstName ?? b.inv_first_name ?? b.first_name ?? existing?.inv_first_name ?? 'Investor';
-    const invMiddleNameVal = b.invMiddleName ?? b.inv_middle_name ?? existing?.inv_middle_name ?? null;
-    const invSurnameVal = b.invSurname ?? b.inv_surname ?? b.last_name ?? existing?.inv_surname ?? null;
-    const fhFirstNameVal = b.fhFirstName ?? b.fh_first_name ?? b.father_name ?? existing?.fh_first_name ?? null;
-    const fhMiddleNameVal = b.fhMiddleName ?? b.fh_middle_name ?? existing?.fh_middle_name ?? null;
-    const fhSurnameVal = b.fhSurname ?? b.fh_surname ?? existing?.fh_surname ?? null;
+    const invFirstNameVal = normalizeHumanName(b.invFirstName ?? b.inv_first_name ?? existing?.inv_first_name);
+    const invMiddleNameVal = (b.invMiddleName || existing?.inv_middle_name) ? normalizeHumanName(b.invMiddleName || existing?.inv_middle_name) : null;
+    const invSurnameVal = normalizeHumanName(b.invSurname ?? b.inv_surname ?? existing?.inv_surname);
+    const fhFirstNameVal = normalizeHumanName(b.fhFirstName ?? b.fh_first_name ?? existing?.fh_first_name);
+    const fhMiddleNameVal = (b.fhMiddleName || existing?.fh_middle_name) ? normalizeHumanName(b.fhMiddleName || existing?.fh_middle_name) : null;
+    const fhSurnameVal = normalizeHumanName(b.fhSurname ?? b.fh_surname ?? existing?.fh_surname);
 
     const dobVal = b.dob ?? b.date_of_birth ?? existing?.dob ?? null;
     const ageVal = b.age ? Number(b.age) : (existing?.age ?? null);
-    const genderVal = b.gender ?? existing?.gender ?? null;
+    const genderVal = b.gender ?? existing?.gender ?? 'M';
+    const religionVal = b.religion ?? existing?.religion ?? null;
     const occupationVal = b.occupation ?? existing?.occupation ?? null;
     const occupationOtherVal = b.occupationOther ?? b.occupation_other ?? existing?.occupation_other ?? null;
     const addressVal = b.address ?? existing?.address ?? null;
     const cityVal = b.city ?? existing?.city ?? null;
     const stateVal = b.state ?? existing?.state ?? null;
-    const pinCodeVal = b.pinCode ?? b.pin_code ?? b.pincode ?? existing?.pin_code ?? null;
+    const pinCodeVal = b.pinCode ?? b.pin_code ?? existing?.pin_code ?? null;
 
-    const mobileVal = b.mobile ?? b.mobile_no ?? b.mobile_number ?? existing?.mobile ?? '0000000000';
-    const altTelVal = b.altTel ?? b.alt_tel ?? b.alternate_mobile ?? existing?.alt_tel ?? null;
+    const corrAddressVal = b.corrAddress ?? b.corr_address ?? existing?.corr_address ?? addressVal;
+    const corrCityVal = b.corrCity ?? b.corr_city ?? existing?.corr_city ?? cityVal;
+    const corrStateVal = b.corrState ?? b.corr_state ?? existing?.corr_state ?? stateVal;
+    const corrPinCodeVal = b.corrPinCode ?? b.corr_pin_code ?? existing?.corr_pin_code ?? pinCodeVal;
+
+    const mobileVal = b.mobile ?? b.mobile_no ?? b.mobile_number ?? existing?.mobile ?? null;
+    const altTelVal = b.altTel ?? b.alt_tel ?? existing?.alt_tel ?? null;
     const emailVal = b.email ?? existing?.email ?? null;
-    const panVal = b.pan ?? b.pan_no ?? b.pan_number ?? existing?.pan ?? null;
-    const aadharVal = b.aadhar ?? b.aadhar_no ?? b.aadhaar_number ?? existing?.aadhar ?? null;
+    const panVal = b.pan ? String(b.pan).toUpperCase() : (existing?.pan ?? null);
+    const aadharVal = b.aadhar ?? b.aadhaar_number ?? existing?.aadhar ?? null;
 
     const amountVal = b.amount !== undefined ? Number(b.amount) : (existing?.amount ?? null);
     const amountWordsVal = b.amountWords ?? b.amount_words ?? existing?.amount_words ?? null;
     const paymentModeVal = b.paymentMode ?? b.payment_mode ?? existing?.payment_mode ?? null;
     const txnNoVal = b.txnNo ?? b.txn_no ?? existing?.txn_no ?? null;
     const txnDateVal = b.txnDate ?? b.txn_date ?? existing?.txn_date ?? null;
-    const corrAddressVal = b.corrAddress ?? b.corr_address ?? existing?.corr_address ?? null;
-    const corrCityVal = b.corrCity ?? b.corr_city ?? existing?.corr_city ?? null;
-    const corrStateVal = b.corrState ?? b.corr_state ?? existing?.corr_state ?? null;
-    const corrPinCodeVal = b.corrPinCode ?? b.corr_pin_code ?? existing?.corr_pin_code ?? null;
+    const bankBranchVal = b.bankBranch ?? b.bank_branch ?? existing?.bank_branch ?? null;
+    const ifscCodeVal = b.ifscCode ? String(b.ifscCode).toUpperCase() : (existing?.ifsc_code ?? null);
+    const accountNumberVal = b.accountNumber ?? b.account_number ?? existing?.account_number ?? null;
 
-    const bankBranchVal = b.bankBranch ?? b.bank_branch ?? b.bank_name ?? existing?.bank_branch ?? null;
-    const ifscCodeVal = b.ifscCode ?? b.ifsc_code ?? b.ifsc ?? existing?.ifsc_code ?? null;
-    const accountNumberVal = b.accountNumber ?? b.account_number ?? b.acc_number ?? existing?.account_number ?? null;
-
-    const nomineesVal = b.nominees ? JSON.stringify(b.nominees) : (existing?.nominees ? JSON.stringify(existing.nominees) : null);
+    const nomineesVal = b.nominees ? (typeof b.nominees === 'string' ? b.nominees : JSON.stringify(b.nominees)) : (existing?.nominees ? (typeof existing.nominees === 'string' ? existing.nominees : JSON.stringify(existing.nominees)) : null);
     const declDateVal = b.declDate ?? b.decl_date ?? existing?.decl_date ?? null;
     const declPlaceVal = b.declPlace ?? b.decl_place ?? existing?.decl_place ?? null;
     const declSignatureNameVal = b.declSignatureName ?? b.decl_signature_name ?? existing?.decl_signature_name ?? null;
@@ -2245,50 +2454,95 @@ router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
     const jointApplicantNameVal = b.jointApplicantName ?? b.joint_applicant_name ?? existing?.joint_applicant_name ?? null;
 
     const verifiedByVal = b.verifiedBy ?? b.verified_by ?? existing?.verified_by ?? null;
-    const paymentStatusVal = b.paymentStatus ?? b.payment_status ?? existing?.payment_status ?? null;
-    const paymentStatusDateVal = b.paymentStatusDate ?? b.payment_status_date ?? existing?.payment_status_date ?? null;
     const authorizedSignatoryVal = b.authorizedSignatory ?? b.authorized_signatory ?? existing?.authorized_signatory ?? null;
+    const updatedByUserId = req.admin?.admin_id || req.admin?.id || 1;
 
-    const [updated] = await sql`
-      UPDATE investor_enrollments
-      SET
-        form_no = ${formNoVal}, form_date = ${formDateVal}, branch_code = ${branchCodeVal}, branch_name = ${branchNameVal}, investor_enrollment_id = ${investorEnrollmentIdVal}, project_name = ${projectNameVal},
-        inv_first_name = ${invFirstNameVal}, inv_middle_name = ${invMiddleNameVal}, inv_surname = ${invSurnameVal}, fh_first_name = ${fhFirstNameVal}, fh_middle_name = ${fhMiddleNameVal}, fh_surname = ${fhSurnameVal},
-        dob = ${dobVal}, age = ${ageVal}, gender = ${genderVal}, occupation = ${occupationVal}, occupation_other = ${occupationOtherVal}, address = ${addressVal}, city = ${cityVal}, state = ${stateVal}, pin_code = ${pinCodeVal},
-        corr_address = ${corrAddressVal}, corr_city = ${corrCityVal}, corr_state = ${corrStateVal}, corr_pin_code = ${corrPinCodeVal},
-        mobile = ${mobileVal}, alt_tel = ${altTelVal}, email = ${emailVal}, pan = ${panVal}, aadhar = ${aadharVal}, amount = ${amountVal}, amount_words = ${amountWordsVal}, payment_mode = ${paymentModeVal}, txn_no = ${txnNoVal}, txn_date = ${txnDateVal}, bank_branch = ${bankBranchVal}, ifsc_code = ${ifscCodeVal}, account_number = ${accountNumberVal},
-        nominees = ${nomineesVal}, decl_date = ${declDateVal}, decl_place = ${declPlaceVal}, decl_signature_name = ${declSignatureNameVal}, first_applicant_name = ${firstApplicantNameVal}, joint_applicant_name = ${jointApplicantNameVal},
-        app_status = ${appStatusVal}, verified_by = ${verifiedByVal}, payment_status = ${paymentStatusVal}, payment_status_date = ${paymentStatusDateVal}, authorized_signatory = ${authorizedSignatoryVal},
-        updated_at = NOW()
-      WHERE id = ${existing.id}
-      RETURNING *
-    `;
+    let targetEnrollmentId = existing?.id;
+    let targetInvestorId = existing?.investor_id || (numId > 0 ? numId : null);
 
-    // Also update investor_users if applicable
-    const invUserId = existing?.investor_id || (!isUuid ? Number(id) : null);
-    if (invUserId) {
-      const uEnrollmentStatus = isApproving ? 'Completed' : 'Pending';
+    // If no existing enrollment row, insert one!
+    if (!existing) {
+      const [newRow] = await sql`
+        INSERT INTO investor_enrollments (
+          investor_id, form_no, form_date, branch_code, branch_name, investor_enrollment_id, project_name,
+          inv_first_name, inv_middle_name, inv_surname, fh_first_name, fh_middle_name, fh_surname,
+          dob, age, gender, religion, occupation, occupation_other, address, city, state, pin_code,
+          corr_address, corr_city, corr_state, corr_pin_code,
+          mobile, alt_tel, email, pan, aadhar, amount, amount_words, payment_mode, txn_no, txn_date, bank_branch, ifsc_code, account_number,
+          nominees, decl_date, decl_place, decl_signature_name, first_applicant_name, joint_applicant_name,
+          app_status, rejection_reason, verified_by, payment_status, payment_status_date, authorized_signatory,
+          photo_url, signature_first_url, signature_joint_url, is_final_submitted, updated_by_user_id
+        ) VALUES (
+          ${targetInvestorId}, ${formNoVal}, ${formDateVal}, ${branchCodeVal}, ${branchNameVal}, ${investorEnrollmentIdVal}, ${projectNameVal},
+          ${invFirstNameVal}, ${invMiddleNameVal}, ${invSurnameVal}, ${fhFirstNameVal}, ${fhMiddleNameVal}, ${fhSurnameVal},
+          ${dobVal}, ${ageVal}, ${genderVal}, ${religionVal}, ${occupationVal}, ${occupationOtherVal}, ${addressVal}, ${cityVal}, ${stateVal}, ${pinCodeVal},
+          ${corrAddressVal}, ${corrCityVal}, ${corrStateVal}, ${corrPinCodeVal},
+          ${mobileVal}, ${altTelVal}, ${emailVal}, ${panVal}, ${aadharVal}, ${amountVal}, ${amountWordsVal}, ${paymentModeVal}, ${txnNoVal}, ${txnDateVal}, ${bankBranchVal}, ${ifscCodeVal}, ${accountNumberVal},
+          ${nomineesVal}, ${declDateVal}, ${declPlaceVal}, ${declSignatureNameVal}, ${firstApplicantNameVal}, ${jointApplicantNameVal},
+          ${appStatusVal}, ${rejectionReasonVal}, ${verifiedByVal}, ${paymentStatusVal}, ${paymentStatusDateVal}, ${authorizedSignatoryVal},
+          ${photoUrl}, ${sigFirstUrl}, ${sigJointUrl}, true, ${updatedByUserId}
+        ) RETURNING id
+      `;
+      targetEnrollmentId = newRow?.id;
+    } else {
+      // If rejecting, set is_final_submitted = false so investor can edit
+      const finalSubmitFlag = isRejecting ? false : existing.is_final_submitted;
       await sql`
-        UPDATE investor_users
+        UPDATE investor_enrollments
         SET
-          full_name = COALESCE(${invFirstNameVal + (invSurnameVal ? ' ' + invSurnameVal : '')}, full_name),
-          mobile_number = COALESCE(${mobileVal}, mobile_number),
-          email = COALESCE(${emailVal}, email),
-          address = COALESCE(${addressVal}, address),
-          city = COALESCE(${cityVal}, city),
-          state = COALESCE(${stateVal}, state),
-          pincode = COALESCE(${pinCodeVal}, pincode),
-          pan_number = COALESCE(${panVal}, pan_number),
-          aadhaar_number = COALESCE(${aadharVal}, aadhaar_number),
-          bank_name = COALESCE(${bankBranchVal}, bank_name),
-          account_number = COALESCE(${accountNumberVal}, account_number),
-          ifsc_code = COALESCE(${ifscCodeVal}, ifsc_code),
-          enrollment_status = ${uEnrollmentStatus}
-        WHERE id = ${invUserId}
+          form_no = ${formNoVal}, form_date = ${formDateVal}, branch_code = ${branchCodeVal}, branch_name = ${branchNameVal}, investor_enrollment_id = ${investorEnrollmentIdVal}, project_name = ${projectNameVal},
+          inv_first_name = ${invFirstNameVal}, inv_middle_name = ${invMiddleNameVal}, inv_surname = ${invSurnameVal}, fh_first_name = ${fhFirstNameVal}, fh_middle_name = ${fhMiddleNameVal}, fh_surname = ${fhSurnameVal},
+          dob = ${dobVal}, age = ${ageVal}, gender = ${genderVal}, religion = ${religionVal}, occupation = ${occupationVal}, occupation_other = ${occupationOtherVal}, address = ${addressVal}, city = ${cityVal}, state = ${stateVal}, pin_code = ${pinCodeVal},
+          corr_address = ${corrAddressVal}, corr_city = ${corrCityVal}, corr_state = ${corrStateVal}, corr_pin_code = ${corrPinCodeVal},
+          mobile = ${mobileVal}, alt_tel = ${altTelVal}, email = ${emailVal}, pan = ${panVal}, aadhar = ${aadharVal}, amount = ${amountVal}, amount_words = ${amountWordsVal}, payment_mode = ${paymentModeVal}, txn_no = ${txnNoVal}, txn_date = ${txnDateVal}, bank_branch = ${bankBranchVal}, ifsc_code = ${ifscCodeVal}, account_number = ${accountNumberVal},
+          nominees = ${nomineesVal}, decl_date = ${declDateVal}, decl_place = ${declPlaceVal}, decl_signature_name = ${declSignatureNameVal}, first_applicant_name = ${firstApplicantNameVal}, joint_applicant_name = ${jointApplicantNameVal},
+          app_status = ${appStatusVal}, rejection_reason = ${rejectionReasonVal}, verified_by = ${verifiedByVal}, payment_status = ${paymentStatusVal}, payment_status_date = ${paymentStatusDateVal}, authorized_signatory = ${authorizedSignatoryVal},
+          photo_url = COALESCE(${photoUrl}, photo_url), signature_first_url = COALESCE(${sigFirstUrl}, signature_first_url), signature_joint_url = COALESCE(${sigJointUrl}, signature_joint_url),
+          is_final_submitted = ${finalSubmitFlag}, updated_by_user_id = ${updatedByUserId}, updated_at = NOW()
+        WHERE id = ${existing.id}
       `;
     }
 
-    return ok(res, updated, "Investor enrollment updated successfully.");
+    // Auto-sync into investor_users (Rule 3G & 3H.7)
+    // NEVER overwrite email or mobile_number (auth login credentials)!
+    if (targetInvestorId) {
+      const isApproved = String(appStatusVal).toLowerCase() === 'approved';
+      const uEnrollmentStatus = isApproved ? 'Completed' : (isRejecting ? 'Rejected' : 'Pending');
+      const fullName = [invFirstNameVal, invMiddleNameVal, invSurnameVal].filter(Boolean).join(" ");
+      let firstNomineeName = null;
+      if (b.nominees && Array.isArray(b.nominees) && b.nominees.length > 0 && b.nominees[0].name) {
+        firstNomineeName = b.nominees[0].name;
+      }
+
+      await sql`
+        UPDATE investor_users
+        SET
+          full_name = COALESCE(NULLIF(${fullName}, ''), full_name),
+          father_husband_name = COALESCE(NULLIF(${[fhFirstNameVal, fhMiddleNameVal, fhSurnameVal].filter(Boolean).join(" ")}, ''), father_husband_name),
+          date_of_birth = COALESCE(${dobVal ? new Date(dobVal) : null}, date_of_birth),
+          gender = COALESCE(NULLIF(${genderVal}, ''), gender),
+          alternate_mobile = COALESCE(NULLIF(${altTelVal}, ''), alternate_mobile),
+          address = COALESCE(NULLIF(${addressVal}, ''), address),
+          city = COALESCE(NULLIF(${cityVal}, ''), city),
+          state = COALESCE(NULLIF(${stateVal}, ''), state),
+          pincode = COALESCE(NULLIF(${pinCodeVal}, ''), pincode),
+          pan_number = COALESCE(NULLIF(${panVal}, ''), pan_number),
+          aadhaar_number = COALESCE(NULLIF(${aadharVal}, ''), aadhaar_number),
+          bank_name = COALESCE(NULLIF(${bankBranchVal}, ''), bank_name),
+          account_number = COALESCE(NULLIF(${accountNumberVal}, ''), account_number),
+          ifsc_code = COALESCE(NULLIF(${ifscCodeVal}, ''), ifsc_code),
+          nominee_name = COALESCE(NULLIF(${firstNomineeName}, ''), nominee_name),
+          profile_picture_url = COALESCE(${photoUrl}, profile_picture_url),
+          enrollment_status = ${uEnrollmentStatus},
+          is_verified = CASE WHEN ${isApproved} THEN TRUE ELSE is_verified END,
+          status = CASE WHEN ${isApproved} THEN 'active' ELSE (CASE WHEN ${isRejecting} THEN 'rejected' ELSE status END) END,
+          updated_at = NOW()
+        WHERE id = ${targetInvestorId}
+      `;
+    }
+
+    const [updatedRow] = await sql`SELECT * FROM investor_enrollments WHERE id = ${targetEnrollmentId}`;
+    return ok(res, updatedRow, "Investor enrollment updated successfully.");
   } catch (e) {
     console.error("Update Enrollment Error:", e);
     return err(res, "Failed to update enrollment: " + e.message);
