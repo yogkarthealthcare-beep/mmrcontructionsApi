@@ -365,8 +365,8 @@ async function executePlotOrdersQuery(req, res, scopeFilter = sql`TRUE`, extraMe
 
     const bookingTypeFilter = booking_type && booking_type !== 'ALL'
       ? (booking_type === 'SELF_PURCHASE'
-          ? sql`(b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id OR b.user_id = b.booked_by_user_id)`
-          : sql`(b.booking_type != 'SELF_PURCHASE' AND b.user_id != COALESCE(b.sold_by_user_id, 0))`)
+          ? sql`(COALESCE(buyer.user_type, 'Customer') != 'Customer' AND (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id))`
+          : sql`(COALESCE(buyer.user_type, 'Customer') = 'Customer' OR (b.booking_type != 'SELF_PURCHASE' AND b.user_id != COALESCE(b.sold_by_user_id, 0)))`)
       : sql`TRUE`;
 
     const siteFilter = site_id ? sql`p.site_id = ${Number(site_id)}` : sql`TRUE`;
@@ -381,8 +381,8 @@ async function executePlotOrdersQuery(req, res, scopeFilter = sql`TRUE`, extraMe
         COUNT(CASE WHEN b.booking_status IN ('Confirmed', 'Approved') THEN 1 END)::int AS approved_count,
         COUNT(CASE WHEN b.booking_status IN ('Pending', 'PaymentPending', 'Under Process') THEN 1 END)::int AS pending_count,
         COUNT(CASE WHEN b.booking_status = 'Rejected' THEN 1 END)::int AS rejected_count,
-        COUNT(CASE WHEN (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id OR b.user_id = b.booked_by_user_id) THEN 1 END)::int AS self_purchase_count,
-        COUNT(CASE WHEN (b.booking_type != 'SELF_PURCHASE' AND b.user_id != COALESCE(b.sold_by_user_id, 0)) THEN 1 END)::int AS customer_sale_count,
+        COUNT(CASE WHEN (COALESCE(buyer.user_type, 'Customer') != 'Customer' AND (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id)) THEN 1 END)::int AS self_purchase_count,
+        COUNT(CASE WHEN (COALESCE(buyer.user_type, 'Customer') = 'Customer' OR (b.booking_type != 'SELF_PURCHASE' AND b.user_id != COALESCE(b.sold_by_user_id, 0))) THEN 1 END)::int AS customer_sale_count,
         COALESCE(SUM(COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (b.advance_amount + b.remaining_balance), 0)), 0)::numeric AS total_sales_volume,
         COALESCE(SUM(COALESCE(b.advance_amount, 0)), 0)::numeric AS total_advance_volume
       FROM bookings b
@@ -412,7 +412,7 @@ async function executePlotOrdersQuery(req, res, scopeFilter = sql`TRUE`, extraMe
         b.associate_approval_status,
         b.associate_rejection_reason,
         b.booking_type,
-        (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id OR b.user_id = b.booked_by_user_id) AS is_self_purchase,
+        (COALESCE(buyer.user_type, 'Customer') != 'Customer' AND (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id)) AS is_self_purchase,
         b.payment_type,
         b.payment_method,
         COALESCE(b.advance_amount, 0) AS advance_amount,
@@ -546,7 +546,7 @@ async function executePlotOrderDetailQuery(req, res, bookingId, scopeFilter = sq
     const [order] = await sql`
       SELECT
         b.*,
-        (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id OR b.user_id = b.booked_by_user_id) AS is_self_purchase,
+        (COALESCE(buyer.user_type, 'Customer') != 'Customer' AND (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id)) AS is_self_purchase,
         COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (b.advance_amount + b.remaining_balance), 0) AS total_agreed_price,
 
         -- Buyer
@@ -742,9 +742,10 @@ router.patch('/admin/plot-orders/:id/status', verifyAdminToken, role('SuperAdmin
 
     const [booking] = await sql`
       SELECT b.*, p.plot_id, p.plot_status, p.site_id,
-             (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id OR b.user_id = b.booked_by_user_id) AS is_self_purchase
+             (COALESCE(buyer.user_type, 'Customer') != 'Customer' AND (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id)) AS is_self_purchase
       FROM bookings b
       LEFT JOIN plots p ON p.plot_id = b.plot_id
+      LEFT JOIN users buyer ON buyer.user_id = b.user_id
       WHERE b.booking_id = ${bookingId}
     `;
 

@@ -204,7 +204,7 @@ router.get(['/team-member/commissions', '/api/team-member/commissions'], verifyU
           c.net_amount,
           ROUND(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) * 0.05, 2)
         ) AS commission_amount,
-        COALESCE(c.commission_status, CASE WHEN b.settlement_status = 'Released' THEN 'Approved' ELSE 'Pending' END) AS commission_status,
+        COALESCE(c.commission_status::text, CASE WHEN b.settlement_status = 'Released' THEN 'Approved' ELSE 'Pending' END) AS commission_status,
         CASE
           WHEN b.sold_by_user_id = ${userId} THEN 'Direct Seller'
           ELSE 'Team Participant'

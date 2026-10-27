@@ -1022,16 +1022,41 @@ router.post("/admin/bookings/allocate-plot", adminAuth, async (req, res) => {
       const approvedPaid = isOnlineApproved ? initialPayment : 0;
       const remainingBalance = Math.max(0, totalPrice - approvedPaid);
 
+      // Look up buyer's referrer/sponsor to attribute sold_by_user_id and associate_user_id
+      const [buyerUser] = await db`
+        SELECT user_id, referred_by_user_id, sponsor_user_id
+        FROM users WHERE user_id = ${userId} LIMIT 1
+      `;
+      const derivedSoldBy = Number(buyerUser?.referred_by_user_id || buyerUser?.sponsor_user_id || 0) || null;
+      let derivedAssociateId = null;
+      if (derivedSoldBy) {
+        const [tmRow] = await db`
+          SELECT associate_id FROM team_members
+          WHERE user_id = ${derivedSoldBy} AND LOWER(status) IN ('approved', 'active')
+          LIMIT 1
+        `;
+        if (tmRow?.associate_id) {
+          derivedAssociateId = Number(tmRow.associate_id);
+        } else {
+          const [sellerRow] = await db`SELECT user_type, sponsor_user_id FROM users WHERE user_id = ${derivedSoldBy} LIMIT 1`;
+          if (sellerRow?.user_type === 'Associate') {
+            derivedAssociateId = derivedSoldBy;
+          } else if (sellerRow?.sponsor_user_id) {
+            derivedAssociateId = Number(sellerRow.sponsor_user_id);
+          }
+        }
+      }
+
       const [booking] = await db`
         INSERT INTO bookings (
           booking_id, booking_serial, user_id, site_id, plot_id, plot_number, payment_type, advance_amount,
           booking_status, workflow_status, payment_method, required_booking_amount,
-          remaining_balance, notes, base_price, created_at, updated_at
+          remaining_balance, notes, base_price, sold_by_user_id, associate_user_id, created_at, updated_at
         ) VALUES (
           ${bookingId}, ${serial}, ${userId}, ${siteId}, ${matchedPlotId}, ${plotNumber}, ${paymentMode}, ${initialPayment},
           ${(isOnlineApproved && remainingBalance === 0) ? 'Confirmed' : 'Allocated'},
           'Plot Allocated by Admin', ${paymentMode}, ${initialPayment},
-          ${remainingBalance}, ${remarks}, ${totalPrice}, NOW(), NOW()
+          ${remainingBalance}, ${remarks}, ${totalPrice}, ${derivedSoldBy}, ${derivedAssociateId}, NOW(), NOW()
         ) RETURNING *`;
 
       let paymentRecord = null;
@@ -1363,16 +1388,43 @@ router.post("/admin/bookings/manual", adminAuth, async (req, res) => {
       const [seq] = await db`SELECT nextval('bookings_booking_id_seq') AS booking_id`;
       const bookingId = Number(seq.booking_id);
       const serial = `MMR-${new Date().getFullYear()}-${String(bookingId).padStart(5, "0")}`;
+      // Look up buyer's referrer/sponsor to attribute sold_by_user_id and associate_user_id
+      const [buyerUser] = await db`
+        SELECT user_id, referred_by_user_id, sponsor_user_id
+        FROM users WHERE user_id = ${userId} LIMIT 1
+      `;
+      const derivedSoldBy = Number(buyerUser?.referred_by_user_id || buyerUser?.sponsor_user_id || 0) || null;
+      let derivedAssociateId = null;
+      if (derivedSoldBy) {
+        const [tmRow] = await db`
+          SELECT associate_id FROM team_members
+          WHERE user_id = ${derivedSoldBy} AND LOWER(status) IN ('approved', 'active')
+          LIMIT 1
+        `;
+        if (tmRow?.associate_id) {
+          derivedAssociateId = Number(tmRow.associate_id);
+        } else {
+          const [sellerRow] = await db`SELECT user_type, sponsor_user_id FROM users WHERE user_id = ${derivedSoldBy} LIMIT 1`;
+          if (sellerRow?.user_type === 'Associate') {
+            derivedAssociateId = derivedSoldBy;
+          } else if (sellerRow?.sponsor_user_id) {
+            derivedAssociateId = Number(sellerRow.sponsor_user_id);
+          }
+        }
+      }
+
       const [booking] = await db`
         INSERT INTO bookings (
           booking_id, booking_serial, user_id, plot_id, payment_type, advance_amount,
           booking_status, workflow_status, payment_method, required_booking_amount,
-          minimum_booking_amount, first_emi_amount, remaining_balance, notes
+          minimum_booking_amount, first_emi_amount, remaining_balance, notes,
+          sold_by_user_id, associate_user_id
         ) VALUES (
           ${bookingId}, ${serial}, ${userId}, ${plotId}, 'Cheque', ${required},
           'Submitted', 'Manually Assigned - Payment Pending', 'Offline', ${required},
           ${config.minimum_booking_amount}, ${config.first_emi_amount},
-          ${Math.max(0, money(plot.base_price) - required)}, ${req.body.notes || "Assigned manually by admin"}
+          ${Math.max(0, money(plot.base_price) - required)}, ${req.body.notes || "Assigned manually by admin"},
+          ${derivedSoldBy}, ${derivedAssociateId}
         ) RETURNING *`;
       await db`
         INSERT INTO plot_booking_locks (plot_id, user_id, booking_id, expires_at)

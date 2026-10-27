@@ -264,7 +264,11 @@ export async function generateCommissionForPayment({
     if (!booking) return { generated: 0, reason: "Booking not found" };
 
     // 3. Guards: Self Purchase & Company Direct
-    if (booking.booking_type === 'SELF_PURCHASE') {
+    const [buyerUser] = await tx`
+      SELECT user_id, user_type FROM users WHERE user_id = ${booking.user_id} LIMIT 1
+    `;
+    const isBuyerCustomer = buyerUser?.user_type === 'Customer';
+    if (!isBuyerCustomer && booking.booking_type === 'SELF_PURCHASE') {
       const allowSelfPurchaseCommission = process.env.COMMISSION_ON_SELF_PURCHASE === 'true';
       if (!allowSelfPurchaseCommission) {
         return { generated: 0, reason: "Self-purchase booking (commission disabled)" };
@@ -272,8 +276,18 @@ export async function generateCommissionForPayment({
     }
 
     if (!booking.sold_by_user_id) {
-      // Company Direct sale - no commission generated
-      return { generated: 0, reason: "No seller attributed (Company Direct)" };
+      // Check if buyer has a referring Team Member / Associate sponsor
+      const [buyer] = await tx`
+        SELECT user_id, referred_by_user_id, sponsor_user_id
+        FROM users WHERE user_id = ${booking.user_id} LIMIT 1
+      `;
+      const fallbackSellerId = Number(booking.booked_by_user_id || buyer?.referred_by_user_id || buyer?.sponsor_user_id || 0);
+      if (fallbackSellerId > 0) {
+        booking.sold_by_user_id = fallbackSellerId;
+      } else {
+        // Company Direct sale - no commission generated
+        return { generated: 0, reason: "No seller attributed (Company Direct)" };
+      }
     }
 
     if (['Cancelled', 'Rejected', 'Pending Admin Price Approval'].includes(booking.booking_status)) {
@@ -314,7 +328,7 @@ export async function generateCommissionForPayment({
       return { generated: 0, reason: "Payment amount below eligibility minimum" };
     }
 
-    // 6. Resolve Seller (Strictly sold_by_user_id, NO fallback to sponsor_user_id)
+    // 6. Resolve Seller (sold_by_user_id or resolved fallback)
     const sellerUserId = Number(booking.sold_by_user_id);
     const [seller] = await tx`
       SELECT user_id, member_id, full_name, user_type, account_status, sponsor_user_id
@@ -344,9 +358,19 @@ export async function generateCommissionForPayment({
       LIMIT 1
     `;
     const isTeamMemberSeller = Boolean(tmSellerRow) || seller.user_type === 'Team Member';
-    const leaderUserId = isTeamMemberSeller
+    let leaderUserId = isTeamMemberSeller
       ? Number(tmSellerRow?.associate_id || booking.associate_user_id || seller.sponsor_user_id || 0)
       : sellerUserId;
+
+    if (isTeamMemberSeller && (!leaderUserId || leaderUserId === sellerUserId)) {
+      const [sellerUserRow] = await tx`
+        SELECT sponsor_user_id, referred_by_user_id FROM users WHERE user_id = ${sellerUserId} LIMIT 1
+      `;
+      const fallbackLeader = Number(sellerUserRow?.sponsor_user_id || sellerUserRow?.referred_by_user_id || 0);
+      if (fallbackLeader > 0) {
+        leaderUserId = fallbackLeader;
+      }
+    }
 
     // 8. Fetch Active/Eligible Team Members under leaderUserId
     const teamRows = leaderUserId

@@ -163,7 +163,7 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
         COALESCE(b.booking_date, b.created_at) AS booking_date,
         b.booking_status,
         b.booking_type,
-        (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id OR b.user_id = b.booked_by_user_id) AS is_self_purchase,
+        (COALESCE(buyer.user_type, 'Customer') != 'Customer' AND (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id)) AS is_self_purchase,
         (b.sold_by_user_id IS NULL) AS is_company_direct,
         COALESCE(b.advance_amount, 0) AS amount_received,
         COALESCE(b.remaining_balance, 0) AS remaining_balance,
@@ -259,7 +259,13 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
       LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
       LEFT JOIN users sponsor ON sponsor.user_id = buyer.sponsor_user_id
       LEFT JOIN admin_users rel_admin ON rel_admin.admin_id = b.settlement_released_by
-      LEFT JOIN team_members tm_record ON tm_record.user_id = b.sold_by_user_id AND LOWER(tm_record.status) IN ('approved', 'active')
+      LEFT JOIN LATERAL (
+        SELECT id, team_member_uid, associate_id, status
+        FROM team_members
+        WHERE user_id = b.sold_by_user_id AND LOWER(status) IN ('approved', 'active')
+        ORDER BY created_at DESC
+        LIMIT 1
+      ) tm_record ON TRUE
       LEFT JOIN users tm_assoc ON tm_assoc.user_id = tm_record.associate_id
       LEFT JOIN LATERAL (
         SELECT invoice_id, invoice_number, payment_status, paid_amount
@@ -301,7 +307,7 @@ async function computeDistributionForBooking(bookingId) {
   const [booking] = await sql`
     SELECT b.*, p.plot_id, p.plot_number, p.plot_area, p.base_price AS plot_base_price,
            s.site_name,
-           buyer.full_name AS buyer_name, buyer.member_id AS buyer_member_id, buyer.user_id AS buyer_user_id, buyer.sponsor_user_id,
+           buyer.full_name AS buyer_name, buyer.member_id AS buyer_member_id, buyer.user_id AS buyer_user_id, buyer.sponsor_user_id, buyer.referred_by_user_id,
            seller.full_name AS seller_name, seller.member_id AS seller_member_id, seller.user_type AS seller_user_type, seller.account_status AS seller_account_status,
            assoc.full_name AS associate_name, assoc.member_id AS associate_member_id, assoc.user_type AS associate_user_type, assoc.account_status AS associate_account_status,
            sponsor.member_id AS sponsor_member_id, sponsor.full_name AS sponsor_name
@@ -327,12 +333,38 @@ async function computeDistributionForBooking(bookingId) {
 
   const amountReceived = Number(booking.advance_amount || 0);
   const totalPlotPrice = Number(booking.base_price || booking.sold_price || booking.plot_base_price || (amountReceived + Number(booking.remaining_balance || 0)));
-  const isSelfPurchase = Boolean(
-    booking.booking_type === 'SELF_PURCHASE' ||
-    booking.user_id === booking.sold_by_user_id ||
-    booking.user_id === booking.booked_by_user_id
+
+  // Fallback attribution if sold_by_user_id is NULL: check customer's referred_by_user_id or sponsor_user_id
+  const effectiveSellerUserId = Number(
+    booking.sold_by_user_id ||
+    booking.booked_by_user_id ||
+    booking.referred_by_user_id ||
+    booking.sponsor_user_id ||
+    0
   );
-  const isCompanyDirect = !booking.sold_by_user_id;
+
+  let sellerUser = booking.seller_name ? {
+    user_id: booking.sold_by_user_id,
+    full_name: booking.seller_name,
+    member_id: booking.seller_member_id,
+    user_type: booking.seller_user_type,
+    account_status: booking.seller_account_status
+  } : null;
+
+  if (!sellerUser && effectiveSellerUserId) {
+    const [fetched] = await sql`
+      SELECT user_id, full_name, member_id, user_type, account_status, sponsor_user_id
+      FROM users WHERE user_id = ${effectiveSellerUserId} LIMIT 1
+    `;
+    if (fetched) sellerUser = fetched;
+  }
+
+  const isBuyerCustomer = (booking.buyer_user_type === 'Customer' || (!['Team Member', 'Associate'].includes(booking.buyer_user_type) && booking.user_id !== effectiveSellerUserId));
+  const isSelfPurchase = !isBuyerCustomer && Boolean(
+    booking.booking_type === 'SELF_PURCHASE' ||
+    (effectiveSellerUserId && booking.user_id === effectiveSellerUserId)
+  );
+  const isCompanyDirect = !effectiveSellerUserId;
 
   // Check if booking is cancelled or rejected
   const isBookingCancelled = ['Cancelled', 'Rejected'].includes(booking.booking_status);
@@ -343,7 +375,10 @@ async function computeDistributionForBooking(bookingId) {
       SELECT * FROM plot_order_settlements WHERE booking_id = ${bId} ORDER BY settlement_id DESC LIMIT 1
     `.catch(() => []);
 
-    if (settlementRecord && settlementRecord.recipient_breakdown) {
+    const wasReleasedWithZeroCommission = Boolean(settlementRecord && Number(settlementRecord.total_distributed || 0) === 0 && !isCompanyDirect);
+
+    // Only lock to historical if it actually distributed OR was a genuine company direct sale
+    if (settlementRecord && settlementRecord.recipient_breakdown && !wasReleasedWithZeroCommission) {
       return {
         booking,
         engine,
@@ -412,7 +447,7 @@ async function computeDistributionForBooking(bookingId) {
   }
 
   // Determine seller & hierarchy
-  const sellerUserId = Number(booking.sold_by_user_id);
+  const sellerUserId = effectiveSellerUserId;
   const [tmSellerRow] = await sql`
     SELECT associate_id, team_member_uid, slot_number
     FROM team_members
@@ -421,10 +456,20 @@ async function computeDistributionForBooking(bookingId) {
     ORDER BY created_at DESC
     LIMIT 1
   `;
-  const isTeamMemberSeller = Boolean(tmSellerRow) || booking.seller_user_type === 'Team Member';
-  const leaderUserId = isTeamMemberSeller
-    ? Number(tmSellerRow?.associate_id || booking.associate_user_id || booking.seller_sponsor_user_id || 0)
+  const isTeamMemberSeller = Boolean(tmSellerRow) || sellerUser?.user_type === 'Team Member';
+  let leaderUserId = isTeamMemberSeller
+    ? Number(tmSellerRow?.associate_id || booking.associate_user_id || booking.seller_sponsor_user_id || sellerUser?.sponsor_user_id || 0)
     : sellerUserId;
+
+  if (isTeamMemberSeller && (!leaderUserId || leaderUserId === sellerUserId)) {
+    const [sellerUserRow] = await sql`
+      SELECT sponsor_user_id, referred_by_user_id FROM users WHERE user_id = ${sellerUserId} LIMIT 1
+    `;
+    const fallbackLeader = Number(sellerUserRow?.sponsor_user_id || sellerUserRow?.referred_by_user_id || 0);
+    if (fallbackLeader > 0) {
+      leaderUserId = fallbackLeader;
+    }
+  }
 
   // Active enrolled team members under the associate leader
   const teamRows = leaderUserId
@@ -513,8 +558,8 @@ async function computeDistributionForBooking(bookingId) {
   if (math.sellerAmount > 0) {
     recipients.push({
       user_id: sellerUserId,
-      name: booking.seller_name || 'Seller',
-      member_id: isTeamMemberSeller ? (tmSellerRow?.team_member_uid || booking.seller_member_id) : booking.seller_member_id,
+      name: sellerUser?.full_name || booking.seller_name || 'Seller',
+      member_id: isTeamMemberSeller ? (tmSellerRow?.team_member_uid || sellerUser?.member_id || booking.seller_member_id) : (sellerUser?.member_id || booking.seller_member_id),
       user_type: isTeamMemberSeller ? 'Team Member' : 'Associate',
       role: isTeamMemberSeller ? 'Seller (Team Member)' : 'Seller (Associate)',
       role_label: isTeamMemberSeller ? 'Direct Seller (T Member)' : 'Direct Seller (Associate)',
@@ -549,9 +594,10 @@ async function computeDistributionForBooking(bookingId) {
   const companyShareFromReceived = Math.max(0, Number((amountReceived - math.totalDistributedAmount).toFixed(2)));
   const companyRetainedTotal = Number((totalPlotPrice - math.totalDistributedAmount).toFixed(2));
 
-  const eligibleForRelease = !isBookingCancelled && amountReceived > 0 && booking.settlement_status !== 'Released';
+  const wasReleasedWithZeroCommission = Boolean(booking.settlement_status === 'Released' && !isCompanyDirect);
+  const eligibleForRelease = !isBookingCancelled && amountReceived > 0 && (booking.settlement_status !== 'Released' || wasReleasedWithZeroCommission);
   let ineligibleReason = null;
-  if (booking.settlement_status === 'Released') ineligibleReason = 'Settlement has already been released';
+  if (booking.settlement_status === 'Released' && !wasReleasedWithZeroCommission) ineligibleReason = 'Settlement has already been released';
   else if (isBookingCancelled) ineligibleReason = 'Booking order is cancelled or rejected';
   else if (amountReceived <= 0) ineligibleReason = 'No advance or payment received yet for this order';
 
@@ -574,6 +620,7 @@ async function computeDistributionForBooking(bookingId) {
     companyRetainedTotal,
     recipients,
     participantsCount: participantCount,
+    sellerUserId,
     isTeamMemberSeller,
     leaderUserId
   };
@@ -639,7 +686,14 @@ router.post(
         }
 
         if (booking.settlement_status === 'Released') {
-          throw new Error(`Order #${bookingId} has already been settled and released on ${booking.settlement_released_at || 'earlier date'}.`);
+          const [prevStl] = await tx`
+            SELECT total_distributed FROM plot_order_settlements
+            WHERE booking_id = ${bookingId} ORDER BY settlement_id DESC LIMIT 1
+          `.catch(() => []);
+          const wasEmptyRelease = Boolean(prevStl && Number(prevStl.total_distributed || 0) === 0);
+          if (!wasEmptyRelease) {
+            throw new Error(`Order #${bookingId} has already been settled and released on ${booking.settlement_released_at || 'earlier date'}.`);
+          }
         }
 
         if (['Cancelled', 'Rejected'].includes(booking.booking_status)) {
@@ -657,6 +711,17 @@ router.post(
 
         // 4. If booking has an attributed seller, generate canonical commission records
         if (!calculation.isCompanyDirect && !calculation.isSelfPurchase && calculation.totalDistributionAmount > 0) {
+          // Persist attribution in bookings table if missing
+          if ((!booking.sold_by_user_id || !booking.associate_user_id) && calculation.sellerUserId) {
+            await tx`
+              UPDATE bookings
+              SET sold_by_user_id = COALESCE(sold_by_user_id, ${calculation.sellerUserId}),
+                  associate_user_id = COALESCE(associate_user_id, ${calculation.leaderUserId || null}),
+                  updated_at = NOW()
+              WHERE booking_id = ${bookingId}
+            `;
+          }
+
           await commissionService.generateCommissionForPayment({
             bookingId,
             event: {

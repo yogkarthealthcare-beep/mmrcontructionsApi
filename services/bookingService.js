@@ -318,7 +318,7 @@ export async function createBooking({
     // Customer SELF purchase
     derivedBookingType = 'CUSTOMER_SELF';
     derivedBuyerUserId = dbActor.user_id;
-    derivedSoldByUserId = dbActor.referred_by_user_id || null;
+    derivedSoldByUserId = dbActor.referred_by_user_id || dbActor.sponsor_user_id || null;
     derivedAssociateUserId = derivedSoldByUserId ? await resolveAssociate(runner, derivedSoldByUserId) : null;
     derivedApprovalStatus = 'NotRequired';
 
