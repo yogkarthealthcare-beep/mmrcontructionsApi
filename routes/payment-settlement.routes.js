@@ -42,6 +42,13 @@ async function ensureSettlementSchema() {
           ALTER TABLE bookings ADD COLUMN IF NOT EXISTS settlement_cancel_reason TEXT;
           ALTER TABLE bookings ADD COLUMN IF NOT EXISTS settlement_audit_log JSONB DEFAULT '[]'::jsonb;
 
+          ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+          ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS approved_by_admin_id INT;
+          ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
+          ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ;
+          ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS payment_reference TEXT;
+          ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS notes TEXT;
+
           CREATE TABLE IF NOT EXISTS plot_order_settlements (
             settlement_id SERIAL PRIMARY KEY,
             booking_id INT NOT NULL,
@@ -734,6 +741,17 @@ router.post(
             adminId,
             db: tx
           });
+
+          // Ensure columns exist on commission_transactions before updating
+          await tx`
+            ALTER TABLE commission_transactions
+            ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW(),
+            ADD COLUMN IF NOT EXISTS approved_by_admin_id INT,
+            ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS payment_reference TEXT,
+            ADD COLUMN IF NOT EXISTS notes TEXT
+          `.catch(() => {});
 
           // Mark corresponding commission transactions as Approved/Paid under this settlement reference
           await tx`

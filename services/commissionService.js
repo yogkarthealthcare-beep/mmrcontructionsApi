@@ -169,7 +169,13 @@ export async function ensureCommissionSchemaExtensions(db = sql) {
     ALTER TABLE commission_transactions
     ADD COLUMN IF NOT EXISTS event_key TEXT,
     ADD COLUMN IF NOT EXISTS needs_review BOOLEAN NOT NULL DEFAULT FALSE,
-    ADD COLUMN IF NOT EXISTS review_reason TEXT
+    ADD COLUMN IF NOT EXISTS review_reason TEXT,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW(),
+    ADD COLUMN IF NOT EXISTS approved_by_admin_id INT,
+    ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS payment_reference TEXT,
+    ADD COLUMN IF NOT EXISTS notes TEXT
   `.catch(() => {});
 
   await db`
