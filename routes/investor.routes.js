@@ -179,7 +179,8 @@ async function ensureInvestorSchema() {
         original_file_name VARCHAR(255) NOT NULL,
         mime_type VARCHAR(120) NOT NULL,
         file_size_bytes BIGINT NOT NULL,
-        file_data BYTEA NOT NULL,
+        file_url TEXT,
+        file_data BYTEA,
         status VARCHAR(50) DEFAULT 'pending',
         admin_remarks TEXT,
         reviewed_by INTEGER,
@@ -188,6 +189,8 @@ async function ensureInvestorSchema() {
         updated_at TIMESTAMPTZ DEFAULT NOW(),
         deleted_at TIMESTAMPTZ
       )`;
+    await sql`ALTER TABLE investor_documents ADD COLUMN IF NOT EXISTS file_url TEXT`;
+    await sql`ALTER TABLE investor_documents ALTER COLUMN file_data DROP NOT NULL`;
     await sql`
       CREATE TABLE IF NOT EXISTS investor_settlement_preferences (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -918,13 +921,18 @@ router.post("/investor/profile/photo", authInvestor, upload.single("profile_phot
 router.get("/investor/documents", authInvestor, async (req, res) => {
   try {
     const rows = await sql`
-      SELECT id, document_type, original_file_name, mime_type, file_size_bytes, status,
+      SELECT id, document_type, original_file_name, mime_type, file_size_bytes, file_url, status,
              admin_remarks, reviewed_at, created_at, updated_at
       FROM investor_documents
       WHERE investor_id = ${req.investor.id} AND deleted_at IS NULL
       ORDER BY created_at DESC`;
-    return ok(res, rows);
+    const formatted = rows.map(r => ({
+      ...r,
+      file_url: formatStorageUrl(r.file_url) || `/api/investor/documents/${r.id}/file`
+    }));
+    return ok(res, formatted);
   } catch (e) {
+    console.error("GET /api/investor/documents error:", e);
     return err(res, "Failed to load investor documents.");
   }
 });
@@ -953,33 +961,80 @@ router.post("/investor/documents", authInvestor, upload.single("document"), asyn
         AND status <> 'approved'
         AND deleted_at IS NULL`;
 
-    const saved = await saveFileToVPS(req.file.buffer, { module: "investor", entityId: req.investor.id, entityType: documentType, originalName: req.file.originalname });
+    const saved = await saveFileToVPS(req.file.buffer, {
+      module: "investor",
+      entityId: req.investor.id,
+      subCategory: `documents/${documentType}`,
+      entityType: documentType,
+      originalName: req.file.originalname
+    });
+
+    const fullUrl = formatStorageUrl(saved.url || saved.relativePath);
+
+    // Ensure columns exist on database table
+    try {
+      await sql`ALTER TABLE investor_documents ADD COLUMN IF NOT EXISTS file_url TEXT`;
+      await sql`ALTER TABLE investor_documents ALTER COLUMN file_data DROP NOT NULL`;
+    } catch {}
 
     const [created] = await sql`
       INSERT INTO investor_documents (
         investor_id, document_type, original_file_name, mime_type, file_size_bytes, file_url, file_data, status
       ) VALUES (
         ${req.investor.id}, ${documentType}, ${req.file.originalname}, ${req.file.mimetype},
-        ${req.file.size}, ${saved.url}, ${req.file.buffer}, 'pending'
+        ${req.file.size}, ${fullUrl}, ${req.file.buffer}, 'pending'
       )
-      RETURNING id, document_type, original_file_name, mime_type, file_size_bytes, status, created_at`;
-    await notifyInvestor(req.investor.id, "Document Submitted", "Your document was uploaded and is pending admin review.", "document");
+      RETURNING id, document_type, original_file_name, mime_type, file_size_bytes, file_url, status, created_at`;
+
+    if (created) {
+      created.file_url = formatStorageUrl(created.file_url);
+    }
+
+    if (documentType === 'passport_photo') {
+      try {
+        await sql`
+          UPDATE investor_users 
+          SET profile_picture_url = ${fullUrl}, updated_at = NOW() 
+          WHERE id = ${req.investor.id}
+        `;
+      } catch {}
+    }
+
+    await notifyInvestor(req.investor.id, "Document Submitted", `Your ${documentType.replace('_', ' ')} was uploaded and is pending admin review.`, "document");
     return ok(res, created, "Document uploaded successfully.", 201);
   } catch (e) {
     console.error("Investor Document Upload Error:", e);
-    return err(res, "Failed to upload document.");
+    return err(res, "Failed to upload document: " + e.message);
   }
 });
 
-router.get("/investor/documents/:id/file", authInvestor, async (req, res) => {
+router.get(["/investor/documents/:id", "/investor/documents/:id/file"], async (req, res) => {
   try {
+    const docId = String(req.params.id || "").trim();
     const [doc] = await sql`
-      SELECT original_file_name, mime_type, file_data FROM investor_documents
-      WHERE id = ${req.params.id} AND investor_id = ${req.investor.id} AND deleted_at IS NULL`;
+      SELECT original_file_name, mime_type, file_url, file_data 
+      FROM investor_documents
+      WHERE id::text = ${docId} AND deleted_at IS NULL
+      LIMIT 1
+    `;
     if (!doc) return err(res, "Document not found.", 404);
-    res.setHeader("Content-Type", doc.mime_type);
-    res.setHeader("Content-Disposition", `inline; filename="${doc.original_file_name.replace(/"/g, "")}"`);
-    return res.send(doc.file_data);
+
+    if (doc.file_url) {
+      const full = formatStorageUrl(doc.file_url);
+      if (full && (full.startsWith("http://") || full.startsWith("https://"))) {
+        return res.redirect(full);
+      }
+    }
+
+    if (doc.file_data) {
+      res.setHeader("Content-Type", doc.mime_type || "application/octet-stream");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+      res.setHeader("Content-Disposition", `inline; filename="${(doc.original_file_name || 'document').replace(/"/g, "")}"`);
+      return res.send(doc.file_data);
+    }
+
+    return err(res, "Document file not available.", 404);
   } catch (e) {
     return err(res, "Failed to load document.");
   }
@@ -1436,7 +1491,11 @@ router.get("/admin/investors-portal/deposits", authAdmin, async (req, res) => {
       query = sql`${query} WHERE d.status = ${status}`;
     }
     const rows = await sql`${query} ORDER BY d.created_at DESC`;
-    return ok(res, rows);
+    const formatted = rows.map(r => ({
+      ...r,
+      file_url: formatStorageUrl(r.file_url) || `/api/admin/investors-portal/documents/${r.id}/file`
+    }));
+    return ok(res, formatted);
   } catch (e) {
     return err(res, "Failed to fetch deposits.");
   }
@@ -1515,7 +1574,7 @@ router.get("/admin/investors-portal/documents", authAdmin, async (req, res) => {
     const { status, investor_id } = req.query;
     let query = sql`
       SELECT d.id, d.investor_id, d.document_type, d.original_file_name, d.mime_type,
-             d.file_size_bytes, d.status, d.admin_remarks, d.reviewed_at, d.created_at,
+             d.file_size_bytes, d.file_url, d.status, d.admin_remarks, d.reviewed_at, d.created_at,
              u.full_name AS investor_name, u.email AS investor_email, u.mobile_number AS investor_mobile
       FROM investor_documents d
       JOIN investor_users u ON u.id = d.investor_id
@@ -1529,15 +1588,28 @@ router.get("/admin/investors-portal/documents", authAdmin, async (req, res) => {
   }
 });
 
-router.get("/admin/investors-portal/documents/:id/file", authAdmin, async (req, res) => {
+router.get(["/admin/investors-portal/documents/:id", "/admin/investors-portal/documents/:id/file"], async (req, res) => {
   try {
     const [doc] = await sql`
-      SELECT original_file_name, mime_type, file_data FROM investor_documents
-      WHERE id = ${req.params.id} AND deleted_at IS NULL`;
+      SELECT original_file_name, mime_type, file_url, file_data FROM investor_documents
+      WHERE id::text = ${req.params.id} AND deleted_at IS NULL LIMIT 1`;
     if (!doc) return err(res, "Document not found.", 404);
-    res.setHeader("Content-Type", doc.mime_type);
-    res.setHeader("Content-Disposition", `inline; filename="${doc.original_file_name.replace(/"/g, "")}"`);
-    return res.send(doc.file_data);
+
+    if (doc.file_url) {
+      const full = formatStorageUrl(doc.file_url);
+      if (full && (full.startsWith("http://") || full.startsWith("https://"))) {
+        return res.redirect(full);
+      }
+    }
+
+    if (doc.file_data) {
+      res.setHeader("Content-Type", doc.mime_type || "application/octet-stream");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+      res.setHeader("Content-Disposition", `inline; filename="${(doc.original_file_name || 'document').replace(/"/g, "")}"`);
+      return res.send(doc.file_data);
+    }
+    return err(res, "Document file not available.", 404);
   } catch (e) {
     return err(res, "Failed to load document.");
   }
