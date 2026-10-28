@@ -32,6 +32,31 @@ const strongPassword = (value = "") =>
 
 const publicBaseUrl = () => (process.env.FRONTEND_URL || "https://mmrconstructions.in").replace(/\/$/, "");
 
+export function formatStorageUrl(val) {
+  if (!val) return null;
+  let str = val;
+  if (typeof str === "object") {
+    str = str.url || str.relativePath || "";
+  }
+  if (typeof str === "string" && str.trim().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(str.trim());
+      str = parsed.url || parsed.relativePath || str;
+    } catch {}
+  }
+  if (typeof str !== "string") return null;
+  str = str.trim();
+  if (!str || str === "[object Object]" || str === "null" || str === "undefined") return null;
+  if (str.startsWith("http://") || str.startsWith("https://") || str.startsWith("data:")) {
+    return str;
+  }
+  const baseUrl = (process.env.PUBLIC_API_URL || process.env.API_BASE_URL || "https://api.mmrconstructions.in").replace(/\/$/, "");
+  if (str.startsWith("/")) {
+    return `${baseUrl}${str}`;
+  }
+  return `${baseUrl}/${str}`;
+}
+
 const notifyInvestor = async (investorId, title, message, type = "info", tx = sql) => {
   await tx`
     INSERT INTO investor_notifications (investor_id, title, message, notification_type)
@@ -799,6 +824,9 @@ router.get("/investor/profile", authInvestor, async (req, res) => {
       WHERE iu.id = ${req.investor.id}
     `;
     if (!user) return err(res, "Investor not found.", 404);
+    if (user.profile_picture_url) {
+      user.profile_picture_url = formatStorageUrl(user.profile_picture_url);
+    }
     return ok(res, user);
   } catch (e) {
     return err(res, "Failed to fetch profile.");
@@ -2061,7 +2089,20 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
       WHERE id = ${investor_id}
     `;
 
-    return ok(res, { id: resultId, is_final_submitted: isFinalSubmit, app_status: newAppStatus }, 
+    const [savedRecord] = await sql`
+      SELECT photo_url, signature_first_url, signature_joint_url 
+      FROM investor_enrollments 
+      WHERE id = ${resultId}
+    `;
+
+    return ok(res, { 
+      id: resultId, 
+      is_final_submitted: isFinalSubmit, 
+      app_status: newAppStatus,
+      photo_url: formatStorageUrl(savedRecord?.photo_url || photoUrl),
+      signature_first_url: formatStorageUrl(savedRecord?.signature_first_url || sigFirstUrl),
+      signature_joint_url: formatStorageUrl(savedRecord?.signature_joint_url || sigJointUrl)
+    }, 
       isFinalSubmit ? "Investor enrollment finalized successfully." : "Investor enrollment saved successfully in review mode."
     );
   } catch (e) {
@@ -2074,10 +2115,23 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
 router.get("/investor/enroll/my", authInvestor, async (req, res) => {
   try {
     const investor_id = req.investor.id;
-    const [row] = await sql`SELECT * FROM investor_enrollments WHERE investor_id = ${investor_id} ORDER BY created_at DESC LIMIT 1`;
+    const [row] = await sql`
+      SELECT ie.*, iu.profile_picture_url 
+      FROM investor_enrollments ie
+      LEFT JOIN investor_users iu ON ie.investor_id = iu.id
+      WHERE ie.investor_id = ${investor_id} 
+      ORDER BY ie.created_at DESC 
+      LIMIT 1
+    `;
     if (!row) {
       return ok(res, null, "No enrollment found.");
     }
+    if (!row.photo_url && row.profile_picture_url) {
+      row.photo_url = row.profile_picture_url;
+    }
+    row.photo_url = formatStorageUrl(row.photo_url);
+    row.signature_first_url = formatStorageUrl(row.signature_first_url);
+    row.signature_joint_url = formatStorageUrl(row.signature_joint_url);
     return ok(res, row);
   } catch (e) {
     console.error("GET /api/investor/enroll/my error:", e);
@@ -2272,6 +2326,9 @@ router.get("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
     `;
 
     if (row) {
+      row.photo_url = formatStorageUrl(row.photo_url || row.profile_picture_url);
+      row.signature_first_url = formatStorageUrl(row.signature_first_url);
+      row.signature_joint_url = formatStorageUrl(row.signature_joint_url);
       return ok(res, row);
     }
 
@@ -2300,7 +2357,7 @@ router.get("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
         account_number: invUser.account_number,
         ifsc_code: invUser.ifsc_code,
         nominees: invUser.nominee_name ? [{ name: invUser.nominee_name, relationship: '', age: '', proportion: 100 }] : [],
-        photo_url: invUser.profile_picture_url,
+        photo_url: formatStorageUrl(invUser.profile_picture_url),
         is_new: true
       });
     }
@@ -2584,6 +2641,11 @@ router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
     }
 
     const [updatedRow] = await sql`SELECT * FROM investor_enrollments WHERE id = ${targetEnrollmentId}`;
+    if (updatedRow) {
+      updatedRow.photo_url = formatStorageUrl(updatedRow.photo_url);
+      updatedRow.signature_first_url = formatStorageUrl(updatedRow.signature_first_url);
+      updatedRow.signature_joint_url = formatStorageUrl(updatedRow.signature_joint_url);
+    }
     return ok(res, updatedRow, "Investor enrollment updated successfully.");
   } catch (e) {
     console.error("Update Enrollment Error:", e);

@@ -10,6 +10,7 @@ import bcrypt from "bcryptjs";
 import multer from "multer";
 import path from "path";
 import fs from "fs/promises";
+import fsSync from "fs";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import xlsx from "xlsx";
@@ -221,15 +222,76 @@ app.use(express.json({
 app.use(express.urlencoded({ extended: false, limit: "50mb" }));
 app.use(["/api/book-plot/leads", "/api/inquiries"], rejectSuspiciousInput);
 app.use("/uploads", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  res.setHeader("Cache-Control", "public, max-age=86400");
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
   const rootDir = getStorageRoot();
   const safePath = path.normalize(req.path || "").replace(/^(\.\.[\/\\])+/, "").replace(/^\/+/, "");
-  const targetPath = path.join(rootDir, safePath);
+  let targetPath = path.join(rootDir, safePath);
 
   if (!targetPath.startsWith(rootDir)) {
     return res.status(403).send("Forbidden");
   }
 
-  res.sendFile(targetPath, (err) => {
+  let actualPath = targetPath;
+  if (!fsSync.existsSync(actualPath)) {
+    const ext = path.extname(actualPath);
+    const basePath = ext ? actualPath.slice(0, -ext.length) : actualPath;
+    const candidates = [
+      basePath + ".bin",
+      basePath + ".png",
+      basePath + ".jpg",
+      basePath + ".jpeg",
+      basePath + ".webp",
+      basePath
+    ];
+    for (const c of candidates) {
+      if (fsSync.existsSync(c)) {
+        actualPath = c;
+        break;
+      }
+    }
+  }
+
+  if (!fsSync.existsSync(actualPath)) {
+    return res.status(404).send("File not found");
+  }
+
+  // Detect mime type from magic bytes if possible
+  try {
+    const fd = fsSync.openSync(actualPath, "r");
+    const header = Buffer.alloc(16);
+    const bytesRead = fsSync.readSync(fd, header, 0, 16, 0);
+    fsSync.closeSync(fd);
+
+    let mimeType = null;
+    if (bytesRead >= 4 && header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4E && header[3] === 0x47) {
+      mimeType = "image/png";
+    } else if (bytesRead >= 3 && header[0] === 0xFF && header[1] === 0xD8 && header[2] === 0xFF) {
+      mimeType = "image/jpeg";
+    } else if (bytesRead >= 12 && header.toString("ascii", 0, 4) === "RIFF" && header.toString("ascii", 8, 12) === "WEBP") {
+      mimeType = "image/webp";
+    } else if (bytesRead >= 4 && header.toString("ascii", 0, 4) === "%PDF") {
+      mimeType = "application/pdf";
+    } else if (bytesRead >= 4 && (header.toString("ascii", 0, 6) === "GIF87a" || header.toString("ascii", 0, 6) === "GIF89a")) {
+      mimeType = "image/gif";
+    }
+
+    if (mimeType) {
+      res.type(mimeType);
+    }
+  } catch (readErr) {
+    // proceed
+  }
+
+  res.sendFile(actualPath, (err) => {
     if (err && !res.headersSent) {
       res.status(404).send("File not found");
     }
