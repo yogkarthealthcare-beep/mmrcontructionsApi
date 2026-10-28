@@ -6,17 +6,33 @@ import { getStorageRoot } from "./fileStorage.service.js";
  * Resolves an image/signature input into a Buffer or null.
  * Handles:
  * 1. Base64 data URLs (data:image/png;base64,...) and raw base64
- * 2. Absolute filesystem paths (/var/www/mmrconstructions-storage/..., D:\...)
- * 3. Relative paths (uploads/..., associates/..., etc.)
- * 4. Storage root paths with multiple fallback search locations
- * 5. Remote HTTP/HTTPS URLs (fetches image data over network with timeout)
+ * 2. Objects containing { url, relativePath, fullPath }
+ * 3. JSON strings serializing { url, relativePath, fullPath }
+ * 4. Absolute filesystem paths (/var/www/mmrconstructions-storage/..., D:\...)
+ * 5. Relative paths (uploads/..., investors/..., etc.)
+ * 6. Storage root paths with multiple fallback search locations
+ * 7. Remote HTTP/HTTPS URLs (fetches image data over network with timeout)
  */
-export async function resolveImageBuffer(imageSource: string | Buffer | null | undefined): Promise<Buffer | null> {
+export async function resolveImageBuffer(imageSource: any): Promise<Buffer | null> {
   if (!imageSource) return null;
   if (Buffer.isBuffer(imageSource)) return imageSource;
-  if (typeof imageSource !== "string") return null;
 
-  const trimmed = imageSource.trim();
+  let source = imageSource;
+  // If it's an object from saveFileToVPS or similar
+  if (typeof source === "object") {
+    source = source.fullPath || source.relativePath || source.url || "";
+  }
+  if (typeof source !== "string") return null;
+
+  let trimmed = source.trim();
+  // Check if string is a JSON representation of an object
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      trimmed = (parsed.fullPath || parsed.relativePath || parsed.url || trimmed).trim();
+    } catch {}
+  }
+
   if (!trimmed) return null;
 
   // 1. Check for Base64 data URL
@@ -29,34 +45,57 @@ export async function resolveImageBuffer(imageSource: string | Buffer | null | u
     }
   }
 
-  // 2. If it is an HTTP or HTTPS URL
-  if (/^https?:\/\//i.test(trimmed)) {
-    // 2a. First, try to see if it maps to a local file on disk
+  // Raw base64 string check (long alphanumeric string)
+  if (trimmed.length > 300 && /^[A-Za-z0-9+/=\r\n]+$/.test(trimmed)) {
     try {
-      const rootDir = getStorageRoot();
-      const match = trimmed.match(/\/uploads\/(.+)$/);
-      if (match) {
-        const relPath = decodeURIComponent(match[1]);
-        const candidates = [
-          path.resolve(rootDir, relPath),
-          path.resolve(process.cwd(), "uploads", relPath),
-          path.resolve("/var/www/mmrconstructions-storage", relPath),
-          path.resolve("/var/www/mmrconstructions/uploads", relPath)
-        ];
-        for (const candidate of candidates) {
-          if (fs.existsSync(candidate)) {
-            return fs.readFileSync(candidate);
+      return Buffer.from(trimmed, "base64");
+    } catch {}
+  }
+
+  // 2. Local Disk Lookup (Always check disk first even if it looks like an HTTP URL)
+  try {
+    const rootDir = getStorageRoot();
+    const match = trimmed.match(/\/uploads\/(.+)$/);
+    const relPath = match ? decodeURIComponent(match[1]) : trimmed.replace(/^\/?uploads\/?/, "");
+
+    const candidatePaths = [
+      trimmed,
+      path.resolve(trimmed),
+      path.resolve(rootDir, relPath),
+      path.resolve(rootDir, trimmed),
+      path.resolve(process.cwd(), "uploads", relPath),
+      path.resolve(process.cwd(), "mmrconstructionsApi", "uploads", relPath),
+      path.resolve(process.cwd(), trimmed),
+      path.resolve("/var/www/mmrconstructions-storage", relPath),
+      path.resolve("/var/www/mmrconstructions/uploads", relPath)
+    ];
+
+    for (const candidate of candidatePaths) {
+      if (!candidate) continue;
+      const variants = [
+        candidate,
+        candidate.replace(/\.(png|jpg|jpeg|webp)$/i, ".bin"),
+        candidate + ".png",
+        candidate + ".jpg"
+      ];
+      for (const p of variants) {
+        if (fs.existsSync(p)) {
+          const stats = fs.statSync(p);
+          if (stats.isFile() && stats.size > 0) {
+            return fs.readFileSync(p);
           }
         }
       }
-    } catch (e) {
-      console.warn("[pdfImageHelper] Local disk check for URL failed:", e);
     }
+  } catch (e) {
+    console.warn("[pdfImageHelper] File disk lookup error:", e);
+  }
 
-    // 2b. If not on local disk, fetch via HTTP
+  // 3. Remote HTTP or HTTPS URL fetch fallback
+  if (/^https?:\/\//i.test(trimmed)) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      const timeoutId = setTimeout(() => controller.abort(), 7000);
       const res = await fetch(trimmed, { signal: controller.signal });
       clearTimeout(timeoutId);
       if (res.ok) {
@@ -68,33 +107,6 @@ export async function resolveImageBuffer(imageSource: string | Buffer | null | u
     } catch (e) {
       console.warn(`[pdfImageHelper] HTTP fetch error for ${trimmed}:`, e);
     }
-  }
-
-  // 3. Filesystem Path checking
-  try {
-    const rootDir = getStorageRoot();
-    const cleanPath = trimmed.replace(/^\/?uploads\/?/, "");
-    const candidates = [
-      trimmed,
-      path.resolve(trimmed),
-      path.resolve(rootDir, trimmed),
-      path.resolve(rootDir, cleanPath),
-      path.resolve(process.cwd(), "uploads", cleanPath),
-      path.resolve(process.cwd(), trimmed),
-      path.resolve("/var/www/mmrconstructions-storage", cleanPath),
-      path.resolve("/var/www/mmrconstructions-storage", trimmed)
-    ];
-
-    for (const candidate of candidates) {
-      if (candidate && fs.existsSync(candidate)) {
-        const stats = fs.statSync(candidate);
-        if (stats.isFile() && stats.size > 0) {
-          return fs.readFileSync(candidate);
-        }
-      }
-    }
-  } catch (e) {
-    console.warn("[pdfImageHelper] File disk lookup error:", e);
   }
 
   return null;

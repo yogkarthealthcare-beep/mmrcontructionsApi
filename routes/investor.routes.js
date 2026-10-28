@@ -1892,22 +1892,41 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
     if (body.declSignatureName) body.declSignatureName = normalizeHumanName(body.declSignatureName);
 
     const processBase64 = async (dataUrl, filename) => {
-      if (!dataUrl || !dataUrl.startsWith("data:")) return null;
+      if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) return null;
       const matches = dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
       if (!matches || matches.length !== 3) return null;
       const buffer = Buffer.from(matches[2], 'base64');
-      const fileUrl = await saveFileToVPS(buffer, filename, "investor", {
+      const saved = await saveFileToVPS(buffer, {
+        originalName: filename,
+        module: "investor",
         entityId: investor_id,
         subCategory: "enrollments"
       });
-      return fileUrl;
+      return saved?.url || saved?.relativePath || null;
     };
 
-    const photoUrl = await processBase64(body.photo, `photo_${Date.now()}.png`) || (body.photo && !body.photo.startsWith("data:") ? body.photo : null);
-    const sigFirstUrl = await processBase64(body.signatureFirstApplicant || body.signature || body.declSignature, `sig1_${Date.now()}.png`) 
-      || ((body.signatureFirstApplicant || body.signature) && !String(body.signature || '').startsWith("data:") ? (body.signatureFirstApplicant || body.signature) : null);
-    const sigJointUrl = await processBase64(body.signatureJointApplicant, `sig2_${Date.now()}.png`) 
-      || (body.signatureJointApplicant && !body.signatureJointApplicant.startsWith("data:") ? body.signatureJointApplicant : null);
+    const extractUrl = (val) => {
+      if (!val) return null;
+      if (typeof val === "object") return val.url || val.relativePath || null;
+      if (typeof val === "string" && val.trim().startsWith("{")) {
+        try {
+          const p = JSON.parse(val.trim());
+          return p.url || p.relativePath || val;
+        } catch {}
+      }
+      return typeof val === "string" ? val : null;
+    };
+
+    const photoUrl = (await processBase64(body.photo, `photo_${Date.now()}.png`)) 
+      || (body.photo && !String(body.photo).startsWith("data:") ? extractUrl(body.photo) : null);
+
+    const rawSigFirst = body.signatureFirstApplicant || body.signature || body.declSignature;
+    const sigFirstUrl = (await processBase64(rawSigFirst, `sig1_${Date.now()}.png`)) 
+      || (rawSigFirst && !String(rawSigFirst).startsWith("data:") ? extractUrl(rawSigFirst) : null);
+
+    const rawSigJoint = body.signatureJointApplicant;
+    const sigJointUrl = (await processBase64(rawSigJoint, `sig2_${Date.now()}.png`)) 
+      || (rawSigJoint && !String(rawSigJoint).startsWith("data:") ? extractUrl(rawSigJoint) : null);
 
     const isFinalSubmit = body.is_final_submitted === true || body.is_final_submitted === 'true' || body.isFinalSubmit === true || body.isFinalSubmit === 'true';
 
@@ -1915,6 +1934,10 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
     // If final submit: status becomes 'Hold/Pending KYC' (visible to admin approval queue)
     // If save/submit in review stage: status is 'Submitted' (NOT in admin pending queue)
     const newAppStatus = isFinalSubmit ? 'Hold/Pending KYC' : 'Submitted';
+
+    // Fetch user's member_id to ensure investor_enrollment_id is always filled
+    const [uRecord] = await sql`SELECT member_id FROM investor_users WHERE id = ${investor_id} LIMIT 1`;
+    const invEnrollIdToSave = body.investorId || existing?.investor_enrollment_id || uRecord?.member_id || body.formNo || null;
 
     // Correspondence values
     const finalCorrAddress = sameAsPerm ? body.address : (body.corrAddress || body.address);
@@ -1930,6 +1953,7 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
           form_date = COALESCE(${body.formDate || null}, form_date),
           branch_code = ${body.branchCode || null},
           branch_name = ${body.branchName || null},
+          investor_enrollment_id = COALESCE(${invEnrollIdToSave}, investor_enrollment_id),
           project_name = ${body.projectName || null},
           inv_first_name = ${body.invFirstName},
           inv_middle_name = ${body.invMiddleName || null},
@@ -1991,7 +2015,7 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
           nominees, decl_date, decl_place, decl_signature_name, first_applicant_name, joint_applicant_name,
           photo_url, signature_first_url, signature_joint_url, is_final_submitted, app_status
         ) VALUES (
-          ${investor_id}, ${body.formNo || null}, ${body.formDate || null}, ${body.branchCode || null}, ${body.branchName || null}, ${body.investorId || null}, ${body.projectName || null},
+          ${investor_id}, ${body.formNo || null}, ${body.formDate || null}, ${body.branchCode || null}, ${body.branchName || null}, ${invEnrollIdToSave}, ${body.projectName || null},
           ${body.invFirstName}, ${body.invMiddleName || null}, ${body.invSurname || null}, ${body.fhFirstName || null}, ${body.fhMiddleName || null}, ${body.fhSurname || null},
           ${body.dob || null}, ${body.age || null}, ${body.gender || 'M'}, ${body.occupation || 'Service'}, ${body.occupationOther || null}, ${body.address || null}, ${body.city || null}, ${body.state || null}, ${body.pinCode || null},
           ${finalCorrAddress || null}, ${finalCorrCity || null}, ${finalCorrState || null}, ${finalCorrPin || null}, ${body.religion || null},
@@ -2064,17 +2088,21 @@ router.get("/investor/enroll/my", authInvestor, async (req, res) => {
 // GET /api/investor/enrollment/:id/print
 router.get("/investor/enrollment/:id/print", authInvestorOrAdmin, async (req, res) => {
   try {
-    const id = String(req.params.id);
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id.trim());
+    const rawId = String(req.params.id || "").trim();
+    const numId = Number(rawId) || 0;
 
-    let enrollment;
-    if (isUuid) {
-      const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE id = ${id}`;
-      enrollment = resRow;
-    } else {
-      const [resRow] = await sql`SELECT * FROM investor_enrollments WHERE investor_id = ${Number(id) || 0} OR investor_enrollment_id = ${id} ORDER BY created_at DESC LIMIT 1`;
-      enrollment = resRow;
-    }
+    const [enrollment] = await sql`
+      SELECT ie.*, iu.member_id AS user_member_id
+      FROM investor_enrollments ie
+      LEFT JOIN investor_users iu ON ie.investor_id = iu.id
+      WHERE (ie.id::text = ${rawId})
+         OR (ie.investor_id = ${numId} AND ${numId} > 0)
+         OR (ie.investor_enrollment_id = ${rawId})
+         OR (ie.form_no = ${rawId})
+         OR (iu.member_id = ${rawId})
+      ORDER BY ie.created_at DESC
+      LIMIT 1
+    `;
 
     if (!enrollment) {
       return err(res, "Enrollment not found.", 404);
@@ -2308,40 +2336,54 @@ router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
 
     // Process photo and signatures if base64 sent
     const processBase64 = async (dataUrl, filename) => {
-      if (!dataUrl || !dataUrl.startsWith("data:")) return dataUrl;
+      if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) return dataUrl;
       const matches = dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
       if (!matches || matches.length !== 3) return dataUrl;
       const buffer = Buffer.from(matches[2], 'base64');
-      const fileUrl = await saveFileToVPS(buffer, filename, "investor", {
+      const saved = await saveFileToVPS(buffer, {
+        originalName: filename,
+        module: "investor",
         entityId: existing?.investor_id || numId,
         subCategory: "enrollments"
       });
-      return fileUrl;
+      return saved?.url || saved?.relativePath || dataUrl;
     };
 
-    let photoUrl = existing?.photo_url || null;
-    if (b.photo && b.photo.startsWith("data:")) {
+    const extractUrl = (val) => {
+      if (!val) return null;
+      if (typeof val === "object") return val.url || val.relativePath || null;
+      if (typeof val === "string" && val.trim().startsWith("{")) {
+        try {
+          const p = JSON.parse(val.trim());
+          return p.url || p.relativePath || val;
+        } catch {}
+      }
+      return typeof val === "string" ? val : null;
+    };
+
+    let photoUrl = extractUrl(existing?.photo_url) || null;
+    if (b.photo && typeof b.photo === "string" && b.photo.startsWith("data:")) {
       photoUrl = await processBase64(b.photo, `photo_${Date.now()}.png`);
     } else if (b.photo !== undefined) {
-      photoUrl = b.photo || null;
+      photoUrl = extractUrl(b.photo);
     }
 
-    let sigFirstUrl = existing?.signature_first_url || null;
-    if (b.signatureFirstApplicant && b.signatureFirstApplicant.startsWith("data:")) {
+    let sigFirstUrl = extractUrl(existing?.signature_first_url) || null;
+    if (b.signatureFirstApplicant && typeof b.signatureFirstApplicant === "string" && b.signatureFirstApplicant.startsWith("data:")) {
       sigFirstUrl = await processBase64(b.signatureFirstApplicant, `sig1_${Date.now()}.png`);
-    } else if (b.signature && b.signature.startsWith("data:")) {
+    } else if (b.signature && typeof b.signature === "string" && b.signature.startsWith("data:")) {
       sigFirstUrl = await processBase64(b.signature, `sig1_${Date.now()}.png`);
     } else if (b.signatureFirstApplicant !== undefined) {
-      sigFirstUrl = b.signatureFirstApplicant || null;
+      sigFirstUrl = extractUrl(b.signatureFirstApplicant);
     } else if (b.signature !== undefined) {
-      sigFirstUrl = b.signature || null;
+      sigFirstUrl = extractUrl(b.signature);
     }
 
-    let sigJointUrl = existing?.signature_joint_url || null;
-    if (b.signatureJointApplicant && b.signatureJointApplicant.startsWith("data:")) {
+    let sigJointUrl = extractUrl(existing?.signature_joint_url) || null;
+    if (b.signatureJointApplicant && typeof b.signatureJointApplicant === "string" && b.signatureJointApplicant.startsWith("data:")) {
       sigJointUrl = await processBase64(b.signatureJointApplicant, `sig2_${Date.now()}.png`);
     } else if (b.signatureJointApplicant !== undefined) {
-      sigJointUrl = b.signatureJointApplicant || null;
+      sigJointUrl = extractUrl(b.signatureJointApplicant);
     }
 
     // Backend validation of mandatory fields (Part 3A & 3B)
