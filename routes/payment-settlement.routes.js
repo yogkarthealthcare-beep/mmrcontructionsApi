@@ -134,7 +134,9 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
     const fromDateFilter = from_date ? sql`b.created_at >= ${from_date}::timestamptz` : sql`TRUE`;
     const toDateFilter = to_date ? sql`b.created_at <= (${to_date}::date + INTERVAL '1 day')::timestamptz` : sql`TRUE`;
 
-    // Eligibility condition: Only show legitimate booking orders with plot allocated
+    // Strict eligibility condition:
+    // Only show plot orders booked by an external customer through an active Team Member under an Associate Leader.
+    // Excludes direct self-purchases by Associates or Team Members, Company Direct sales, and Associate Direct sales.
     const eligibilityFilter = sql`
       b.plot_id IS NOT NULL
       AND (
@@ -142,6 +144,23 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
         OR COALESCE(b.advance_amount, 0) > 0
         OR COALESCE(b.settlement_status, 'Pending') != 'Pending'
       )
+      AND b.booking_status NOT IN ('Cancelled', 'Rejected')
+
+      -- 1. Buyer MUST be an external Customer (Associate & Team Member self-purchases are strictly excluded)
+      AND COALESCE(b.booking_type, '') != 'SELF_PURCHASE'
+      AND COALESCE(buyer.user_type, 'Customer') = 'Customer'
+      AND buyer.user_type NOT IN ('Associate', 'Team Member', 'Admin', 'SuperAdmin')
+      AND NOT EXISTS (
+        SELECT 1 FROM team_members tm_buyer
+        WHERE tm_buyer.user_id = b.user_id
+          AND LOWER(tm_buyer.status) IN ('approved', 'active')
+      )
+      AND b.user_id != COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id, 0)
+
+      -- 2. Sale MUST be through an active Team Member under an Associate
+      AND COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id) IS NOT NULL
+      AND (seller.user_type = 'Team Member' OR tm_record.id IS NOT NULL)
+      AND COALESCE(tm_record.associate_id, b.associate_user_id, seller.sponsor_user_id) IS NOT NULL
     `;
 
     // Summary KPIs (Strictly deduplicated by booking_id)
@@ -155,9 +174,17 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
         LEFT JOIN plots p ON p.plot_id = b.plot_id
         LEFT JOIN sites s ON s.site_id = p.site_id
         LEFT JOIN users buyer ON buyer.user_id = b.user_id
-        LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
+        LEFT JOIN users seller ON seller.user_id = COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id)
         LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
         LEFT JOIN users sponsor ON sponsor.user_id = buyer.sponsor_user_id
+        LEFT JOIN LATERAL (
+          SELECT id, team_member_uid, associate_id, status
+          FROM team_members
+          WHERE user_id = COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id)
+            AND LOWER(status) IN ('approved', 'active')
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) tm_record ON TRUE
         WHERE ${eligibilityFilter}
           AND ${searchFilter}
           AND ${statusFilter}
@@ -275,7 +302,7 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
       LEFT JOIN plots p ON p.plot_id = b.plot_id
       LEFT JOIN sites s ON s.site_id = p.site_id
       LEFT JOIN users buyer ON buyer.user_id = b.user_id
-      LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
+      LEFT JOIN users seller ON seller.user_id = COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id)
       LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
       LEFT JOIN users sponsor ON sponsor.user_id = buyer.sponsor_user_id
       LEFT JOIN LATERAL (
@@ -288,7 +315,8 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
       LEFT JOIN LATERAL (
         SELECT id, team_member_uid, associate_id, status
         FROM team_members
-        WHERE user_id = b.sold_by_user_id AND LOWER(status) IN ('approved', 'active')
+        WHERE user_id = COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id)
+          AND LOWER(status) IN ('approved', 'active')
         ORDER BY created_at DESC
         LIMIT 1
       ) tm_record ON TRUE
@@ -390,8 +418,16 @@ async function computeDistributionForBooking(bookingId) {
     if (fetched) sellerUser = fetched;
   }
 
-  const isBuyerCustomer = (booking.buyer_user_type === 'Customer' || (!['Team Member', 'Associate'].includes(booking.buyer_user_type) && booking.user_id !== effectiveSellerUserId));
-  const isSelfPurchase = !isBuyerCustomer && Boolean(
+  // Check if buyer is an enrolled team member in team_members table
+  const [buyerTmRow] = await sql`
+    SELECT id FROM team_members WHERE user_id = ${booking.user_id} AND LOWER(status) IN ('approved', 'active') LIMIT 1
+  `;
+  const isBuyerCustomer = (
+    booking.buyer_user_type === 'Customer' ||
+    !['Team Member', 'Associate', 'Admin', 'SuperAdmin'].includes(booking.buyer_user_type)
+  ) && !buyerTmRow && booking.user_id !== effectiveSellerUserId;
+
+  const isSelfPurchase = !isBuyerCustomer || Boolean(
     booking.booking_type === 'SELF_PURCHASE' ||
     (effectiveSellerUserId && booking.user_id === effectiveSellerUserId)
   );
@@ -433,50 +469,6 @@ async function computeDistributionForBooking(bookingId) {
     }
   }
 
-  // Base rule 1: If company direct, 0% commission, 100% company share
-  if (isCompanyDirect) {
-    return {
-      booking,
-      engine,
-      amountReceived,
-      totalPlotPrice,
-      isSelfPurchase: false,
-      isCompanyDirect: true,
-      isBookingCancelled,
-      eligibleForRelease: !isBookingCancelled && amountReceived > 0 && booking.settlement_status !== 'Released',
-      ineligibleReason: isBookingCancelled ? 'Booking is cancelled/rejected' : (amountReceived <= 0 ? 'No payment received yet' : null),
-      settlementStatus: booking.settlement_status || 'Pending',
-      poolRate: totalPoolRate,
-      poolAmount: 0,
-      totalDistributionAmount: 0,
-      companyShare: amountReceived,
-      recipients: [],
-      notes: 'Company Direct Sale: 0% commission distributed, 100% company retained.'
-    };
-  }
-
-  // Base rule 2: If self purchase, 0% commission
-  if (isSelfPurchase) {
-    return {
-      booking,
-      engine,
-      amountReceived,
-      totalPlotPrice,
-      isSelfPurchase: true,
-      isCompanyDirect: false,
-      isBookingCancelled,
-      eligibleForRelease: !isBookingCancelled && amountReceived > 0 && booking.settlement_status !== 'Released',
-      ineligibleReason: isBookingCancelled ? 'Booking is cancelled/rejected' : (amountReceived <= 0 ? 'No payment received yet' : null),
-      settlementStatus: booking.settlement_status || 'Pending',
-      poolRate: totalPoolRate,
-      poolAmount: 0,
-      totalDistributionAmount: 0,
-      companyShare: amountReceived,
-      recipients: [],
-      notes: 'Self-Purchase Booking: 0% commission distributed to prevent circular commission credits.'
-    };
-  }
-
   // Determine seller & hierarchy
   const sellerUserId = effectiveSellerUserId;
   const [tmSellerRow] = await sql`
@@ -488,6 +480,77 @@ async function computeDistributionForBooking(bookingId) {
     LIMIT 1
   `;
   const isTeamMemberSeller = Boolean(tmSellerRow) || sellerUser?.user_type === 'Team Member';
+
+  // Base rule 1: If company direct, not eligible for payment settlement
+  if (isCompanyDirect) {
+    return {
+      booking,
+      engine,
+      amountReceived,
+      totalPlotPrice,
+      isSelfPurchase: false,
+      isCompanyDirect: true,
+      isTeamMemberSeller: false,
+      isBookingCancelled,
+      eligibleForRelease: false,
+      ineligibleReason: isBookingCancelled ? 'Booking is cancelled/rejected' : 'Company Direct orders are not eligible for payment settlement.',
+      settlementStatus: booking.settlement_status || 'Pending',
+      poolRate: totalPoolRate,
+      poolAmount: 0,
+      totalDistributionAmount: 0,
+      companyShare: amountReceived,
+      recipients: [],
+      notes: 'Company Direct Sale: Settlement disabled.'
+    };
+  }
+
+  // Base rule 2: If self purchase by Associate or Team Member, not eligible for payment settlement
+  if (isSelfPurchase) {
+    return {
+      booking,
+      engine,
+      amountReceived,
+      totalPlotPrice,
+      isSelfPurchase: true,
+      isCompanyDirect: false,
+      isTeamMemberSeller,
+      isBookingCancelled,
+      eligibleForRelease: false,
+      ineligibleReason: isBookingCancelled 
+        ? 'Booking is cancelled/rejected' 
+        : 'Direct self-purchases by Associates or Team Members are not eligible for payment settlement.',
+      settlementStatus: booking.settlement_status || 'Pending',
+      poolRate: totalPoolRate,
+      poolAmount: 0,
+      totalDistributionAmount: 0,
+      companyShare: amountReceived,
+      recipients: [],
+      notes: 'Direct Self-Purchase: Commission settlement disabled.'
+    };
+  }
+
+  // Base rule 3: Only orders sold through an active Team Member under an Associate Leader are eligible
+  if (!isTeamMemberSeller) {
+    return {
+      booking,
+      engine,
+      amountReceived,
+      totalPlotPrice,
+      isSelfPurchase: false,
+      isCompanyDirect: false,
+      isTeamMemberSeller: false,
+      isBookingCancelled,
+      eligibleForRelease: false,
+      ineligibleReason: 'Only plot orders sold through an active Team Member under an Associate Leader are eligible for payment settlement.',
+      settlementStatus: booking.settlement_status || 'Pending',
+      poolRate: totalPoolRate,
+      poolAmount: 0,
+      totalDistributionAmount: 0,
+      companyShare: amountReceived,
+      recipients: [],
+      notes: 'Direct Associate Sale (without Team Member): Settlement disabled.'
+    };
+  }
   let leaderUserId = isTeamMemberSeller
     ? Number(tmSellerRow?.associate_id || booking.associate_user_id || booking.seller_sponsor_user_id || sellerUser?.sponsor_user_id || 0)
     : sellerUserId;
@@ -738,6 +801,14 @@ router.post(
 
         // 3. Compute distribution
         const calculation = await computeDistributionForBooking(bookingId);
+
+        if (!calculation.eligibleForRelease && !calculation.isHistorical) {
+          throw new Error(calculation.ineligibleReason || 'This order is not eligible for payment settlement release.');
+        }
+
+        if (calculation.isSelfPurchase || calculation.isCompanyDirect || !calculation.isTeamMemberSeller) {
+          throw new Error(calculation.ineligibleReason || 'Settlement release is only permitted for customer orders sold through an active Team Member under an Associate Leader.');
+        }
 
         // Ensure settlement reference is unique (handles re-distribution of previously released orders)
         let settlementRef = `MMR-STL-${new Date().getFullYear()}-${String(bookingId).padStart(6, '0')}`;
