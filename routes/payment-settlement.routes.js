@@ -42,6 +42,11 @@ async function ensureSettlementSchema() {
           ALTER TABLE bookings ADD COLUMN IF NOT EXISTS settlement_cancel_reason TEXT;
           ALTER TABLE bookings ADD COLUMN IF NOT EXISTS settlement_audit_log JSONB DEFAULT '[]'::jsonb;
 
+          -- Clean up any duplicate records in admin_users from legacy database imports
+          DELETE FROM admin_users a
+          USING admin_users b
+          WHERE a.ctid < b.ctid AND a.admin_id = b.admin_id;
+
           ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
           ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS approved_by_admin_id INT;
           ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
@@ -139,32 +144,40 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
       )
     `;
 
-    // Summary KPIs
+    // Summary KPIs (Strictly deduplicated by booking_id)
     const [metrics] = await sql`
+      WITH filtered_bookings AS (
+        SELECT DISTINCT ON (b.booking_id)
+          b.booking_id,
+          COALESCE(b.settlement_status, 'Pending') AS settlement_status,
+          COALESCE(b.advance_amount, 0)::numeric AS advance_amount
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        LEFT JOIN sites s ON s.site_id = p.site_id
+        LEFT JOIN users buyer ON buyer.user_id = b.user_id
+        LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
+        LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
+        LEFT JOIN users sponsor ON sponsor.user_id = buyer.sponsor_user_id
+        WHERE ${eligibilityFilter}
+          AND ${searchFilter}
+          AND ${statusFilter}
+          AND ${fromDateFilter}
+          AND ${toDateFilter}
+        ORDER BY b.booking_id DESC
+      )
       SELECT
         COUNT(*)::int AS total_orders,
-        COUNT(CASE WHEN COALESCE(b.settlement_status, 'Pending') = 'Pending' THEN 1 END)::int AS pending_count,
-        COUNT(CASE WHEN b.settlement_status = 'Released' THEN 1 END)::int AS released_count,
-        COUNT(CASE WHEN b.settlement_status = 'Cancelled' THEN 1 END)::int AS cancelled_count,
-        COALESCE(SUM(COALESCE(b.advance_amount, 0)), 0)::numeric AS total_received_amount,
-        COALESCE(SUM(CASE WHEN b.settlement_status = 'Released' THEN COALESCE(b.advance_amount, 0) ELSE 0 END), 0)::numeric AS total_settled_amount
-      FROM bookings b
-      LEFT JOIN plots p ON p.plot_id = b.plot_id
-      LEFT JOIN sites s ON s.site_id = p.site_id
-      LEFT JOIN users buyer ON buyer.user_id = b.user_id
-      LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
-      LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
-      LEFT JOIN users sponsor ON sponsor.user_id = buyer.sponsor_user_id
-      WHERE ${eligibilityFilter}
-        AND ${searchFilter}
-        AND ${statusFilter}
-        AND ${fromDateFilter}
-        AND ${toDateFilter}
+        COUNT(CASE WHEN settlement_status = 'Pending' THEN 1 END)::int AS pending_count,
+        COUNT(CASE WHEN settlement_status = 'Released' THEN 1 END)::int AS released_count,
+        COUNT(CASE WHEN settlement_status = 'Cancelled' THEN 1 END)::int AS cancelled_count,
+        COALESCE(SUM(advance_amount), 0)::numeric AS total_received_amount,
+        COALESCE(SUM(CASE WHEN settlement_status = 'Released' THEN advance_amount ELSE 0 END), 0)::numeric AS total_settled_amount
+      FROM filtered_bookings
     `;
 
-    // Paginated settlement orders
+    // Paginated settlement orders (Strictly deduplicated by booking_id with single-record joins)
     const orders = await sql`
-      SELECT
+      SELECT DISTINCT ON (b.booking_id)
         b.booking_id,
         b.booking_serial,
         COALESCE(b.booking_date, b.created_at) AS booking_date,
@@ -265,7 +278,13 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
       LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
       LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
       LEFT JOIN users sponsor ON sponsor.user_id = buyer.sponsor_user_id
-      LEFT JOIN admin_users rel_admin ON rel_admin.admin_id = b.settlement_released_by
+      LEFT JOIN LATERAL (
+        SELECT full_name
+        FROM admin_users
+        WHERE admin_id = b.settlement_released_by
+        ORDER BY admin_id ASC
+        LIMIT 1
+      ) rel_admin ON TRUE
       LEFT JOIN LATERAL (
         SELECT id, team_member_uid, associate_id, status
         FROM team_members
@@ -273,7 +292,12 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
         ORDER BY created_at DESC
         LIMIT 1
       ) tm_record ON TRUE
-      LEFT JOIN users tm_assoc ON tm_assoc.user_id = tm_record.associate_id
+      LEFT JOIN LATERAL (
+        SELECT full_name, member_id, mobile_no, email
+        FROM users
+        WHERE user_id = tm_record.associate_id
+        LIMIT 1
+      ) tm_assoc ON TRUE
       LEFT JOIN LATERAL (
         SELECT invoice_id, invoice_number, payment_status, paid_amount
         FROM invoices
