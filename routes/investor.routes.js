@@ -1222,6 +1222,18 @@ router.post("/investor/deposit", authInvestor, upload.single("payment_screenshot
 
     const investorId = req.investor.id;
 
+    let screenshotUrl = payment_screenshot_url || null;
+    if (req.file) {
+      const saved = await saveFileToVPS(req.file.buffer, {
+        module: "investor",
+        entityId: investorId,
+        subCategory: "deposits",
+        entityType: "DepositProof",
+        originalName: req.file.originalname
+      });
+      screenshotUrl = formatStorageUrl(saved.url || saved.relativePath);
+    }
+
     // Create Deposit request
     const [deposit] = await sql`
       INSERT INTO investor_deposits (
@@ -1229,7 +1241,7 @@ router.post("/investor/deposit", authInvestor, upload.single("payment_screenshot
         payment_screenshot_data, payment_screenshot_mime_type, status
       ) VALUES (
         ${investorId}, ${numAmount}, ${payment_method}, ${gateway || null}, ${transaction_reference || null},
-        ${payment_screenshot_url || null}, ${req.file?.buffer || null}, ${req.file?.mimetype || null}, 'pending'
+        ${screenshotUrl}, ${req.file?.buffer || null}, ${req.file?.mimetype || null}, 'pending'
       )
       RETURNING *
     `;
@@ -1248,19 +1260,33 @@ router.post("/investor/deposit", authInvestor, upload.single("payment_screenshot
     return ok(res, deposit, "Deposit request submitted successfully! Awaiting admin approval.", 201);
   } catch (e) {
     console.error("Deposit Error:", e);
-    return err(res, "Failed to submit deposit request.");
+    return err(res, "Failed to submit deposit request: " + e.message);
   }
 });
 
-router.get("/investor/deposits/:id/screenshot", authInvestor, async (req, res) => {
+router.get(["/investor/deposits/:id/screenshot", "/investor/deposits/:id/file"], async (req, res) => {
   try {
     const [deposit] = await sql`
-      SELECT payment_screenshot_data, payment_screenshot_mime_type
+      SELECT payment_screenshot_url, payment_screenshot_data, payment_screenshot_mime_type
       FROM investor_deposits
-      WHERE id = ${req.params.id} AND investor_id = ${req.investor.id}`;
-    if (!deposit?.payment_screenshot_data) return err(res, "Screenshot not found.", 404);
-    res.setHeader("Content-Type", deposit.payment_screenshot_mime_type || "application/octet-stream");
-    return res.send(deposit.payment_screenshot_data);
+      WHERE id::text = ${req.params.id}
+      LIMIT 1`;
+    if (!deposit) return err(res, "Screenshot not found.", 404);
+
+    if (deposit.payment_screenshot_url) {
+      const full = formatStorageUrl(deposit.payment_screenshot_url);
+      if (full && (full.startsWith("http://") || full.startsWith("https://"))) {
+        return res.redirect(full);
+      }
+    }
+
+    if (deposit.payment_screenshot_data) {
+      res.setHeader("Content-Type", deposit.payment_screenshot_mime_type || "image/jpeg");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+      return res.send(deposit.payment_screenshot_data);
+    }
+    return err(res, "Screenshot data not found.", 404);
   } catch (e) {
     return err(res, "Failed to load payment screenshot.");
   }
@@ -1274,7 +1300,11 @@ router.get("/investor/deposits", authInvestor, async (req, res) => {
       WHERE investor_id = ${req.investor.id}
       ORDER BY created_at DESC
     `;
-    return ok(res, deposits);
+    const formatted = deposits.map(d => ({
+      ...d,
+      payment_screenshot_url: formatStorageUrl(d.payment_screenshot_url) || (d.payment_screenshot_data ? `/api/investor/deposits/${d.id}/screenshot` : null)
+    }));
+    return ok(res, formatted);
   } catch (e) {
     return err(res, "Failed to fetch deposits.");
   }
