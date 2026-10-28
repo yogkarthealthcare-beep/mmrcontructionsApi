@@ -211,9 +211,9 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
         b.booking_type,
         (COALESCE(CAST(buyer.user_type AS TEXT), 'Customer') != 'Customer' AND (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id)) AS is_self_purchase,
         (b.sold_by_user_id IS NULL) AS is_company_direct,
-        COALESCE(b.advance_amount, 0) AS amount_received,
-        COALESCE(b.remaining_balance, 0) AS remaining_balance,
-        COALESCE(b.base_price, p.sold_price, p.base_price, (b.advance_amount + b.remaining_balance), 0) AS total_plot_price,
+        COALESCE(b.advance_amount, 0)::numeric AS amount_received,
+        COALESCE(b.remaining_balance, 0)::numeric AS remaining_balance,
+        COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0)::numeric AS total_plot_price,
         b.payment_type,
         b.payment_method,
 
