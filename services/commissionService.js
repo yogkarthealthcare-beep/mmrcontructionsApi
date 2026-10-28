@@ -474,7 +474,22 @@ export async function generateCommissionForPayment({
     const currentMonth = new Date().toISOString().slice(0, 7);
     const effectiveAdminId = adminId || null;
 
-    const [eventRow] = await tx`
+    // Check if event already exists for this booking/source or canonical event_key
+    let [eventRow] = await tx`
+      SELECT event_id FROM commission_source_events
+      WHERE booking_id = ${bId}
+        AND (
+          (source_type = ${sourceType} AND source_id = ${sourceId})
+          OR (event_key IS NOT NULL AND event_key = ${eventKey})
+        )
+      LIMIT 1
+    `.catch(() => []);
+
+    if (eventRow) {
+      return { generated: 0, reason: "Payment event already processed", event_key: eventKey, event_id: eventRow.event_id };
+    }
+
+    [eventRow] = await tx`
       INSERT INTO commission_source_events (
         booking_id, source_type, source_id, payment_type, received_amount,
         plot_amount, plot_area_gaj, commission_model, engine_version, generated_by_admin_id,
@@ -485,7 +500,6 @@ export async function generateCommissionForPayment({
         ${engine.commission_model || 'FlatTeam'}, ${engine.version || 1}, ${effectiveAdminId},
         ${eventKey}, ${math.undistributedAmount}, ${tx.json(engine)}
       )
-      ON CONFLICT (booking_id, source_type, source_id) DO NOTHING
       RETURNING event_id
     `;
 
@@ -496,6 +510,36 @@ export async function generateCommissionForPayment({
     const eventId = eventRow.event_id;
     let generated = 0;
     let totalCommissionDistributed = 0;
+
+    // Defensive helper to update sales tracker without failing on missing unique constraint
+    const updateSalesTracker = async (userId, gajSold, commissionAmount) => {
+      try {
+        const [updated] = await tx`
+          UPDATE associate_sales_tracker
+          SET total_gaj_sold = COALESCE(total_gaj_sold, 0) + ${Number(gajSold || 0)},
+              total_commission_earned = COALESCE(total_commission_earned, 0) + ${Number(commissionAmount || 0)},
+              updated_at = NOW()
+          WHERE associate_user_id = ${userId}
+          RETURNING tracker_id
+        `;
+        if (!updated) {
+          await tx`
+            INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
+            VALUES (${userId}, ${Number(gajSold || 0)}, ${Number(commissionAmount || 0)})
+          `.catch(async () => {
+            await tx`
+              UPDATE associate_sales_tracker
+              SET total_gaj_sold = COALESCE(total_gaj_sold, 0) + ${Number(gajSold || 0)},
+                  total_commission_earned = COALESCE(total_commission_earned, 0) + ${Number(commissionAmount || 0)},
+                  updated_at = NOW()
+              WHERE associate_user_id = ${userId}
+            `.catch(() => {});
+          });
+        }
+      } catch (err) {
+        console.warn(`[associate_sales_tracker] update warning for user ${userId}:`, err?.message);
+      }
+    };
 
     // 12. Direct Seller Payout Insertion
     if (math.sellerAmount > 0) {
@@ -521,14 +565,7 @@ export async function generateCommissionForPayment({
       `;
 
       if (comm) {
-        await tx`
-          INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
-          VALUES (${sellerUserId}, ${Number(booking.plot_area || 0)}, ${math.sellerAmount})
-          ON CONFLICT (associate_user_id) DO UPDATE SET
-            total_gaj_sold = associate_sales_tracker.total_gaj_sold + ${Number(booking.plot_area || 0)},
-            total_commission_earned = associate_sales_tracker.total_commission_earned + ${math.sellerAmount},
-            updated_at = NOW()
-        `;
+        await updateSalesTracker(sellerUserId, Number(booking.plot_area || 0), math.sellerAmount);
         generated++;
         totalCommissionDistributed += math.sellerAmount;
       }
@@ -569,13 +606,7 @@ export async function generateCommissionForPayment({
         `;
 
         if (comm) {
-          await tx`
-            INSERT INTO associate_sales_tracker (associate_user_id, total_gaj_sold, total_commission_earned)
-            VALUES (${p.user_id}, 0, ${payout})
-            ON CONFLICT (associate_user_id) DO UPDATE SET
-              total_commission_earned = associate_sales_tracker.total_commission_earned + ${payout},
-              updated_at = NOW()
-          `;
+          await updateSalesTracker(p.user_id, 0, payout);
           generated++;
           totalCommissionDistributed += payout;
         }

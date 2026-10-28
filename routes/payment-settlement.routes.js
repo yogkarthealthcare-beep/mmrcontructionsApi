@@ -74,6 +74,7 @@ async function ensureSettlementSchema() {
 
           CREATE INDEX IF NOT EXISTS idx_plot_order_settlements_booking ON plot_order_settlements(booking_id);
           CREATE INDEX IF NOT EXISTS idx_bookings_settlement_status ON bookings(settlement_status);
+          CREATE UNIQUE INDEX IF NOT EXISTS uq_commission_source_events_bk_src ON commission_source_events (booking_id, source_type, source_id);
         `);
       } catch (e) {
         console.warn('[PaymentSettlement] Schema setup notice:', e.message);
