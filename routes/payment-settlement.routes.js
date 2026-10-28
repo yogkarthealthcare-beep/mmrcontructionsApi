@@ -148,8 +148,7 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
 
       -- 1. Buyer MUST be an external Customer (Associate & Team Member self-purchases are strictly excluded)
       AND COALESCE(b.booking_type, '') != 'SELF_PURCHASE'
-      AND COALESCE(buyer.user_type, 'Customer') = 'Customer'
-      AND buyer.user_type NOT IN ('Associate', 'Team Member', 'Admin', 'SuperAdmin')
+      AND COALESCE(CAST(buyer.user_type AS TEXT), 'Customer') = 'Customer'
       AND NOT EXISTS (
         SELECT 1 FROM team_members tm_buyer
         WHERE tm_buyer.user_id = b.user_id
@@ -159,7 +158,7 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
 
       -- 2. Sale MUST be through an active Team Member under an Associate
       AND COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id) IS NOT NULL
-      AND (seller.user_type = 'Team Member' OR tm_record.id IS NOT NULL)
+      AND (CAST(seller.user_type AS TEXT) = 'Team Member' OR tm_record.id IS NOT NULL)
       AND COALESCE(tm_record.associate_id, b.associate_user_id, seller.sponsor_user_id) IS NOT NULL
     `;
 
@@ -210,7 +209,7 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
         COALESCE(b.booking_date, b.created_at) AS booking_date,
         b.booking_status,
         b.booking_type,
-        (COALESCE(buyer.user_type, 'Customer') != 'Customer' AND (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id)) AS is_self_purchase,
+        (COALESCE(CAST(buyer.user_type AS TEXT), 'Customer') != 'Customer' AND (b.booking_type = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id)) AS is_self_purchase,
         (b.sold_by_user_id IS NULL) AS is_company_direct,
         COALESCE(b.advance_amount, 0) AS amount_received,
         COALESCE(b.remaining_balance, 0) AS remaining_balance,
@@ -244,23 +243,23 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
 
         -- Team Member Details (if seller is Team Member or enrolled)
         CASE 
-          WHEN seller.user_type = 'Team Member' OR tm_record.id IS NOT NULL THEN seller.full_name
+          WHEN CAST(seller.user_type AS TEXT) = 'Team Member' OR tm_record.id IS NOT NULL THEN seller.full_name
           ELSE NULL
         END AS team_member_name,
         CASE 
-          WHEN seller.user_type = 'Team Member' OR tm_record.id IS NOT NULL THEN COALESCE(tm_record.team_member_uid, seller.member_id)
+          WHEN CAST(seller.user_type AS TEXT) = 'Team Member' OR tm_record.id IS NOT NULL THEN COALESCE(tm_record.team_member_uid, seller.member_id)
           ELSE NULL
         END AS team_member_member_id,
         CASE 
-          WHEN seller.user_type = 'Team Member' OR tm_record.id IS NOT NULL THEN seller.user_id
+          WHEN CAST(seller.user_type AS TEXT) = 'Team Member' OR tm_record.id IS NOT NULL THEN seller.user_id
           ELSE NULL
         END AS team_member_user_id,
         CASE 
-          WHEN seller.user_type = 'Team Member' OR tm_record.id IS NOT NULL THEN seller.mobile_no
+          WHEN CAST(seller.user_type AS TEXT) = 'Team Member' OR tm_record.id IS NOT NULL THEN seller.mobile_no
           ELSE NULL
         END AS team_member_mobile,
         CASE 
-          WHEN seller.user_type = 'Team Member' OR tm_record.id IS NOT NULL THEN seller.email
+          WHEN CAST(seller.user_type AS TEXT) = 'Team Member' OR tm_record.id IS NOT NULL THEN seller.email
           ELSE NULL
         END AS team_member_email,
 
@@ -594,7 +593,7 @@ async function computeDistributionForBooking(bookingId) {
         SELECT user_id, full_name, member_id, account_status, user_type
         FROM users
         WHERE user_id = ${leaderUserId}
-          AND user_type = 'Associate'
+          AND CAST(user_type AS TEXT) = 'Associate'
       `;
       const isLeaderActive = leaderUser && ['Active', 'Approved'].includes(leaderUser.account_status) && leaderUser.account_status !== 'Blacklisted';
       if (isLeaderActive) {
