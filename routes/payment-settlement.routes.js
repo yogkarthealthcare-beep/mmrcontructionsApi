@@ -75,6 +75,20 @@ async function ensureSettlementSchema() {
           CREATE INDEX IF NOT EXISTS idx_plot_order_settlements_booking ON plot_order_settlements(booking_id);
           CREATE INDEX IF NOT EXISTS idx_bookings_settlement_status ON bookings(settlement_status);
           CREATE UNIQUE INDEX IF NOT EXISTS uq_commission_source_events_bk_src ON commission_source_events (booking_id, source_type, source_id);
+
+          DO $$
+          BEGIN
+            IF EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conname = 'commission_source_events_source_type_check'
+                AND conrelid = 'commission_source_events'::regclass
+            ) THEN
+              ALTER TABLE commission_source_events DROP CONSTRAINT commission_source_events_source_type_check;
+            END IF;
+            ALTER TABLE commission_source_events
+              ADD CONSTRAINT commission_source_events_source_type_check
+              CHECK (source_type IN ('FullPayment','InitialPayment','EmiPayment','PartialPayment','Manual','BookingAdvance','MilestonePayment','OnlinePayment','OfflinePayment','PaymentSettlement'));
+          END $$;
         `);
       } catch (e) {
         console.warn('[PaymentSettlement] Schema setup notice:', e.message);
@@ -835,7 +849,7 @@ router.post(
           await commissionService.generateCommissionForPayment({
             bookingId,
             event: {
-              type: 'PaymentSettlement',
+              type: 'BookingAdvance',
               key: `settlement:${bookingId}:${Date.now()}`,
               principalAmount: amountReceived,
               sourceRef: settlementRef,

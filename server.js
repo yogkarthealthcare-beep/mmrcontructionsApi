@@ -2034,7 +2034,7 @@ const requireCommissionEngineSchema = (() => {
             END IF;
             ALTER TABLE commission_source_events
               ADD CONSTRAINT commission_source_events_source_type_check
-              CHECK (source_type IN ('FullPayment','InitialPayment','EmiPayment','PartialPayment','Manual','BookingAdvance','MilestonePayment','OnlinePayment','OfflinePayment'));
+              CHECK (source_type IN ('FullPayment','InitialPayment','EmiPayment','PartialPayment','Manual','BookingAdvance','MilestonePayment','OnlinePayment','OfflinePayment','PaymentSettlement'));
           END $$;
         `);
         // Remove duplicates if any before adding constraint (keep highest ID)

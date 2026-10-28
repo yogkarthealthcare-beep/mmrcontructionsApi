@@ -233,7 +233,9 @@ export async function generateCommissionForPayment({
   const bId = Number(bookingId);
   if (!bId || bId <= 0) return { generated: 0, reason: "Invalid booking ID" };
 
-  const sourceType = event.type || event.sourceType || "InitialPayment";
+  const validSourceTypes = ['FullPayment','InitialPayment','EmiPayment','PartialPayment','Manual','BookingAdvance','MilestonePayment','OnlinePayment','OfflinePayment','PaymentSettlement'];
+  const rawSourceType = event.type || event.sourceType || "InitialPayment";
+  const sourceType = validSourceTypes.includes(rawSourceType) ? rawSourceType : "BookingAdvance";
   const sourceId = String(event.sourceRef || event.sourceId || bId);
   const paymentType = event.paymentType || "Standard";
   const principalAmount = Number(event.principalAmount ?? event.receivedAmount ?? 0);
