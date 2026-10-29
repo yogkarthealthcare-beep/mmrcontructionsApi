@@ -1612,6 +1612,16 @@ router.get('/sync-sequences', async (req, res) => {
   }
 });
 
+router.get('/debug-sites', async (_req, res) => {
+  try {
+    const gallery = await sql`SELECT * FROM site_gallery ORDER BY id`;
+    const sites = await sql`SELECT site_id, site_name, location, is_active, status, deleted_at FROM sites ORDER BY site_id`;
+    return res.json({ success: true, gallery, sites });
+  } catch (err) {
+    return res.json({ success: false, error: err.message });
+  }
+});
+
 router.post(['/resend-email-otp'], async (req, res) => {
   try {
     const email = req.body.email ? normalizeEmail(req.body.email) : '';
