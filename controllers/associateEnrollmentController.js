@@ -2,6 +2,8 @@ import { ZodError } from "zod";
 import { saveFileToVPS } from "../services/fileStorage.service.js";
 import { associateEnrollmentSchema, registerAssociateEnrollment } from "../services/associateEnrollmentService.js";
 import { deleteAssociateProfile } from "../services/profileCleanupService.js";
+import { triggerEnrollmentEmailAsync } from "../services/enrollmentEmail.service.js";
+import { triggerAssociateStatusEmailAsync } from "../services/phase2NotificationEmail.service.js";
 import { validateNomineeDob } from "../utils/validationHelper.js";
 /**
  * Controller to handle POST /api/associate-enrollment
@@ -59,6 +61,24 @@ export async function createAssociateEnrollment(req, res) {
         }
         // 3. Register associate via the service layer
         const result = await registerAssociateEnrollment(validatedData, applicantPhotoUrl, nomineePhotoUrl, userId, applicantSignatureUrl, sponsorSignatureUrl);
+
+        // Trigger associate enrollment confirmation email
+        triggerEnrollmentEmailAsync({
+            enrollmentType: "Associate",
+            submissionId: result.associateId,
+            recipientEmail: validatedData.email || req.user?.email,
+            isFinalSubmit: true,
+            customData: {
+                ...validatedData,
+                id: result.associateId,
+                associateId: result.associateId,
+                applicant_photo_url: applicantPhotoUrl,
+                nominee_photo_url: nomineePhotoUrl,
+                applicant_signature_url: applicantSignatureUrl,
+                sponsor_signature_url: sponsorSignatureUrl
+            }
+        });
+
         return res.status(200).json({
             success: true,
             message: "Associate enrollment submitted successfully.",
@@ -1074,6 +1094,15 @@ export async function updateAdminAssociateEnrollment(req, res) {
                 }
             }
         });
+        if (isApproving || newStatus === 'rejected') {
+            triggerAssociateStatusEmailAsync(targetId, {
+                associateName: fullName,
+                email: email,
+                reason: req.body?.reject_reason || req.body?.rejection_reason || null,
+                approvedBy: req.user?.full_name || req.admin?.full_name || "Administration"
+            }, isApproving ? 'approved' : 'rejected');
+        }
+
         return res.status(200).json({
             success: true,
             message: isApproving ? "Associate enrollment approved successfully." : "Associate enrollment updated successfully.",

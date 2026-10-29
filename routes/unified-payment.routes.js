@@ -5,6 +5,7 @@ import sql from "../db.js";
 import { adminAuth, userAuth } from "../middleware/auth.middleware.js";
 import { runHistoricalPaymentMigration } from "../services/unifiedPaymentMigration.service.js";
 import commissionService from "../services/commissionService.js";
+import { triggerPaymentReceiptEmailAsync, triggerPaymentRejectionEmailAsync } from "../services/phase3NotificationEmail.service.js";
 
 const router = express.Router();
 
@@ -816,6 +817,15 @@ router.post("/api/admin/payments/:id/approve", adminAuth, async (req, res) => {
     }
 
     const result = await executePaymentAllocation(paymentId, adminId);
+
+    // Standalone Digital Payment Receipt Email Dispatch
+    triggerPaymentReceiptEmailAsync(paymentId, {
+      amountPaid: payment.gross_amount,
+      paymentMode: payment.payment_mode,
+      paymentDate: payment.payment_date,
+      paymentSerial: payment.payment_serial
+    });
+
     return ok(res, result, "Payment approved, ledger allocated, and official receipt generated successfully.");
   } catch (err) {
     console.error("[Admin Approve Payment Error]", err);
@@ -856,6 +866,14 @@ router.post("/api/admin/payments/:id/reject", adminAuth, async (req, res) => {
         updated_at = NOW()
       WHERE booking_id = ${payment.booking_id} AND emi_status = 'ProofSubmitted'
     `;
+
+    // Standalone Payment Rejection Email Dispatch
+    triggerPaymentRejectionEmailAsync(paymentId, {
+      amount: payment.gross_amount,
+      rejectionReason: rejection_reason.trim(),
+      paymentDate: payment.payment_date,
+      paymentSerial: payment.payment_serial
+    });
 
     return ok(res, { paymentId }, "Payment rejected successfully");
   } catch (err) {

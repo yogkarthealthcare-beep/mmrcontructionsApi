@@ -23,6 +23,8 @@ const sql = new Proxy(function (...args) {
 import { saveFileToVPS } from "../services/fileStorage.service.js";
 import jwt from "jsonwebtoken";
 import { generateCustomerPdf } from "../services/customerPdfService.js";
+import { triggerEnrollmentEmailAsync } from "../services/enrollmentEmail.service.js";
+import { triggerCustomerStatusEmailAsync } from "../services/phase2NotificationEmail.service.js";
 import { normalizeHumanName, isValidHumanName, calculateAge, isValidState } from "../utils/validationHelper.js";
 import {
   canApproveCustomer,
@@ -584,6 +586,23 @@ router.post("/customer-enrollment", authUser, async (req, res) => {
         }
       }
     });
+
+    // Trigger enrollment confirmation email if final submit
+    const isFinalSubmission = b.isFinalSubmitted === true || b.isFinalSubmitted === 'true' || b.is_final_submitted === true || b.is_final_submitted === 'true';
+    if (isFinalSubmission) {
+      triggerEnrollmentEmailAsync({
+        enrollmentType: 'Customer',
+        submissionId: newSubmissionId,
+        recipientEmail: b.email1 || b.email || req.user?.email,
+        isFinalSubmit: true,
+        customData: {
+          ...b,
+          id: newSubmissionId,
+          application_no: appNo,
+          applicationNo: appNo,
+        }
+      });
+    }
 
     return ok(res, { id: newSubmissionId, applicationNo: appNo }, "Enrollment submitted successfully.");
   } catch (e) {
@@ -1206,6 +1225,15 @@ router.patch("/admin/customer-enrollments/:id/status", authAdmin, async (req, re
         const uStatus = isApproving ? 'Completed' : ((appStatus === 'Pending' || appStatus === 'Hold/Pending KYC' || appStatus === 'Rejected') ? 'Pending' : 'Completed');
         await sql`UPDATE users SET enrollment_status = ${uStatus} WHERE user_id = ${existing.user_id}`;
       }
+
+      if (isApproving || isRejecting) {
+        triggerCustomerStatusEmailAsync(existing.user_id, {
+          applicationNo: updated?.application_no || existing.application_no,
+          approvedBy: approverName,
+          reason: rejectReasonText
+        }, isApproving ? 'approved' : 'rejected');
+      }
+
       return ok(res, updated, "Status updated successfully.");
     } else {
       return res.status(422).json({
@@ -1795,6 +1823,12 @@ router.post("/portal/customers/:customerId/enrollment/approve", authUser, requir
 
     await sql`UPDATE users SET enrollment_status = 'Completed' WHERE user_id = ${customerId}`;
 
+    // Standalone Customer Approval Email Dispatch
+    triggerCustomerStatusEmailAsync(customerId, {
+      applicationNo: updated.application_no,
+      approvedBy: approver.fullName
+    }, 'approved');
+
     return ok(res, updated, `Enrollment Form approved successfully by ${approver.fullName} (${approver.memberId}).`);
   } catch (error) {
     console.error("Enrollment approve error:", error);
@@ -1838,6 +1872,12 @@ router.post("/portal/customers/:customerId/enrollment/reject", authUser, require
     `;
 
     await sql`UPDATE users SET enrollment_status = 'Pending' WHERE user_id = ${customerId}`;
+
+    // Standalone Customer Rejection Email Dispatch
+    triggerCustomerStatusEmailAsync(customerId, {
+      applicationNo: updated.application_no,
+      reason: reason
+    }, 'rejected');
 
     return ok(res, updated, `Enrollment Form rejected. Reason documented.`);
   } catch (error) {

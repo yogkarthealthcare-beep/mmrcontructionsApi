@@ -8,6 +8,9 @@ import { sendEmail } from "../emailService.js";
 import { saveFileToVPS, deleteFileFromStorage } from "../services/fileStorage.service.js";
 import { deleteInvestorProfile } from "../services/profileCleanupService.js";
 import { generateInvestorPdf } from "../services/investorPdfService.js";
+import { triggerEnrollmentEmailAsync } from "../services/enrollmentEmail.service.js";
+import { triggerWithdrawalRequestEmailsAsync, triggerWithdrawalStatusEmailsAsync } from "../services/businessNotificationEmail.service.js";
+import { triggerInvestorStatusEmailAsync, triggerInvestorDepositRequestEmailAsync, triggerInvestorDepositStatusEmailAsync } from "../services/phase2NotificationEmail.service.js";
 import { normalizeHumanName, isValidHumanName, calculateAge, isValidState } from "../utils/validationHelper.js";
 
 const router = express.Router();
@@ -1154,6 +1157,17 @@ router.patch("/investor/notifications/:id/read", authInvestor, async (req, res) 
   }
 });
 
+router.patch("/investor/notifications/read-all", authInvestor, async (req, res) => {
+  try {
+    await sql`
+      UPDATE investor_notifications SET is_read = TRUE
+      WHERE investor_id = ${req.investor.id} AND is_read = FALSE`;
+    return ok(res, {}, "All investor notifications marked as read.");
+  } catch (e) {
+    return err(res, "Failed to update notifications.");
+  }
+});
+
 // PUT & POST /api/investor/change-password
 const handleInvestorChangePassword = async (req, res) => {
   try {
@@ -1257,6 +1271,16 @@ router.post("/investor/deposit", authInvestor, upload.single("payment_screenshot
     `;
     await notifyInvestor(investorId, "Deposit Submitted", "Your deposit request is pending admin verification.", "deposit");
 
+    // Standalone Investor Deposit Request Email Dispatch
+    triggerInvestorDepositRequestEmailAsync(deposit.id, {
+      investor_id: investorId,
+      investorName: req.investor?.full_name,
+      email: req.investor?.email,
+      amount: numAmount,
+      payment_method: payment_method,
+      transaction_reference: transaction_reference || deposit.transaction_reference
+    });
+
     return ok(res, deposit, "Deposit request submitted successfully! Awaiting admin approval.", 201);
   } catch (e) {
     console.error("Deposit Error:", e);
@@ -1358,6 +1382,18 @@ router.post(["/investor/withdraw", "/investor/withdrawals"], authInvestor, async
         ${investorId}, ${txId}, 'withdrawal', ${numAmount}, 'pending', 'Bank Transfer', ${withdrawal.id}, ${remarks || null}
       )
     `;
+
+    // Standalone Investor Withdrawal Request Email Dispatch
+    triggerWithdrawalRequestEmailsAsync(withdrawal.id, {
+      user_id: req.investor.id,
+      userName: req.investor.full_name,
+      userEmail: req.investor.email,
+      userRole: 'Investor',
+      amount: numAmount,
+      bankName: bank_name,
+      accountNumber: account_number,
+      ifscCode: ifsc_code
+    });
 
     return ok(res, withdrawal, "Withdrawal request submitted successfully! Awaiting admin processing.", 201);
   } catch (e) {
@@ -1501,6 +1537,14 @@ router.put("/admin/investors-portal/:id/status", authAdmin, async (req, res) => 
       await sql`UPDATE investors SET is_active = TRUE, updated_at = NOW() WHERE user_id = ${id}`;
     }
 
+    if (['approved', 'active', 'rejected'].includes(String(status).toLowerCase())) {
+      triggerInvestorStatusEmailAsync(id, {
+        investorName: updated.full_name,
+        email: updated.email,
+        reason: req.body?.reject_reason || req.body?.admin_remarks || null
+      }, (status === 'approved' || status === 'active') ? 'approved' : 'rejected');
+    }
+
     return ok(res, updated, `Investor account updated to ${updated.status}.`);
   } catch (e) {
     console.error("[Update Investor Portal Status Error]", e);
@@ -1591,6 +1635,13 @@ router.put(["/admin/investors-portal/deposits/:id", "/admin/investors-portal/dep
         await notifyInvestor(deposit.investor_id, "Deposit Rejected", admin_remarks || "Your deposit request was rejected by admin.", "error", tx);
       });
     }
+
+    // Standalone Investor Deposit Status Email Dispatch
+    triggerInvestorDepositStatusEmailAsync(id, {
+      investor_id: deposit.investor_id,
+      amount: amount,
+      admin_remarks: admin_remarks
+    }, status);
 
     return ok(res, null, `Deposit request ${status} successfully.`);
   } catch (e) {
@@ -1827,6 +1878,14 @@ router.put(["/admin/investors-portal/withdrawals/:id", "/admin/investors-portal/
         `;
       });
     }
+
+    // Standalone Investor Withdrawal Status Email Dispatch
+    triggerWithdrawalStatusEmailsAsync(id, {
+      user_id: withdrawal.investor_id,
+      userRole: 'Investor',
+      amount: amount,
+      rejection_reason: admin_remarks
+    }, status);
 
     return ok(res, null, `Withdrawal request ${status} successfully.`);
   } catch (e) {
@@ -2196,6 +2255,25 @@ router.post("/investor/enroll", authInvestor, async (req, res) => {
       FROM investor_enrollments 
       WHERE id = ${resultId}
     `;
+
+    // Trigger investor enrollment confirmation email if final submit
+    if (isFinalSubmit) {
+      triggerEnrollmentEmailAsync({
+        enrollmentType: "Investor",
+        submissionId: resultId,
+        recipientEmail: body.email || req.investor?.email,
+        isFinalSubmit: true,
+        customData: {
+          ...body,
+          id: resultId,
+          investor_enrollment_id: invEnrollIdToSave,
+          form_no: body.formNo || null,
+          photo_url: savedRecord?.photo_url || photoUrl,
+          signature_first_url: savedRecord?.signature_first_url || sigFirstUrl,
+          signature_joint_url: savedRecord?.signature_joint_url || sigJointUrl
+        }
+      });
+    }
 
     return ok(res, { 
       id: resultId, 

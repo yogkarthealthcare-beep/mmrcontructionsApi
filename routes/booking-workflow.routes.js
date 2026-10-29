@@ -26,6 +26,8 @@ import { setPlotStatus } from "../services/plotStatus.service.js";
 import { dispatchBookingNotification } from "../services/bookingNotification.service.js";
 import bookingService from "../services/bookingService.js";
 import commissionService from "../services/commissionService.js";
+import { triggerPlotBookingEmailsAsync } from "../services/businessNotificationEmail.service.js";
+import { triggerPlotRegistryEmailAsync, triggerBookingCancelledEmailAsync } from "../services/phase3NotificationEmail.service.js";
 import { hasCustomerApprovalAuditColumns } from "../services/customerApprovalAuthority.service.js";
 
 const router = express.Router();
@@ -354,6 +356,23 @@ async function completeBooking(bookingId, payment, adminId = null) {
       bookingId: booking.booking_id,
       bookingSerial: booking.booking_serial,
       adminId
+    });
+
+    // Standalone Multi-Party Plot Booking Email Dispatch
+    triggerPlotBookingEmailsAsync(booking.booking_id, {
+      booking_serial: booking.booking_serial,
+      customerName: booking.full_name,
+      customerEmail: booking.email,
+      buyerRole: booking.user_type,
+      plotNumber: booking.plot_number,
+      plotArea: booking.plot_area,
+      siteName: booking.site_name,
+      basePrice: booking.base_price,
+      advanceAmount: booking.advance_amount || booking.required_booking_amount,
+      paymentMethod: booking.payment_method || 'Online',
+      soldByUserId: booking.sold_by_user_id,
+      associateUserId: booking.associate_user_id,
+      buyer_type: booking.buyer_type
     });
 
     const [paymentRow] = await db`
@@ -1574,6 +1593,18 @@ router.post("/admin/bookings/:id/mark-sold", adminAuth, async (req, res) => {
       adminId: req.admin?.admin_id
     });
 
+    // Standalone Plot Registry & Ownership Deed Complete Email Dispatch
+    triggerPlotRegistryEmailAsync(bookingId, {
+      customerName: booking.full_name,
+      customerEmail: booking.email,
+      plotNumber: booking.plot_number,
+      siteName: booking.site_name,
+      registryNo: registry_no,
+      registryDate: registry_date || sold_date,
+      possessionDate: possession_date,
+      finalSoldPrice: soldPriceValue
+    });
+
     return ok(res, result, "Plot registry recorded and status updated to Sold.");
   } catch (error) {
     return fail(res, error.message, 400);
@@ -1765,6 +1796,17 @@ router.post("/admin/bookings/:id/cancel-refund-due", adminAuth, async (req, res)
         bookingId,
         reason: `${reason} (Refund flagged for accounts processing)`,
         adminId: req.admin?.admin_id
+      });
+
+      // Standalone Plot Booking Cancelled & Refund Due Email Dispatch
+      triggerBookingCancelledEmailAsync(bookingId, {
+        customerName: booking.full_name,
+        customerEmail: booking.email,
+        bookingSerial: booking.booking_serial,
+        plotNumber: booking.plot_number,
+        siteName: booking.site_name,
+        reason: `${reason} (Refund flagged for accounts processing)`,
+        refundDue: true
       });
 
       return { booking_id: bookingId, refund_due: true, reason };

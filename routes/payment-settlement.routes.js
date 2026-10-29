@@ -13,6 +13,7 @@ import express from 'express';
 import sql from '../db.js';
 import { verifyAdminToken, role } from '../middleware/auth.middleware.js';
 import commissionService from '../services/commissionService.js';
+import { triggerCommissionSettlementEmailsAsync } from '../services/businessNotificationEmail.service.js';
 
 const router = express.Router();
 
@@ -1008,6 +1009,21 @@ router.post(
           admin_name: adminName
         };
       });
+
+      // Standalone Commission Settlement Release Email Dispatch
+      triggerCommissionSettlementEmailsAsync(
+        bookingId,
+        {
+          settlementReference: result.settlement_reference,
+          bookingSerial: result.booking?.booking_serial,
+          plotNumber: result.booking?.plot_number,
+          siteName: result.booking?.site_name,
+          customerName: result.booking?.buyer_name,
+          adminName: result.admin_name,
+          releasedAt: result.released_at
+        },
+        result.recipients
+      );
 
       return ok(
         res,

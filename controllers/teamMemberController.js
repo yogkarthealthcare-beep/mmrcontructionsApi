@@ -2,6 +2,8 @@ import { ZodError } from "zod";
 import { saveFileToVPS } from "../services/fileStorage.service.js";
 import { teamMemberSchema, getAssociatePrefill, createTeamMemberRecord, getTeamMembersByAssociate, getTeamMemberById, updateTeamMemberRecord, updateTeamMemberStatus, finalSubmitTeamMemberRecord } from "../services/teamMemberService.js";
 import { generateTeamMemberPdf } from "../services/teamMemberPdfService.js";
+import { triggerEnrollmentEmailAsync } from "../services/enrollmentEmail.service.js";
+import { triggerTeamMemberStatusEmailAsync } from "../services/phase2NotificationEmail.service.js";
 /**
  * GET /api/associates/:associateId/prefill
  */
@@ -180,6 +182,17 @@ export async function createTeamMemberController(req, res) {
         }
         // 3. Register Record
         const result = await createTeamMemberRecord(validatedData, photoUrl, applicantSigUrl, associateSigUrl);
+
+        if (result?.is_final_submitted) {
+            triggerEnrollmentEmailAsync({
+                enrollmentType: "Team Member",
+                submissionId: result.id,
+                recipientEmail: result.email_id || validatedData.emailId,
+                isFinalSubmit: true,
+                customData: result
+            });
+        }
+
         return res.status(201).json({
             success: true,
             message: `Team member enrolled successfully with ID: ${result.team_member_uid}`,
@@ -283,6 +296,11 @@ export async function updateTeamMemberStatusController(req, res) {
             });
         }
         const updated = await updateTeamMemberStatus(id, status, authorizedSignatoryName);
+
+        if (["approved", "rejected"].includes(status)) {
+            triggerTeamMemberStatusEmailAsync(id, updated, status);
+        }
+
         return res.status(200).json({
             success: true,
             message: `Team member status successfully updated to '${status}'`,
@@ -322,6 +340,16 @@ export async function finalSubmitTeamMemberController(req, res) {
             });
         }
         const result = await finalSubmitTeamMemberRecord(id, authUserId, isAdmin);
+
+        // Trigger team member enrollment confirmation email
+        triggerEnrollmentEmailAsync({
+            enrollmentType: "Team Member",
+            submissionId: result.id || id,
+            recipientEmail: result.email_id || result.emailId,
+            isFinalSubmit: true,
+            customData: result
+        });
+
         return res.status(200).json({
             success: true,
             message: "Team member enrollment final submitted successfully",

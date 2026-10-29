@@ -9598,7 +9598,7 @@ app.get("/api/notifications", verifyUserToken, async (req, res) => {
     const offset = (page - 1) * limit;
 
     const notifs = await sql`
-      SELECT notif_id, title, message, channel, is_read, read_at, sent_at, delivery_status
+      SELECT notif_id, title, message, channel, link, is_read, read_at, sent_at, delivery_status
       FROM notification_log
       WHERE user_id = ${req.user.user_id}
       ORDER BY sent_at DESC LIMIT ${limit} OFFSET ${offset}`;
@@ -9607,7 +9607,7 @@ app.get("/api/notifications", verifyUserToken, async (req, res) => {
       SELECT COUNT(*) AS count FROM notification_log
       WHERE user_id = ${req.user.user_id} AND is_read = FALSE`;
 
-    return ok(res, { notifications: notifs, unread_count: unread.count });
+    return ok(res, { notifications: notifs, unread_count: Number(unread?.count || 0) });
   } catch (e) {
     return err(res, e.message);
   }
@@ -9630,6 +9630,56 @@ app.patch("/api/notifications/read-all", verifyUserToken, async (req, res) => {
       UPDATE notification_log SET is_read = TRUE, read_at = NOW()
       WHERE user_id = ${req.user.user_id} AND is_read = FALSE`;
     return ok(res, {}, "All notifications marked as read");
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+/* ==========================
+   ADMIN NOTIFICATIONS
+   GET   /api/admin/notifications
+   PATCH /api/admin/notifications/:id/read
+   PATCH /api/admin/notifications/read-all
+   ========================== */
+
+app.get("/api/admin/notifications", verifyAdminToken, async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const offset = (page - 1) * limit;
+
+    const notifs = await sql`
+      SELECT notif_id, title, message, channel, link, is_read, read_at, sent_at, delivery_status
+      FROM notification_log
+      WHERE target_role = 'Admin' OR (user_id IS NULL AND (channel = 'InApp' OR channel = 'in_app'))
+      ORDER BY sent_at DESC LIMIT ${limit} OFFSET ${offset}`;
+
+    const [unread] = await sql`
+      SELECT COUNT(*) AS count FROM notification_log
+      WHERE (target_role = 'Admin' OR (user_id IS NULL AND (channel = 'InApp' OR channel = 'in_app'))) AND is_read = FALSE`;
+
+    return ok(res, { notifications: notifs, unread_count: Number(unread?.count || 0) });
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+app.patch("/api/admin/notifications/:id/read", verifyAdminToken, async (req, res) => {
+  try {
+    await sql`
+      UPDATE notification_log SET is_read = TRUE, read_at = NOW()
+      WHERE notif_id = ${req.params.id}`;
+    return ok(res, {}, "Admin notification marked as read");
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+app.patch("/api/admin/notifications/read-all", verifyAdminToken, async (req, res) => {
+  try {
+    await sql`
+      UPDATE notification_log SET is_read = TRUE, read_at = NOW()
+      WHERE (target_role = 'Admin' OR (user_id IS NULL AND (channel = 'InApp' OR channel = 'in_app'))) AND is_read = FALSE`;
+    return ok(res, {}, "All admin notifications marked as read");
   } catch (e) {
     return err(res, e.message);
   }
@@ -11124,6 +11174,9 @@ async function ensurePlotAllocationSchema() {
     `).catch(() => {});
     await sql.unsafe(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(14,2) DEFAULT NULL; ALTER TABLE bookings ADD COLUMN IF NOT EXISTS area_unit VARCHAR(50) DEFAULT NULL; ALTER TABLE plots ADD COLUMN IF NOT EXISTS area_unit VARCHAR(50) DEFAULT 'Gaj';`).catch(() => {});
     await sql`ALTER TABLE notification_log ALTER COLUMN channel TYPE VARCHAR(60) USING channel::text`.catch(() => {});
+    await sql`ALTER TABLE notification_log ADD COLUMN IF NOT EXISTS link VARCHAR(255)`.catch(() => {});
+    await sql`ALTER TABLE notification_log ADD COLUMN IF NOT EXISTS target_role VARCHAR(50)`.catch(() => {});
+    await sql`ALTER TABLE investor_notifications ADD COLUMN IF NOT EXISTS link VARCHAR(255)`.catch(() => {});
     await sql`ALTER TYPE booking_status_enum ADD VALUE IF NOT EXISTS 'Allocated'`.catch(() => {});
     await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'Full'`.catch(() => {});
     await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'FullPayment'`.catch(() => {});

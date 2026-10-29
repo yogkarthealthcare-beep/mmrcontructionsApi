@@ -2,6 +2,7 @@ import express from "express";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import sql from "../db.js";
+import { triggerWithdrawalRequestEmailsAsync, triggerWithdrawalStatusEmailsAsync } from "../services/businessNotificationEmail.service.js";
 import GatewayFactory from "../payment/GatewayFactory.js";
 import { z } from "zod";
 
@@ -595,6 +596,19 @@ router.post("/wallet/withdraw-request", authUser, validateBody(withdrawRequestSc
       await logWalletAudit(userId, null, "INITIATE_WITHDRAWAL", lockedWallet, updatedWallet, tx);
     });
 
+    // Standalone Withdrawal Request Email Dispatch
+    triggerWithdrawalRequestEmailsAsync(withdrawalId, {
+      user_id: userId,
+      userName: req.user.full_name || req.user.name,
+      userEmail: req.user.email,
+      userRole: role,
+      amount,
+      bankName: bank_name,
+      accountNumber: bank_account_number,
+      ifscCode: ifsc_code,
+      upiId: upi_id
+    });
+
     return ok(res, { withdrawal_id: withdrawalId }, "Withdrawal request submitted successfully.");
   } catch (e) {
     console.error("[POST /wallet/withdraw-request Error]", e);
@@ -840,6 +854,14 @@ router.patch("/admin/withdrawal-requests/:id/reject", authAdmin, async (req, res
       await logWalletAudit(request.user_id, adminId, "REJECT_WITHDRAWAL", request, { ...request, status: "rejected", rejection_reason }, tx);
     });
 
+    // Standalone Withdrawal Rejected Email Dispatch
+    triggerWithdrawalStatusEmailsAsync(request.id, {
+      user_id: request.user_id,
+      userRole: request.user_role,
+      amount: request.amount,
+      rejection_reason: rejection_reason
+    }, 'rejected');
+
     return ok(res, null, "Withdrawal request rejected and balance returned.");
   } catch (e) {
     console.error("[PATCH /admin/withdrawal-requests/:id/reject Error]", e);
@@ -913,6 +935,16 @@ router.patch("/admin/withdrawal-requests/:id/release", authAdmin, async (req, re
       // Log audit
       await logWalletAudit(request.user_id, adminId, "RELEASE_WITHDRAWAL", request, { ...request, status: "released" }, tx);
     });
+
+    // Standalone Withdrawal Released Email Dispatch
+    triggerWithdrawalStatusEmailsAsync(request.id, {
+      user_id: request.user_id,
+      userRole: request.user_role,
+      amount: request.amount,
+      payout_reference_id: payout_reference_id || `REF-MAN-${Date.now()}`,
+      bank_name: request.bank_name,
+      bank_account_number: request.bank_account_number
+    }, 'released');
 
     return ok(res, null, "Withdrawal request funds released successfully.");
   } catch (e) {
