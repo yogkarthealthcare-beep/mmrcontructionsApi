@@ -63,6 +63,72 @@ const getTableCategory = (tableName) => {
  * GET /api/admin/master-data/tables
  * Lists all public database tables with row counts and column counts
  */
+const getTablePrimaryKey = async (tableName, fallbackPk = null) => {
+  if (fallbackPk && typeof fallbackPk === "string" && fallbackPk.trim()) {
+    try {
+      const [colExists] = await sql`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = ${tableName} AND column_name = ${fallbackPk.trim()}
+        LIMIT 1
+      `;
+      if (colExists?.column_name) {
+        return colExists.column_name;
+      }
+    } catch (_) {}
+  }
+
+  // 1. Direct PostgreSQL catalog lookup (fastest & most accurate: pg_index indisprimary)
+  try {
+    const [pgPk] = await sql`
+      SELECT a.attname AS column_name
+      FROM pg_index i
+      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+      WHERE i.indrelid = ${'public.' + tableName}::regclass
+        AND i.indisprimary
+      LIMIT 1
+    `;
+    if (pgPk?.column_name) return pgPk.column_name;
+  } catch (_) {}
+
+  // 2. Information schema table constraints
+  try {
+    const [infoPk] = await sql`
+      SELECT kcu.column_name
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name 
+       AND tc.table_schema = kcu.table_schema 
+       AND tc.table_name = kcu.table_name
+      WHERE tc.constraint_type = 'PRIMARY KEY'
+        AND tc.table_schema = 'public'
+        AND tc.table_name = ${tableName}
+      ORDER BY kcu.ordinal_position ASC
+      LIMIT 1
+    `;
+    if (infoPk?.column_name) return infoPk.column_name;
+  } catch (_) {}
+
+  // 3. Fallback: Check columns for common primary key patterns or first column
+  try {
+    const cols = await sql`
+      SELECT column_name, ordinal_position
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = ${tableName}
+      ORDER BY ordinal_position ASC
+    `;
+    if (cols.length > 0) {
+      const colNames = cols.map(c => c.column_name);
+      if (colNames.includes("id")) return "id";
+      const idCol = colNames.find(c => c.endsWith("_id"));
+      if (idCol) return idCol;
+      return colNames[0];
+    }
+  } catch (_) {}
+
+  return "id";
+};
+
 router.get("/admin/master-data/tables", authAdmin, requireAdminRole, async (_req, res) => {
   try {
     const rawTables = await sql`
@@ -254,18 +320,8 @@ router.put("/admin/master-data/tables/:tableName/:id", authAdmin, requireAdminRo
 
   try {
     // 1. Get primary key column
-    const [pkRes] = await sql`
-      SELECT kcu.column_name
-      FROM information_schema.table_constraints tc
-      JOIN information_schema.key_column_usage kcu
-        ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-      WHERE tc.constraint_type = 'PRIMARY KEY'
-        AND tc.table_schema = 'public'
-        AND tc.table_name = ${tableName}
-      ORDER BY kcu.ordinal_position ASC
-      LIMIT 1
-    `;
-    const primaryKey = pkRes?.column_name || "id";
+    const clientPk = req.query.pk || req.body?.pk || null;
+    const primaryKey = await getTablePrimaryKey(tableName, clientPk);
 
     // 2. Fetch all valid columns for this table
     const columns = await sql`
@@ -282,6 +338,7 @@ router.put("/admin/master-data/tables/:tableName/:id", authAdmin, requireAdminRo
 
     for (const [key, rawVal] of Object.entries(updateData)) {
       if (key === primaryKey) continue; // Do not mutate primary key
+      if (key.toLowerCase().replace(/[\s_-]/g, "") === "updatedat") continue; // Handled explicitly below to avoid duplicate assignments // Handled explicitly below to avoid duplicate assignments
       if (!validColMap.has(key)) continue; // Ignore non-existent columns
 
       let val = rawVal;
@@ -301,7 +358,7 @@ router.put("/admin/master-data/tables/:tableName/:id", authAdmin, requireAdminRo
     }
 
     // Add updated_at if column exists and not already provided
-    if (validColMap.has("updated_at") && !updateData.updated_at) {
+    if (validColMap.has("updated_at") && !setClauses.some(s => s.startsWith('"updated_at"'))) {
       setClauses.push(`"updated_at" = NOW()`);
     }
 
@@ -341,19 +398,9 @@ router.delete("/admin/master-data/tables/:tableName/:id", authAdmin, requireAdmi
   }
 
   try {
-    // 1. Get primary key column
-    const [pkRes] = await sql`
-      SELECT kcu.column_name
-      FROM information_schema.table_constraints tc
-      JOIN information_schema.key_column_usage kcu
-        ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-      WHERE tc.constraint_type = 'PRIMARY KEY'
-        AND tc.table_schema = 'public'
-        AND tc.table_name = ${tableName}
-      ORDER BY kcu.ordinal_position ASC
-      LIMIT 1
-    `;
-    const primaryKey = pkRes?.column_name || "id";
+    // 1. Get primary key column using robust multi-tier resolution
+    const clientPk = req.query.pk || req.body?.pk || null;
+    const primaryKey = await getTablePrimaryKey(tableName, clientPk);
 
     // 2. Cascade cleanup of dependent child tables if cascade requested
     if (cascade) {

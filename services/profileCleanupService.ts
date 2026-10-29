@@ -1,9 +1,22 @@
 import sql from "../db.js";
-import { deleteFileFromStorage } from "./fileStorage.service.js";
+import { deleteFileFromStorage, getStorageRoot } from "./fileStorage.service.js";
+import fs from "fs";
+import path from "path";
 
 /**
  * Profile Cleanup Service — MMR Constructions (TypeScript Source)
+ * Safely removes user profiles, related relational records, and uploaded physical files.
  */
+
+async function safeTxExec(tx: any, label: string, fn: (sp: any) => Promise<void>): Promise<void> {
+  try {
+    await tx.savepoint(async (sp: any) => {
+      await fn(sp);
+    });
+  } catch (err: any) {
+    console.warn(`[ProfileCleanupService] Safe cleanup skipped for [${label}]:`, err.message);
+  }
+}
 
 export async function cleanupPhysicalFiles(fileUrls: string[] = [], fileObjects: Array<{ url: string; publicId?: string }> = []) {
   const allTargets: Array<{ url: string; publicId: string }> = [];
@@ -28,9 +41,30 @@ export async function cleanupPhysicalFiles(fileUrls: string[] = [], fileObjects:
   let missingCount = 0;
   const warnings: string[] = [];
 
+  const storageRoot = (getStorageRoot as any) ? (getStorageRoot as any)() : path.resolve(process.cwd(), "uploads");
+
   for (const target of allTargets) {
     try {
-      const ok = await deleteFileFromStorage(target.url, target.publicId);
+      let ok = false;
+      try {
+        ok = await deleteFileFromStorage(target.url, target.publicId);
+      } catch (_) {}
+
+      if (!ok && target.url && typeof target.url === "string") {
+        const match = target.url.match(/\/uploads\/(.+)$/) || target.url.match(/^uploads\/(.+)$/);
+        if (match) {
+          const localPath = path.resolve(storageRoot, match[1]);
+          if (fs.existsSync(localPath)) {
+            try {
+              fs.unlinkSync(localPath);
+              ok = true;
+            } catch (unlinkErr: any) {
+              console.warn(`[ProfileCleanupService] Local disk unlink error: ${unlinkErr.message}`);
+            }
+          }
+        }
+      }
+
       if (ok) {
         deletedCount++;
       } else {
@@ -46,7 +80,7 @@ export async function cleanupPhysicalFiles(fileUrls: string[] = [], fileObjects:
   return { deletedCount, missingCount, warnings };
 }
 
-export async function deleteAssociateProfile(associateId: number | string, adminActor: any = { admin_id: 1, full_name: "Admin" }) {
+export async function deleteAssociateProfile(associateId: string | number, adminActor = { admin_id: 1, full_name: "Admin" }) {
   const rawId = String(associateId || "").trim();
   if (!rawId) {
     const err: any = new Error("Associate ID is required");
@@ -95,7 +129,7 @@ export async function deleteAssociateProfile(associateId: number | string, admin
   const enrollmentIds = enrollments.map((e: any) => e.id).filter(Boolean);
 
   const filesToClean: string[] = [];
-  const fileObjectsToClean: Array<{ url: string; publicId: string }> = [];
+  const fileObjectsToClean: Array<{ url: string; publicId?: string }> = [];
 
   for (const e of enrollments) {
     if (e.applicant_photo_path) filesToClean.push(e.applicant_photo_path);
@@ -134,118 +168,175 @@ export async function deleteAssociateProfile(associateId: number | string, admin
 
     try {
       const [userPhoto] = await sql`
-        SELECT profile_photo FROM users WHERE user_id = ${uid}
+        SELECT profile_photo, profile_image FROM users WHERE user_id = ${uid}
       `;
       if (userPhoto?.profile_photo) filesToClean.push(userPhoto.profile_photo);
+      if (userPhoto?.profile_image) filesToClean.push(userPhoto.profile_image);
     } catch (_) {}
   }
 
   await sql.begin(async (tx: any) => {
     if (uid > 0 || memberId) {
-      try { await tx`UPDATE team_members SET user_id = NULL WHERE user_id = ${uid > 0 ? uid : -1}`; } catch (_) {}
-      try {
-        await tx`
+      await safeTxExec(tx, "team_members_user_detach", async (sp) => {
+        await sp`UPDATE team_members SET user_id = NULL WHERE user_id = ${uid > 0 ? uid : -1}`;
+      });
+      await safeTxExec(tx, "team_members_assoc_detach", async (sp) => {
+        await sp`
           UPDATE team_members 
           SET associate_id = 0, associate_name = 'Unassigned' 
           WHERE associate_id = ${uid > 0 ? uid : -1} 
              OR associate_name = ${resolvedMemberId}
         `;
-      } catch (_) {}
+      });
     }
 
     if (uid > 0) {
-      try {
-        await tx`
-          UPDATE users 
-          SET sponsor_user_id = 1 
-          WHERE sponsor_user_id = ${uid} AND user_id != ${uid}
-        `;
-      } catch (_) {}
-
-      try {
-        await tx`
-          UPDATE referral_registrations 
-          SET sponsor_user_id = 1 
-          WHERE sponsor_user_id = ${uid} AND referred_user_id != ${uid}
-        `;
-      } catch (_) {}
-
-      try { await tx`DELETE FROM associate_sales_tracker WHERE associate_user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM associate_rank_history WHERE associate_user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM associate_referral_links WHERE associate_user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM mlm_network WHERE associate_user_id = ${uid} OR sponsor_user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM mlm_tree_closure WHERE ancestor_user_id = ${uid} OR descendant_user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM associate_network_closure WHERE ancestor_user_id = ${uid} OR descendant_user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM referral_registrations WHERE referred_user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM associate_payout_requests WHERE associate_user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM payout_requests WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM withdrawal_requests WHERE user_id = ${uid}`; } catch (_) {}
+      await safeTxExec(tx, "users_sponsor_reassign", async (sp) => {
+        await sp`UPDATE users SET sponsor_user_id = 1 WHERE sponsor_user_id = ${uid} AND user_id != ${uid}`;
+      });
+      await safeTxExec(tx, "referral_sponsor_reassign", async (sp) => {
+        await sp`UPDATE referral_registrations SET sponsor_user_id = 1 WHERE sponsor_user_id = ${uid} AND referred_user_id != ${uid}`;
+      });
+      await safeTxExec(tx, "associate_sales_tracker", async (sp) => {
+        await sp`DELETE FROM associate_sales_tracker WHERE associate_user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "associate_rank_history", async (sp) => {
+        await sp`DELETE FROM associate_rank_history WHERE associate_user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "associate_referral_links", async (sp) => {
+        await sp`DELETE FROM associate_referral_links WHERE associate_user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "associate_status_history", async (sp) => {
+        await sp`DELETE FROM associate_status_history WHERE associate_user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "mlm_network", async (sp) => {
+        await sp`DELETE FROM mlm_network WHERE associate_user_id = ${uid} OR sponsor_user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "mlm_tree_closure", async (sp) => {
+        await sp`DELETE FROM mlm_tree_closure WHERE ancestor_user_id = ${uid} OR descendant_user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "associate_network_closure", async (sp) => {
+        await sp`DELETE FROM associate_network_closure WHERE ancestor_user_id = ${uid} OR descendant_user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "referral_registrations", async (sp) => {
+        await sp`DELETE FROM referral_registrations WHERE referred_user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "referral_clicks", async (sp) => {
+        await sp`DELETE FROM referral_clicks WHERE associate_user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "associate_payout_requests", async (sp) => {
+        await sp`DELETE FROM associate_payout_requests WHERE associate_user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "payout_requests", async (sp) => {
+        await sp`DELETE FROM payout_requests WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "withdrawal_requests", async (sp) => {
+        await sp`DELETE FROM withdrawal_requests WHERE user_id = ${uid}`;
+      });
     }
 
     if (enrollmentIds.length > 0) {
-      try { await tx`DELETE FROM associate_address WHERE associate_id IN ${sql(enrollmentIds)}`; } catch (_) {}
-      try { await tx`DELETE FROM associate_bank_details WHERE associate_id IN ${sql(enrollmentIds)}`; } catch (_) {}
-      try { await tx`DELETE FROM associate_nominee WHERE associate_id IN ${sql(enrollmentIds)}`; } catch (_) {}
-      try { await tx`DELETE FROM associate_sponsor WHERE associate_id IN ${sql(enrollmentIds)}`; } catch (_) {}
-      try { await tx`DELETE FROM associate_enrollment WHERE id IN ${sql(enrollmentIds)}`; } catch (_) {}
-    }
-    if (uid > 0) {
-      try { await tx`DELETE FROM associate_address WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`; } catch (_) {}
-      try { await tx`DELETE FROM associate_bank_details WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`; } catch (_) {}
-      try { await tx`DELETE FROM associate_nominee WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`; } catch (_) {}
-      try { await tx`DELETE FROM associate_sponsor WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`; } catch (_) {}
-      try { await tx`DELETE FROM associate_enrollment WHERE user_id = ${uid}`; } catch (_) {}
+      await safeTxExec(tx, "associate_address", async (sp) => {
+        await sp`DELETE FROM associate_address WHERE associate_id IN ${sql(enrollmentIds)}`;
+      });
+      await safeTxExec(tx, "associate_bank_details", async (sp) => {
+        await sp`DELETE FROM associate_bank_details WHERE associate_id IN ${sql(enrollmentIds)}`;
+      });
+      await safeTxExec(tx, "associate_nominee", async (sp) => {
+        await sp`DELETE FROM associate_nominee WHERE associate_id IN ${sql(enrollmentIds)}`;
+      });
+      await safeTxExec(tx, "associate_sponsor", async (sp) => {
+        await sp`DELETE FROM associate_sponsor WHERE associate_id IN ${sql(enrollmentIds)}`;
+      });
+      await safeTxExec(tx, "associate_enrollment", async (sp) => {
+        await sp`DELETE FROM associate_enrollment WHERE id IN ${sql(enrollmentIds)}`;
+      });
     }
 
     if (uid > 0) {
-      try { await tx`DELETE FROM user_addresses WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM user_bank_details WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM user_nominees WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM user_kyc_profiles WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM user_documents WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM user_device_tokens WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM wallet_transactions WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM user_wallets WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM wallets WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM otp_log WHERE reference_id = ${String(uid)} OR (${Boolean(mobile)} AND mobile_no = ${mobile || ''}) OR (${Boolean(mobile)} AND mobile = ${mobile || ''})`; } catch (_) {}
+      await safeTxExec(tx, "associate_enrollment_by_user", async (sp) => {
+        await sp`DELETE FROM associate_address WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`;
+        await sp`DELETE FROM associate_bank_details WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`;
+        await sp`DELETE FROM associate_nominee WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`;
+        await sp`DELETE FROM associate_sponsor WHERE associate_id IN (SELECT id FROM associate_enrollment WHERE user_id = ${uid})`;
+        await sp`DELETE FROM associate_enrollment WHERE user_id = ${uid}`;
+      });
 
-      try {
-        const personalBookings = await tx`SELECT booking_id, plot_id FROM bookings WHERE user_id = ${uid}`;
+      await safeTxExec(tx, "user_addresses", async (sp) => {
+        await sp`DELETE FROM user_addresses WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "user_bank_details", async (sp) => {
+        await sp`DELETE FROM user_bank_details WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "user_nominees", async (sp) => {
+        await sp`DELETE FROM user_nominees WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "user_kyc_profiles", async (sp) => {
+        await sp`DELETE FROM user_kyc_profiles WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "user_documents", async (sp) => {
+        await sp`DELETE FROM user_documents WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "user_device_tokens", async (sp) => {
+        await sp`DELETE FROM user_device_tokens WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "notification_log", async (sp) => {
+        await sp`DELETE FROM notification_log WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "wallet_transactions", async (sp) => {
+        await sp`DELETE FROM wallet_transactions WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "wallet_audit_logs", async (sp) => {
+        await sp`DELETE FROM wallet_audit_logs WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "user_wallets", async (sp) => {
+        await sp`DELETE FROM user_wallets WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "otp_log", async (sp) => {
+        await sp`DELETE FROM otp_log WHERE reference_id = ${String(uid)} OR (${Boolean(mobile)} AND (mobile_no = ${mobile || ''} OR mobile = ${mobile || ''}))`;
+      });
+      await safeTxExec(tx, "email_otp_log", async (sp) => {
+        if (email) await sp`DELETE FROM email_otp_log WHERE email = ${email}`;
+      });
+
+      await safeTxExec(tx, "bookings_personal", async (sp) => {
+        const personalBookings = await sp`SELECT booking_id, plot_id FROM bookings WHERE user_id = ${uid}`;
         if (personalBookings.length > 0) {
           const plotIds = personalBookings.map((b: any) => b.plot_id).filter(Boolean);
           if (plotIds.length > 0) {
-            await tx`UPDATE plots SET plot_status = 'Vacant'::plot_status_enum, is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
+            await sp`UPDATE plots SET plot_status = 'Vacant'::plot_status_enum, is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
           }
           for (const bk of personalBookings) {
-            const emiSchedules = await tx`SELECT emi_id FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
+            const emiSchedules = await sp`SELECT emi_id FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
             if (emiSchedules.length > 0) {
               const emiIds = emiSchedules.map((e: any) => e.emi_id);
-              await tx`DELETE FROM emi_payment_proofs WHERE emi_id IN ${sql(emiIds)}`;
-              await tx`DELETE FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
+              await sp`DELETE FROM emi_payment_proofs WHERE emi_id IN ${sql(emiIds)}`;
+              await sp`DELETE FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
             }
-            try { await tx`DELETE FROM booking_payment_records WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
-            try { await tx`DELETE FROM booking_invoices WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
-            try { await tx`DELETE FROM buyback_applications WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
-            try { await tx`DELETE FROM buyback_requests WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
-            try { await tx`DELETE FROM invoices WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
+            await sp`DELETE FROM booking_payment_records WHERE booking_id = ${bk.booking_id}`;
+            await sp`DELETE FROM booking_payment_proofs WHERE booking_id = ${bk.booking_id}`;
+            await sp`DELETE FROM buyback_applications WHERE booking_id = ${bk.booking_id}`;
+            await sp`DELETE FROM invoices WHERE booking_id = ${bk.booking_id}`;
           }
-          await tx`DELETE FROM bookings WHERE user_id = ${uid}`;
+          await sp`DELETE FROM bookings WHERE user_id = ${uid}`;
         }
-      } catch (_) {}
+      });
 
-      try { await tx`DELETE FROM invoices WHERE user_id = ${uid}`; } catch (_) {}
-
-      try {
-        await tx`UPDATE bookings SET associate_user_id = NULL WHERE associate_user_id = ${uid}`;
-      } catch (_) {}
-
-      await tx`DELETE FROM users WHERE user_id = ${uid}`;
+      await safeTxExec(tx, "invoices", async (sp) => {
+        await sp`DELETE FROM invoices WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "bookings_associate_detach", async (sp) => {
+        await sp`UPDATE bookings SET associate_user_id = NULL WHERE associate_user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "users_master", async (sp) => {
+        await sp`DELETE FROM users WHERE user_id = ${uid}`;
+      });
     }
 
-    try {
-      const actorId = Number(adminActor.admin_id || adminActor.id) || 1;
-      const actorName = String(adminActor.full_name || adminActor.username || "Admin");
-      await tx`
+    await safeTxExec(tx, "audit_log", async (sp) => {
+      const actorId = Number(adminActor.admin_id || (adminActor as any).id) || 1;
+      const actorName = String(adminActor.full_name || (adminActor as any).username || "Admin");
+      await sp`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
         VALUES (
           'Admin', 
@@ -263,9 +354,7 @@ export async function deleteAssociateProfile(associateId: number | string, admin
           })}
         )
       `;
-    } catch (auditErr: any) {
-      console.warn('[ProfileCleanupService] Audit log write warning:', auditErr.message);
-    }
+    });
   });
 
   const fileCleanResult = await cleanupPhysicalFiles(filesToClean, fileObjectsToClean);
@@ -284,7 +373,7 @@ export async function deleteAssociateProfile(associateId: number | string, admin
   };
 }
 
-export async function deleteCustomerProfile(customerId: number | string, adminActor: any = { admin_id: 1, full_name: "Admin" }) {
+export async function deleteCustomerProfile(customerId: string | number, adminActor = { admin_id: 1, full_name: "Admin" }) {
   const rawId = String(customerId || "").trim();
   if (!rawId) {
     const err: any = new Error("Customer ID is required");
@@ -293,6 +382,7 @@ export async function deleteCustomerProfile(customerId: number | string, adminAc
   }
 
   const numId = !isNaN(Number(rawId)) ? Number(rawId) : 0;
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId);
 
   const [targetUser] = await sql`
     SELECT user_id, member_id, full_name, email, mobile_no, pan_number, aadhar_number, user_type
@@ -305,20 +395,30 @@ export async function deleteCustomerProfile(customerId: number | string, adminAc
   const uid = targetUser?.user_id || (numId > 0 ? numId : 0);
   const mobile = targetUser?.mobile_no ? String(targetUser.mobile_no).trim() : null;
   const pan = targetUser?.pan_number ? String(targetUser.pan_number).trim().toUpperCase() : null;
+  const email = targetUser?.email ? String(targetUser.email).trim().toLowerCase() : null;
 
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId);
-
-  const submissions = await sql`
-    SELECT id, user_id, application_no, applicant_name,
-           photo_first_applicant_url, photo_co_applicant_url,
-           signature_sole_first_applicant_url, signature_co_applicant_url,
-           signature_authorized_signatory_url
-    FROM customer_enrollment_submissions
-    WHERE (${isUuid} AND id = ${isUuid ? rawId : '00000000-0000-0000-0000-000000000000'})
-       OR (${uid > 0} AND user_id = ${uid})
-       OR (${Boolean(mobile)} AND mobile_1 = ${mobile})
-       OR (${Boolean(pan)} AND UPPER(pan_no) = ${pan})
-  `;
+  let submissions: any[] = [];
+  if (isUuid) {
+    submissions = await sql`
+      SELECT id, user_id, application_no, applicant_name,
+             photo_first_applicant_url, photo_co_applicant_url,
+             signature_sole_first_applicant_url, signature_co_applicant_url,
+             signature_authorized_signatory_url
+      FROM customer_enrollment_submissions
+      WHERE id = ${rawId}::uuid
+    `;
+  } else {
+    submissions = await sql`
+      SELECT id, user_id, application_no, applicant_name,
+             photo_first_applicant_url, photo_co_applicant_url,
+             signature_sole_first_applicant_url, signature_co_applicant_url,
+             signature_authorized_signatory_url
+      FROM customer_enrollment_submissions
+      WHERE (${uid > 0} AND user_id = ${uid})
+         OR (${Boolean(mobile)} AND mobile_1 = ${mobile})
+         OR (${Boolean(pan)} AND UPPER(pan_no) = ${pan})
+    `;
+  }
 
   if (!targetUser && (!submissions || submissions.length === 0)) {
     const err: any = new Error("Customer not found");
@@ -330,7 +430,7 @@ export async function deleteCustomerProfile(customerId: number | string, adminAc
   const submissionIds = submissions.map((s: any) => s.id).filter(Boolean);
 
   const filesToClean: string[] = [];
-  const fileObjectsToClean: Array<{ url: string; publicId: string }> = [];
+  const fileObjectsToClean: Array<{ url: string; publicId?: string }> = [];
 
   for (const s of submissions) {
     if (s.photo_first_applicant_url) filesToClean.push(s.photo_first_applicant_url);
@@ -338,6 +438,7 @@ export async function deleteCustomerProfile(customerId: number | string, adminAc
     if (s.signature_sole_first_applicant_url) filesToClean.push(s.signature_sole_first_applicant_url);
     if (s.signature_co_applicant_url) filesToClean.push(s.signature_co_applicant_url);
     if (s.signature_authorized_signatory_url) filesToClean.push(s.signature_authorized_signatory_url);
+    if (s.print_pdf_path) filesToClean.push(s.print_pdf_path);
   }
 
   if (uid > 0) {
@@ -352,68 +453,262 @@ export async function deleteCustomerProfile(customerId: number | string, adminAc
 
     try {
       const [userPhoto] = await sql`
-        SELECT profile_photo FROM users WHERE user_id = ${uid}
+        SELECT profile_photo, profile_image FROM users WHERE user_id = ${uid}
       `;
       if (userPhoto?.profile_photo) filesToClean.push(userPhoto.profile_photo);
+      if (userPhoto?.profile_image) filesToClean.push(userPhoto.profile_image);
+    } catch (_) {}
+
+    try {
+      const bookingProofs = await sql`
+        SELECT proof_url FROM booking_payment_proofs 
+        WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+          AND proof_url IS NOT NULL
+      `;
+      bookingProofs.forEach((r: any) => { if (r.proof_url) filesToClean.push(r.proof_url); });
+    } catch (_) {}
+
+    try {
+      const emiProofs = await sql`
+        SELECT proof_url FROM emi_payment_proofs 
+        WHERE emi_id IN (
+          SELECT emi_id FROM emi_schedules 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        ) AND proof_url IS NOT NULL
+      `;
+      emiProofs.forEach((r: any) => { if (r.proof_url) filesToClean.push(r.proof_url); });
     } catch (_) {}
   }
 
   await sql.begin(async (tx: any) => {
-    if (submissionIds.length > 0) {
-      try { await tx`DELETE FROM customer_nominees WHERE submission_id IN ${sql(submissionIds)}`; } catch (_) {}
-      try { await tx`DELETE FROM customer_enrollment_submissions WHERE id IN ${sql(submissionIds)}`; } catch (_) {}
-    }
     if (uid > 0) {
-      try { await tx`DELETE FROM customer_nominees WHERE submission_id IN (SELECT id FROM customer_enrollment_submissions WHERE user_id = ${uid})`; } catch (_) {}
-      try { await tx`DELETE FROM customer_enrollment_submissions WHERE user_id = ${uid}`; } catch (_) {}
-    }
+      await safeTxExec(tx, "emi_payment_proofs", async (sp) => {
+        await sp`
+          DELETE FROM emi_payment_proofs 
+          WHERE emi_id IN (
+            SELECT emi_id FROM emi_schedules 
+            WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+          )
+        `;
+      });
 
-    if (uid > 0) {
-      try { await tx`DELETE FROM user_addresses WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM user_bank_details WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM user_nominees WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM user_kyc_profiles WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM user_documents WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM user_device_tokens WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM wallet_transactions WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM user_wallets WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM wallets WHERE user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM referral_registrations WHERE referred_user_id = ${uid}`; } catch (_) {}
-      try { await tx`DELETE FROM otp_log WHERE reference_id = ${String(uid)} OR (${Boolean(mobile)} AND mobile_no = ${mobile || ''}) OR (${Boolean(mobile)} AND mobile = ${mobile || ''})`; } catch (_) {}
+      await safeTxExec(tx, "emi_schedules", async (sp) => {
+        await sp`
+          DELETE FROM emi_schedules 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
 
-      try {
-        const bookings = await tx`SELECT booking_id, plot_id FROM bookings WHERE user_id = ${uid}`;
-        if (bookings.length > 0) {
-          const plotIds = bookings.map((b: any) => b.plot_id).filter(Boolean);
-          if (plotIds.length > 0) {
-            await tx`UPDATE plots SET plot_status = 'Vacant'::plot_status_enum, is_booked = FALSE, updated_at = NOW() WHERE plot_id IN ${sql(plotIds)}`;
-          }
-          for (const bk of bookings) {
-            const emiSchedules = await tx`SELECT emi_id FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
-            if (emiSchedules.length > 0) {
-              const emiIds = emiSchedules.map((e: any) => e.emi_id);
-              await tx`DELETE FROM emi_payment_proofs WHERE emi_id IN ${sql(emiIds)}`;
-              await tx`DELETE FROM emi_schedules WHERE booking_id = ${bk.booking_id}`;
-            }
-            try { await tx`DELETE FROM booking_payment_records WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
-            try { await tx`DELETE FROM booking_invoices WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
-            try { await tx`DELETE FROM buyback_applications WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
-            try { await tx`DELETE FROM buyback_requests WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
-            try { await tx`DELETE FROM invoices WHERE booking_id = ${bk.booking_id}`; } catch (_) {}
-          }
-          await tx`DELETE FROM bookings WHERE user_id = ${uid}`;
+      await safeTxExec(tx, "booking_appointments", async (sp) => {
+        await sp`
+          DELETE FROM booking_appointments 
+          WHERE user_id = ${uid} 
+             OR booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "booking_payment_proofs", async (sp) => {
+        await sp`
+          DELETE FROM booking_payment_proofs 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "booking_payment_records", async (sp) => {
+        await sp`
+          DELETE FROM booking_payment_records 
+          WHERE user_id = ${uid} 
+             OR booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "buyback_applications", async (sp) => {
+        await sp`
+          DELETE FROM buyback_applications 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "commission_monthly_schedule", async (sp) => {
+        await sp`
+          DELETE FROM commission_monthly_schedule 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "commission_source_events", async (sp) => {
+        await sp`
+          DELETE FROM commission_source_events 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "invoices", async (sp) => {
+        await sp`
+          DELETE FROM invoices 
+          WHERE user_id = ${uid} 
+             OR booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "receipts", async (sp) => {
+        await sp`
+          DELETE FROM receipts 
+          WHERE customer_id = ${uid} 
+             OR (${Boolean(mobile)} AND mobile_no = ${mobile})
+        `;
+      });
+
+      await safeTxExec(tx, "plot_booking_history", async (sp) => {
+        await sp`
+          DELETE FROM plot_booking_history 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "plot_booking_locks", async (sp) => {
+        await sp`
+          DELETE FROM plot_booking_locks 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "payment_allocations", async (sp) => {
+        await sp`
+          DELETE FROM payment_allocations 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "payment_ledger", async (sp) => {
+        await sp`
+          DELETE FROM payment_ledger 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "cash_collections", async (sp) => {
+        await sp`
+          DELETE FROM cash_collections 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "cheque_registry", async (sp) => {
+        await sp`
+          DELETE FROM cheque_registry 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "missing_payment_complaints", async (sp) => {
+        await sp`
+          DELETE FROM missing_payment_complaints 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "registry_records", async (sp) => {
+        await sp`
+          DELETE FROM registry_records 
+          WHERE booking_id IN (SELECT booking_id FROM bookings WHERE user_id = ${uid})
+        `;
+      });
+
+      await safeTxExec(tx, "reset_plots_and_bookings", async (sp) => {
+        const bks = await sp`SELECT plot_id FROM bookings WHERE user_id = ${uid}`;
+        const plotIds = bks.map((b: any) => b.plot_id).filter(Boolean);
+        if (plotIds.length > 0) {
+          await sp`
+            UPDATE plots 
+            SET plot_status = 'Vacant'::plot_status_enum, is_booked = FALSE, updated_at = NOW() 
+            WHERE plot_id IN ${sql(plotIds)}
+          `;
         }
-      } catch (_) {}
-
-      try { await tx`DELETE FROM invoices WHERE user_id = ${uid}`; } catch (_) {}
-
-      await tx`DELETE FROM users WHERE user_id = ${uid}`;
+        await sp`DELETE FROM bookings WHERE user_id = ${uid}`;
+      });
     }
 
-    try {
-      const actorId = Number(adminActor.admin_id || adminActor.id) || 1;
-      const actorName = String(adminActor.full_name || adminActor.username || "Admin");
-      await tx`
+    if (submissionIds.length > 0) {
+      await safeTxExec(tx, "customer_nominees_by_sub_ids", async (sp) => {
+        await sp`DELETE FROM customer_nominees WHERE submission_id IN ${sql(submissionIds)}`;
+      });
+      await safeTxExec(tx, "customer_enrollment_submissions_by_ids", async (sp) => {
+        await sp`DELETE FROM customer_enrollment_submissions WHERE id IN ${sql(submissionIds)}`;
+      });
+    }
+
+    if (uid > 0) {
+      await safeTxExec(tx, "customer_nominees_by_user", async (sp) => {
+        await sp`
+          DELETE FROM customer_nominees 
+          WHERE submission_id IN (SELECT id FROM customer_enrollment_submissions WHERE user_id = ${uid})
+        `;
+      });
+      await safeTxExec(tx, "customer_enrollment_submissions_by_user", async (sp) => {
+        await sp`DELETE FROM customer_enrollment_submissions WHERE user_id = ${uid}`;
+      });
+
+      await safeTxExec(tx, "user_addresses", async (sp) => {
+        await sp`DELETE FROM user_addresses WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "user_bank_details", async (sp) => {
+        await sp`DELETE FROM user_bank_details WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "user_nominees", async (sp) => {
+        await sp`DELETE FROM user_nominees WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "user_kyc_profiles", async (sp) => {
+        await sp`DELETE FROM user_kyc_profiles WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "user_documents", async (sp) => {
+        await sp`DELETE FROM user_documents WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "user_device_tokens", async (sp) => {
+        await sp`DELETE FROM user_device_tokens WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "notification_log", async (sp) => {
+        await sp`DELETE FROM notification_log WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "inquiries", async (sp) => {
+        await sp`DELETE FROM inquiries WHERE user_id = ${uid} OR (${Boolean(mobile)} AND mobile_no = ${mobile})`;
+      });
+      await safeTxExec(tx, "wallet_transactions", async (sp) => {
+        await sp`DELETE FROM wallet_transactions WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "wallet_audit_logs", async (sp) => {
+        await sp`DELETE FROM wallet_audit_logs WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "user_wallets", async (sp) => {
+        await sp`DELETE FROM user_wallets WHERE user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "referral_registrations", async (sp) => {
+        await sp`DELETE FROM referral_registrations WHERE referred_user_id = ${uid} OR sponsor_user_id = ${uid}`;
+      });
+      await safeTxExec(tx, "otp_log", async (sp) => {
+        await sp`
+          DELETE FROM otp_log 
+          WHERE reference_id = ${String(uid)} 
+             OR (${Boolean(mobile)} AND (mobile_no = ${mobile || ''} OR mobile = ${mobile || ''}))
+        `;
+      });
+      await safeTxExec(tx, "email_otp_log", async (sp) => {
+        if (email) await sp`DELETE FROM email_otp_log WHERE email = ${email}`;
+      });
+      await safeTxExec(tx, "detach_sponsor_and_team", async (sp) => {
+        await sp`UPDATE users SET sponsor_user_id = 1 WHERE sponsor_user_id = ${uid}`;
+        await sp`UPDATE team_members SET user_id = NULL WHERE user_id = ${uid}`;
+      });
+
+      await safeTxExec(tx, "users_master", async (sp) => {
+        await sp`DELETE FROM users WHERE user_id = ${uid}`;
+      });
+    }
+
+    await safeTxExec(tx, "audit_log", async (sp) => {
+      const actorId = Number(adminActor.admin_id || (adminActor as any).id) || 1;
+      const actorName = String(adminActor.full_name || (adminActor as any).username || "Admin");
+      await sp`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
         VALUES (
           'Admin', 
@@ -430,16 +725,14 @@ export async function deleteCustomerProfile(customerId: number | string, adminAc
           })}
         )
       `;
-    } catch (auditErr: any) {
-      console.warn('[ProfileCleanupService] Customer audit log warning:', auditErr.message);
-    }
+    });
   });
 
   const fileCleanResult = await cleanupPhysicalFiles(filesToClean, fileObjectsToClean);
 
   return {
     success: true,
-    message: `Customer ${resolvedName} and all profile-exclusive data deleted successfully.`,
+    message: `Customer ${resolvedName} and all profile-exclusive data and files deleted successfully.`,
     data: {
       userId: uid,
       cleanedSubmissions: submissionIds,
@@ -450,7 +743,7 @@ export async function deleteCustomerProfile(customerId: number | string, adminAc
   };
 }
 
-export async function deleteInvestorProfile(investorId: number | string, adminActor: any = { admin_id: 1, full_name: "Admin" }) {
+export async function deleteInvestorProfile(investorId: string | number, adminActor = { admin_id: 1, full_name: "Admin" }) {
   const rawId = String(investorId || "").trim();
   if (!rawId) {
     const err: any = new Error("Investor ID is required");
@@ -474,7 +767,7 @@ export async function deleteInvestorProfile(investorId: number | string, adminAc
   }
 
   const filesToClean: string[] = [];
-  const fileObjectsToClean: Array<{ url: string; publicId: string }> = [];
+  const fileObjectsToClean: Array<{ url: string; publicId?: string }> = [];
 
   if (targetInvestorId) {
     try {
@@ -503,27 +796,51 @@ export async function deleteInvestorProfile(investorId: number | string, adminAc
 
   await sql.begin(async (tx: any) => {
     if (targetInvestorId) {
-      try { await tx`DELETE FROM investors WHERE user_id = ${targetInvestorId} OR id = ${targetInvestorId}`; } catch (_) {}
-      try { await tx`DELETE FROM investor_deposits WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
-      try { await tx`DELETE FROM investor_documents WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
-      try { await tx`DELETE FROM investor_notifications WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
-      try { await tx`DELETE FROM investor_settlement_preferences WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
-      try { await tx`DELETE FROM settlement_change_requests WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
-      try { await tx`DELETE FROM investor_transactions WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
-      try { await tx`DELETE FROM investor_withdrawals WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
-      try { await tx`DELETE FROM investor_wallet WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
-      try { await tx`DELETE FROM investor_enrollments WHERE investor_id = ${targetInvestorId}`; } catch (_) {}
-      try { await tx`DELETE FROM investor_users WHERE id = ${targetInvestorId}`; } catch (_) {}
+      await safeTxExec(tx, "investors", async (sp) => {
+        await sp`DELETE FROM investors WHERE user_id = ${targetInvestorId} OR id = ${targetInvestorId}`;
+      });
+      await safeTxExec(tx, "investor_deposits", async (sp) => {
+        await sp`DELETE FROM investor_deposits WHERE investor_id = ${targetInvestorId}`;
+      });
+      await safeTxExec(tx, "investor_documents", async (sp) => {
+        await sp`DELETE FROM investor_documents WHERE investor_id = ${targetInvestorId}`;
+      });
+      await safeTxExec(tx, "investor_notifications", async (sp) => {
+        await sp`DELETE FROM investor_notifications WHERE investor_id = ${targetInvestorId}`;
+      });
+      await safeTxExec(tx, "investor_settlement_preferences", async (sp) => {
+        await sp`DELETE FROM investor_settlement_preferences WHERE investor_id = ${targetInvestorId}`;
+      });
+      await safeTxExec(tx, "settlement_change_requests", async (sp) => {
+        await sp`DELETE FROM settlement_change_requests WHERE investor_id = ${targetInvestorId}`;
+      });
+      await safeTxExec(tx, "investor_transactions", async (sp) => {
+        await sp`DELETE FROM investor_transactions WHERE investor_id = ${targetInvestorId}`;
+      });
+      await safeTxExec(tx, "investor_withdrawals", async (sp) => {
+        await sp`DELETE FROM investor_withdrawals WHERE investor_id = ${targetInvestorId}`;
+      });
+      await safeTxExec(tx, "investor_wallet", async (sp) => {
+        await sp`DELETE FROM investor_wallet WHERE investor_id = ${targetInvestorId}`;
+      });
+      await safeTxExec(tx, "investor_enrollments", async (sp) => {
+        await sp`DELETE FROM investor_enrollments WHERE investor_id = ${targetInvestorId}`;
+      });
+      await safeTxExec(tx, "investor_users", async (sp) => {
+        await sp`DELETE FROM investor_users WHERE id = ${targetInvestorId}`;
+      });
     }
 
     if (targetEnrollmentId) {
-      try { await tx`DELETE FROM investor_enrollments WHERE id = ${targetEnrollmentId}`; } catch (_) {}
+      await safeTxExec(tx, "investor_enrollments_by_id", async (sp) => {
+        await sp`DELETE FROM investor_enrollments WHERE id = ${targetEnrollmentId}`;
+      });
     }
 
-    try {
-      const actorId = Number(adminActor.admin_id || adminActor.id) || 1;
-      const actorName = String(adminActor.full_name || adminActor.username || "Admin");
-      await tx`
+    await safeTxExec(tx, "audit_log", async (sp) => {
+      const actorId = Number(adminActor.admin_id || (adminActor as any).id) || 1;
+      const actorName = String(adminActor.full_name || (adminActor as any).username || "Admin");
+      await sp`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
         VALUES (
           'Admin', 
@@ -540,7 +857,7 @@ export async function deleteInvestorProfile(investorId: number | string, adminAc
           })}
         )
       `;
-    } catch (_) {}
+    });
   });
 
   const fileCleanResult = await cleanupPhysicalFiles(filesToClean, fileObjectsToClean);
