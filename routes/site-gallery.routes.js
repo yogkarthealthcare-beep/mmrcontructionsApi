@@ -56,54 +56,63 @@ export async function ensureSiteGalleryTable() {
       );
     `;
 
-    // Seed initial 5 project sites if table is empty
-    const [countRow] = await sql`SELECT COUNT(*)::int AS count FROM site_gallery`;
-    if (!countRow || countRow.count === 0) {
-      const initialSites = [
-        {
-          category: "Plot",
-          site_name: "AIMA Site",
-          site_address: "Dhodi Ghaat Road, Rooma, Kanpur",
-          site_image: "https://images.unsplash.com/photo-1500382017468-9049fed747ef?w=600&q=75",
-          display_order: 1,
-        },
-        {
-          category: "Plot",
-          site_name: "Tribhuwan Khera",
-          site_address: "Near Jajmau, NH-27, Unnao",
-          site_image: "https://images.unsplash.com/photo-1464082354059-27db6ce50048?w=600&q=75",
-          display_order: 2,
-        },
-        {
-          category: "Plot",
-          site_name: "Gadan Khera",
-          site_address: "Unnao",
-          site_image: "https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?w=600&q=75",
-          display_order: 3,
-        },
-        {
-          category: "Plot",
-          site_name: "Ajgain Site",
-          site_address: "Ajgain, Near Highway",
-          site_image: "https://images.unsplash.com/photo-1613082410785-22292e8426e0?w=600&q=75",
-          display_order: 4,
-        },
-        {
-          category: "Plot",
-          site_name: "Lucknow Site",
-          site_address: "Near Amousi Airport, Lucknow",
-          site_image: "https://images.unsplash.com/photo-1486325212027-8081e485255e?w=600&q=75",
-          display_order: 5,
-        },
-      ];
+    // Ensure all 5 standard project sites exist and are active in site_gallery
+    const standardSites = [
+      {
+        category: "Plot",
+        site_name: "Gadan Khera",
+        site_address: "Unnao",
+        site_image: "https://api.mmrconstructions.in/uploads/other/gadan-khera/mmr-constructions-site_gallery-gadan-khera-sitegallery-20260916-f3b9f9.webp",
+        display_order: 1,
+      },
+      {
+        category: "Plot",
+        site_name: "Ajgain Site",
+        site_address: "Ajgain, Near Highway",
+        site_image: "https://api.mmrconstructions.in/uploads/other/ajgain-site/mmr-constructions-site_gallery-ajgain-site-sitegallery-20260916-d6a2b6.webp",
+        display_order: 2,
+      },
+      {
+        category: "Plot",
+        site_name: "Lucknow Site",
+        site_address: "Near Amousi Airport, Lucknow",
+        site_image: "https://api.mmrconstructions.in/uploads/other/lucknow-site/mmr-constructions-site_gallery-lucknow-site-sitegallery-20260916-225b26.webp",
+        display_order: 3,
+      },
+      {
+        category: "Plot",
+        site_name: "AIMA Site",
+        site_address: "Dhodi Ghaat Road, Rooma, Kanpur",
+        site_image: "https://images.unsplash.com/photo-1500382017468-9049fed747ef?w=1000&q=80",
+        display_order: 4,
+      },
+      {
+        category: "Plot",
+        site_name: "Tribhuwan Khera",
+        site_address: "Near Jajmau, NH-27, Unnao",
+        site_image: "https://images.unsplash.com/photo-1464082354059-27db6ce50048?w=800&q=80",
+        display_order: 5,
+      },
+    ];
 
-      for (const s of initialSites) {
+    for (const s of standardSites) {
+      const [existing] = await sql`
+        SELECT id FROM site_gallery
+        WHERE LOWER(TRIM(site_name)) = LOWER(TRIM(${s.site_name}))
+      `;
+      if (!existing) {
         await sql`
           INSERT INTO site_gallery (category, site_name, site_address, site_image, display_order, is_active)
           VALUES (${s.category}, ${s.site_name}, ${s.site_address}, ${s.site_image}, ${s.display_order}, true)
         `;
+        console.log(`[Site Gallery] Seeded missing site: ${s.site_name}`);
+      } else {
+        await sql`
+          UPDATE site_gallery
+          SET is_active = true, display_order = ${s.display_order}
+          WHERE id = ${existing.id}
+        `;
       }
-      console.log("[Site Gallery] Seeded initial 5 project sites successfully.");
     }
   } catch (err) {
     console.error("[Site Gallery] Error ensuring table schema:", err);
