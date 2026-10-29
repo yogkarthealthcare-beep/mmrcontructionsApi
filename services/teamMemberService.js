@@ -739,6 +739,14 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
             }
         }
         // 4. Upsert into team_members with slot_number and user_id
+        let normalizedDob = data.dateOfBirth;
+        if (data.dateOfBirth && typeof data.dateOfBirth === 'string') {
+          const ddmmyyyy = data.dateOfBirth.trim().match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+          if (ddmmyyyy) {
+            const [, d, m, y] = ddmmyyyy;
+            normalizedDob = `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+          }
+        }
         let inserted = null;
         if (existingTm) {
             const [updatedTm] = await tx `
@@ -747,7 +755,7 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
           slot_number = ${assignedSlot},
           full_name = ${data.fullName.trim()},
           father_husband_name = ${data.fatherHusbandName.trim()},
-          date_of_birth = ${data.dateOfBirth},
+          date_of_birth = ${normalizedDob},
           gender = ${data.gender},
           aadhar_no = ${cleanAadhar},
           pan_no = ${data.panNo || null},
@@ -815,7 +823,7 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
           ${assignedSlot},
           ${data.fullName.trim()},
           ${data.fatherHusbandName.trim()},
-          ${data.dateOfBirth},
+          ${normalizedDob},
           ${data.gender},
           ${cleanAadhar},
           ${data.panNo || null},
