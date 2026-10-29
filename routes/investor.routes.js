@@ -1133,11 +1133,39 @@ router.post(["/investor/settlement-change-request", "/investor/settlement/reques
 
 router.get("/investor/notifications", authInvestor, async (req, res) => {
   try {
-    const rows = await sql`
-      SELECT * FROM investor_notifications
-      WHERE investor_id = ${req.investor.id}
-      ORDER BY created_at DESC
-      LIMIT 100`;
+    const showAll = String(req.query.all || "false").toLowerCase() === "true";
+    let rows;
+    if (showAll) {
+      rows = await sql`
+        SELECT * FROM investor_notifications
+        WHERE investor_id = ${req.investor.id}
+        ORDER BY created_at DESC
+        LIMIT 100`;
+    } else {
+      // Strictly 1 notification per category (newest in each category)
+      rows = await sql`
+        WITH categorized AS (
+          SELECT *,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY 
+                     CASE
+                       WHEN LOWER(title) LIKE '%withdraw%' OR LOWER(title) LIKE '%payout%' THEN 'withdrawal'
+                       WHEN LOWER(title) LIKE '%deposit%' OR LOWER(title) LIKE '%invest%' THEN 'deposit'
+                       WHEN LOWER(title) LIKE '%return%' OR LOWER(title) LIKE '%interest%' OR LOWER(title) LIKE '%payout%' THEN 'earnings'
+                       WHEN LOWER(title) LIKE '%kyc%' OR LOWER(title) LIKE '%account%' OR LOWER(title) LIKE '%bank%' THEN 'account'
+                       ELSE 'general'
+                     END
+                   ORDER BY created_at DESC, id DESC
+                 ) AS rn
+          FROM investor_notifications
+          WHERE investor_id = ${req.investor.id}
+        )
+        SELECT * FROM categorized
+        WHERE rn = 1
+        ORDER BY created_at DESC
+        LIMIT 100;
+      `;
+    }
     return ok(res, rows);
   } catch (e) {
     return err(res, "Failed to load notifications.");

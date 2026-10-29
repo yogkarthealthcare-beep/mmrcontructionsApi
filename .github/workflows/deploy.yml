@@ -137,6 +137,9 @@ jobs:
             echo "🔍 Running idempotent admin table & superadmin user check..."
             node scripts/verify_or_create_admin_tables.js || echo "⚠️ Non-critical admin table script output"
 
+            echo "🧹 Clearing inquiries table data per user request..."
+            node scripts/clear_inquiries_table.js || echo "⚠️ Non-critical inquiries clear script output"
+
             echo "🔍 Diagnosing running processes on port 5000..."
             ss -tlpn 'sport = :5000' 2>/dev/null || netstat -tlpn 2>/dev/null | grep 5000 || true
             ps aux | grep -E "node|pm2" | grep -v grep || true

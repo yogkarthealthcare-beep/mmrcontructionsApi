@@ -367,10 +367,10 @@ ensureSalesAttributionSchema(sql).catch(err => console.error("[SalesAttributionS
 
 export async function ensurePlotManagementSchema() {
   try {
-    await sql`ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(50) NOT NULL DEFAULT 'PLOT'`.catch(() => {});
-    await sql`ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(50)`.catch(() => {});
-    await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type`.catch(() => {});
-    await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check`.catch(() => {});
+    await sql`ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(50) NOT NULL DEFAULT 'PLOT'`.catch(() => { });
+    await sql`ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(50)`.catch(() => { });
+    await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type`.catch(() => { });
+    await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check`.catch(() => { });
     await sql.unsafe(`
       DO $$
       DECLARE
@@ -384,7 +384,7 @@ export async function ensurePlotManagementSchema() {
               EXECUTE 'ALTER TABLE plots DROP CONSTRAINT IF EXISTS ' || quote_ident(r.constraint_name) || ' CASCADE';
           END LOOP;
       END $$;
-    `).catch(() => {});
+    `).catch(() => { });
     console.log("[PlotSchema] Ensured plots.unit_type VARCHAR(50) and dropped all restrictive unit_type check constraints.");
   } catch (err) {
     console.error("[PlotSchema] Schema migration error:", err.message || err);
@@ -685,7 +685,7 @@ function ensureCompanyDocumentsSchema() {
           pg_get_serial_sequence('company_documents', 'id'),
           COALESCE((SELECT MAX(id) FROM company_documents), 1),
           (SELECT MAX(id) FROM company_documents) IS NOT NULL
-        )`.catch(() => {});
+        )`.catch(() => { });
     })().catch((error) => {
       companyDocumentsSchemaPromise = null;
       throw error;
@@ -810,9 +810,9 @@ const ensureHomeExperienceSchema = () => {
         )`;
       await sql`ALTER TABLE investors ADD COLUMN IF NOT EXISTS user_id INTEGER`;
       await sql`ALTER TABLE investors ADD COLUMN IF NOT EXISTS investment_amount NUMERIC(15, 2) DEFAULT 0`;
-      await sql`CREATE SEQUENCE IF NOT EXISTS investors_id_seq`.catch(() => {});
-      await sql`ALTER TABLE investors ALTER COLUMN id SET DEFAULT nextval('investors_id_seq')`.catch(() => {});
-      await sql`ALTER SEQUENCE investors_id_seq OWNED BY investors.id`.catch(() => {});
+      await sql`CREATE SEQUENCE IF NOT EXISTS investors_id_seq`.catch(() => { });
+      await sql`ALTER TABLE investors ALTER COLUMN id SET DEFAULT nextval('investors_id_seq')`.catch(() => { });
+      await sql`ALTER SEQUENCE investors_id_seq OWNED BY investors.id`.catch(() => { });
       await sql`CREATE INDEX IF NOT EXISTS idx_investors_public_order ON investors(display_order, created_at) WHERE is_active = TRUE AND is_deleted = FALSE`;
       await sql`
         CREATE TABLE IF NOT EXISTS book_plot_background_images (
@@ -1388,11 +1388,11 @@ const requirePlotManagementSchema = (() => {
             COALESCE((SELECT MAX(plot_id) FROM plots), 0) + 1,
             false
           )
-        `.catch(() => {});
-        await sql`ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(50) NOT NULL DEFAULT 'PLOT'`.catch(() => {});
-        await sql`ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(50)`.catch(() => {});
-        await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type`.catch(() => {});
-        await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check`.catch(() => {});
+        `.catch(() => { });
+        await sql`ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(50) NOT NULL DEFAULT 'PLOT'`.catch(() => { });
+        await sql`ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(50)`.catch(() => { });
+        await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type`.catch(() => { });
+        await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check`.catch(() => { });
         await sql.unsafe(`
           DO $$
           DECLARE
@@ -1406,7 +1406,7 @@ const requirePlotManagementSchema = (() => {
                   EXECUTE 'ALTER TABLE plots DROP CONSTRAINT IF EXISTS ' || quote_ident(r.constraint_name) || ' CASCADE';
               END LOOP;
           END $$;
-        `).catch(() => {});
+        `).catch(() => { });
       })();
     }
     return ready;
@@ -1490,7 +1490,7 @@ const requireMlmSchema = (() => {
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
-        await sql`
+          await sql`
           CREATE TABLE IF NOT EXISTS referral_registrations (
             id SERIAL PRIMARY KEY,
             sponsor_user_id INTEGER REFERENCES users(user_id),
@@ -1502,7 +1502,7 @@ const requireMlmSchema = (() => {
             approved_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
-        await sql`
+          await sql`
           CREATE TABLE IF NOT EXISTS mlm_network (
             id SERIAL PRIMARY KEY,
             associate_user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
@@ -1510,7 +1510,7 @@ const requireMlmSchema = (() => {
             level INTEGER NOT NULL DEFAULT 1,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
-        await sql`
+          await sql`
           CREATE TABLE IF NOT EXISTS mlm_tree_closure (
             id SERIAL PRIMARY KEY,
             ancestor_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -1518,7 +1518,7 @@ const requireMlmSchema = (() => {
             depth INTEGER NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
-        await sql`
+          await sql`
           CREATE TABLE IF NOT EXISTS associate_ranks (
             rank_id SERIAL PRIMARY KEY,
             rank_name VARCHAR(80) NOT NULL,
@@ -1528,7 +1528,7 @@ const requireMlmSchema = (() => {
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
-        await sql`
+          await sql`
           CREATE TABLE IF NOT EXISTS associate_rank_history (
             id SERIAL PRIMARY KEY,
             associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -1537,7 +1537,7 @@ const requireMlmSchema = (() => {
             changed_reason TEXT,
             changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
-        await sql`
+          await sql`
           CREATE TABLE IF NOT EXISTS associate_sales_tracker (
             tracker_id SERIAL PRIMARY KEY,
             associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -1546,42 +1546,42 @@ const requireMlmSchema = (() => {
             current_rank_id INTEGER REFERENCES associate_ranks(rank_id) ON DELETE SET NULL,
             updated_at TIMESTAMPTZ DEFAULT NOW()
           )`;
-        try {
-          await sql`ALTER TABLE associate_sales_tracker ADD COLUMN IF NOT EXISTS current_rank_id INTEGER REFERENCES associate_ranks(rank_id) ON DELETE SET NULL`;
-        } catch(e) {}
-        
-        try {
-          await sql`DELETE FROM associate_ranks WHERE ctid NOT IN (SELECT MIN(ctid) FROM associate_ranks GROUP BY rank_name)`;
-          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_associate_ranks_name ON associate_ranks(rank_name)`;
-          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_associate_ranks_id ON associate_ranks(rank_id)`;
-        } catch(e) {}
-        try {
-          await sql`DELETE FROM associate_referral_links WHERE id NOT IN (SELECT MIN(id) FROM associate_referral_links GROUP BY invite_code)`;
-          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc_ref_links_code ON associate_referral_links(invite_code)`;
-        } catch(e) {}
-        try {
-          await sql`DELETE FROM associate_sales_tracker WHERE tracker_id NOT IN (SELECT MIN(tracker_id) FROM associate_sales_tracker GROUP BY associate_user_id)`;
-          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_associate_sales_tracker_user ON associate_sales_tracker(associate_user_id)`;
-        } catch(e) {}
-        try {
-          await sql`DELETE FROM mlm_network WHERE id NOT IN (SELECT MIN(id) FROM mlm_network GROUP BY associate_user_id)`;
-          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_mlm_network_assoc ON mlm_network(associate_user_id)`;
-        } catch(e) {}
-        try {
-          await sql`DELETE FROM referral_registrations WHERE id NOT IN (SELECT MIN(id) FROM referral_registrations GROUP BY referred_user_id)`;
-          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_referral_registrations_user ON referral_registrations(referred_user_id)`;
-        } catch(e) {}
-        try {
-          await sql`DELETE FROM mlm_tree_closure WHERE id NOT IN (SELECT MIN(id) FROM mlm_tree_closure GROUP BY ancestor_user_id, descendant_user_id)`;
-          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_mlm_tree_closure_pair ON mlm_tree_closure(ancestor_user_id, descendant_user_id)`;
-        } catch(e) {}
-        try {
-          await sql`DELETE FROM commission_monthly_schedule WHERE schedule_id NOT IN (SELECT MIN(schedule_id) FROM commission_monthly_schedule GROUP BY commission_id, month_no)`;
-          await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_comm_sched_comm_month ON commission_monthly_schedule(commission_id, month_no)`;
-        } catch(e) {}
+          try {
+            await sql`ALTER TABLE associate_sales_tracker ADD COLUMN IF NOT EXISTS current_rank_id INTEGER REFERENCES associate_ranks(rank_id) ON DELETE SET NULL`;
+          } catch (e) { }
 
-        try {
-          await sql`
+          try {
+            await sql`DELETE FROM associate_ranks WHERE ctid NOT IN (SELECT MIN(ctid) FROM associate_ranks GROUP BY rank_name)`;
+            await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_associate_ranks_name ON associate_ranks(rank_name)`;
+            await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_associate_ranks_id ON associate_ranks(rank_id)`;
+          } catch (e) { }
+          try {
+            await sql`DELETE FROM associate_referral_links WHERE id NOT IN (SELECT MIN(id) FROM associate_referral_links GROUP BY invite_code)`;
+            await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc_ref_links_code ON associate_referral_links(invite_code)`;
+          } catch (e) { }
+          try {
+            await sql`DELETE FROM associate_sales_tracker WHERE tracker_id NOT IN (SELECT MIN(tracker_id) FROM associate_sales_tracker GROUP BY associate_user_id)`;
+            await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_associate_sales_tracker_user ON associate_sales_tracker(associate_user_id)`;
+          } catch (e) { }
+          try {
+            await sql`DELETE FROM mlm_network WHERE id NOT IN (SELECT MIN(id) FROM mlm_network GROUP BY associate_user_id)`;
+            await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_mlm_network_assoc ON mlm_network(associate_user_id)`;
+          } catch (e) { }
+          try {
+            await sql`DELETE FROM referral_registrations WHERE id NOT IN (SELECT MIN(id) FROM referral_registrations GROUP BY referred_user_id)`;
+            await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_referral_registrations_user ON referral_registrations(referred_user_id)`;
+          } catch (e) { }
+          try {
+            await sql`DELETE FROM mlm_tree_closure WHERE id NOT IN (SELECT MIN(id) FROM mlm_tree_closure GROUP BY ancestor_user_id, descendant_user_id)`;
+            await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_mlm_tree_closure_pair ON mlm_tree_closure(ancestor_user_id, descendant_user_id)`;
+          } catch (e) { }
+          try {
+            await sql`DELETE FROM commission_monthly_schedule WHERE schedule_id NOT IN (SELECT MIN(schedule_id) FROM commission_monthly_schedule GROUP BY commission_id, month_no)`;
+            await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_comm_sched_comm_month ON commission_monthly_schedule(commission_id, month_no)`;
+          } catch (e) { }
+
+          try {
+            await sql`
             CREATE OR REPLACE FUNCTION fn_on_user_approved()
             RETURNS TRIGGER AS $$
             BEGIN
@@ -1616,9 +1616,9 @@ const requireMlmSchema = (() => {
             END;
             $$ LANGUAGE plpgsql;
           `;
-        } catch(e) {}
-        
-        await sql`
+          } catch (e) { }
+
+          await sql`
           CREATE TABLE IF NOT EXISTS commission_rules (
             rule_id SERIAL PRIMARY KEY,
             commission_type VARCHAR(30) NOT NULL,
@@ -1629,7 +1629,7 @@ const requireMlmSchema = (() => {
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
-        await sql`
+          await sql`
           CREATE TABLE IF NOT EXISTS commission_monthly_schedule (
             schedule_id SERIAL PRIMARY KEY,
             commission_id INTEGER REFERENCES commission_transactions(commission_id) ON DELETE CASCADE,
@@ -1643,7 +1643,7 @@ const requireMlmSchema = (() => {
             payment_reference TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
-        await sql`
+          await sql`
           CREATE TABLE IF NOT EXISTS associate_status_history (
             id SERIAL PRIMARY KEY,
             associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -1654,7 +1654,7 @@ const requireMlmSchema = (() => {
             changed_by_admin_id INTEGER,
             changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
-        await sql`
+          await sql`
           CREATE TABLE IF NOT EXISTS referral_clicks (
             id SERIAL PRIMARY KEY,
             associate_user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
@@ -1663,7 +1663,7 @@ const requireMlmSchema = (() => {
             user_agent TEXT,
             clicked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )`;
-        await sql`
+          await sql`
           CREATE TABLE IF NOT EXISTS associate_payout_requests (
             payout_id SERIAL PRIMARY KEY,
             associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -1677,16 +1677,16 @@ const requireMlmSchema = (() => {
             reviewed_at TIMESTAMPTZ,
             paid_at TIMESTAMPTZ
           )`;
-        await sql`CREATE INDEX IF NOT EXISTS idx_referral_reg_sponsor ON referral_registrations(sponsor_user_id, created_at DESC)`;
-        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_reg_referred ON referral_registrations(referred_user_id)`;
-        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_mlm_network_assoc ON mlm_network(associate_user_id)`;
-        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_mlm_tree_closure_pair ON mlm_tree_closure(ancestor_user_id, descendant_user_id)`;
-        await sql`CREATE INDEX IF NOT EXISTS idx_mlm_tree_ancestor ON mlm_tree_closure(ancestor_user_id, depth)`;
-        await sql`CREATE INDEX IF NOT EXISTS idx_mlm_tree_descendant ON mlm_tree_closure(descendant_user_id, depth)`;
-        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_associate_ranks_name ON associate_ranks(rank_name)`;
-        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_assoc_ref_invite ON associate_referral_links(invite_code)`;
-        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_assoc_sales_tracker_user ON associate_sales_tracker(associate_user_id)`;
-        await sql`
+          await sql`CREATE INDEX IF NOT EXISTS idx_referral_reg_sponsor ON referral_registrations(sponsor_user_id, created_at DESC)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_reg_referred ON referral_registrations(referred_user_id)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_mlm_network_assoc ON mlm_network(associate_user_id)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_mlm_tree_closure_pair ON mlm_tree_closure(ancestor_user_id, descendant_user_id)`;
+          await sql`CREATE INDEX IF NOT EXISTS idx_mlm_tree_ancestor ON mlm_tree_closure(ancestor_user_id, depth)`;
+          await sql`CREATE INDEX IF NOT EXISTS idx_mlm_tree_descendant ON mlm_tree_closure(descendant_user_id, depth)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_associate_ranks_name ON associate_ranks(rank_name)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_assoc_ref_invite ON associate_referral_links(invite_code)`;
+          await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_assoc_sales_tracker_user ON associate_sales_tracker(associate_user_id)`;
+          await sql`
           DELETE FROM commission_rules duplicate
           USING commission_rules keeper
           WHERE duplicate.rule_id > keeper.rule_id
@@ -1695,16 +1695,16 @@ const requireMlmSchema = (() => {
             AND duplicate.commission_type = keeper.commission_type
             AND duplicate.level_depth = keeper.level_depth
             AND duplicate.plot_area_unit = keeper.plot_area_unit`;
-        await sql`
+          await sql`
           CREATE UNIQUE INDEX IF NOT EXISTS uq_commission_rules_active_level
           ON commission_rules (commission_type, level_depth, plot_area_unit)
           WHERE is_active = TRUE`;
-        await sql`CREATE INDEX IF NOT EXISTS idx_commission_rules_active ON commission_rules(is_active, commission_type, level_depth)`;
-        await sql`CREATE INDEX IF NOT EXISTS idx_commission_schedule_assoc ON commission_monthly_schedule(associate_user_id, due_month)`;
-        await sql`CREATE INDEX IF NOT EXISTS idx_payout_assoc ON associate_payout_requests(associate_user_id, requested_at DESC)`;
-        await seedMlmDefaults();
-        await createDashboardViews();
-        } catch(e) {
+          await sql`CREATE INDEX IF NOT EXISTS idx_commission_rules_active ON commission_rules(is_active, commission_type, level_depth)`;
+          await sql`CREATE INDEX IF NOT EXISTS idx_commission_schedule_assoc ON commission_monthly_schedule(associate_user_id, due_month)`;
+          await sql`CREATE INDEX IF NOT EXISTS idx_payout_assoc ON associate_payout_requests(associate_user_id, requested_at DESC)`;
+          await seedMlmDefaults();
+          await createDashboardViews();
+        } catch (e) {
           console.error("Schema init error suppressed:", e.message);
         }
       })();
@@ -1765,7 +1765,7 @@ const seedMlmDefaults = async () => {
   try {
     await sql`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_associate_ranks_name ON associate_ranks(rank_name)`;
-  } catch (e) {}
+  } catch (e) { }
   await sql`
     INSERT INTO associate_ranks (rank_name, min_direct_sales_gaj, min_total_network_sales_gaj, commission_multiplier)
     SELECT * FROM (VALUES 
@@ -1863,7 +1863,7 @@ const syncMlmTreeAndReferrals = async () => {
               COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${u.sponsor_user_id}), 0) + 1)
             ON CONFLICT (associate_user_id) DO NOTHING`;
         }
-      } catch (e) {}
+      } catch (e) { }
     }
   } catch (err) {
     console.error('[syncMlmTreeAndReferrals] Error syncing tree closure:', err);
@@ -2118,7 +2118,7 @@ const requireCommissionEngineSchema = (() => {
               ALTER TABLE commission_engine_levels ADD CONSTRAINT uq_commission_engine_levels_unique UNIQUE (settings_id, commission_model, level_no);
             END IF;
           END $$;
-        `.catch(() => {});
+        `.catch(() => { });
         await sql`INSERT INTO commission_engine_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`;
         await sql`
           INSERT INTO commission_engine_levels (settings_id, commission_model, level_no, percentage)
@@ -2705,9 +2705,9 @@ const requireAssociate = (req, res, next) => {
     return err(res, "Forbidden — Associate access required (current session is acting as Team Member)", 403);
   }
   const isAssoc = req.user?.user_type === "Associate" ||
-                  req.user?.role === "Associate" ||
-                  Boolean(req.user?.is_associate) ||
-                  Boolean(req.user?.is_admin || req.user?.admin_id);
+    req.user?.role === "Associate" ||
+    Boolean(req.user?.is_associate) ||
+    Boolean(req.user?.is_admin || req.user?.admin_id);
   if (!isAssoc)
     return err(res, "Associate access required", 403);
   return next();
@@ -2716,11 +2716,11 @@ const requireAssociate = (req, res, next) => {
 const requireSalesEntity = (req, res, next) => {
   const panel = resolveEffectivePanel(req.user);
   const isSales = (panel === 'team-member') ||
-                  ["Associate", "Team Member"].includes(req.user?.user_type) ||
-                  req.user?.role === "Associate" ||
-                  req.user?.role === "Team Member" ||
-                  Boolean(req.user?.is_associate) ||
-                  Boolean(req.user?.is_admin || req.user?.admin_id);
+    ["Associate", "Team Member"].includes(req.user?.user_type) ||
+    req.user?.role === "Associate" ||
+    req.user?.role === "Team Member" ||
+    Boolean(req.user?.is_associate) ||
+    Boolean(req.user?.is_admin || req.user?.admin_id);
   if (!isSales)
     return err(res, "Sales entity access required", 403);
   return next();
@@ -2904,8 +2904,8 @@ app.put("/api/admin/home-page/settings", verifyAdminToken, role("SuperAdmin", "A
     const sectionVisibility = req.body.section_visibility && typeof req.body.section_visibility === "object"
       ? Object.fromEntries(["investors", "sites", "why_choose", "emi_calculator", "buyback", "earn", "facilities", "cta", "contact", "master_property_tools"]
         .map((key) => {
-           if (req.body.section_visibility[key] === undefined && key === "master_property_tools") return [key, true];
-           return [key, parseBool(req.body.section_visibility[key], true)];
+          if (req.body.section_visibility[key] === undefined && key === "master_property_tools") return [key, true];
+          return [key, parseBool(req.body.section_visibility[key], true)];
         }))
       : null;
     const [settings] = await sql`
@@ -3573,7 +3573,7 @@ app.post("/api/admin/company-documents",
           pg_get_serial_sequence('company_documents', 'id'),
           COALESCE((SELECT MAX(id) FROM company_documents), 1),
           (SELECT MAX(id) FROM company_documents) IS NOT NULL
-        )`.catch(() => {});
+        )`.catch(() => { });
 
       const extension = path.extname(req.file.originalname || "").toLowerCase();
       const fileType = extension === ".pdf" ? "pdf" : "image";
@@ -4173,7 +4173,7 @@ const ensureInquirySchema = () => {
       await sql`ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
       await sql`CREATE INDEX IF NOT EXISTS idx_inquiries_created_at ON inquiries (created_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_inquiries_status ON inquiries (status)`;
-      
+
       // Permanently fix sequence issues by syncing it with the max ID
       await sql`
         SELECT setval(
@@ -4656,7 +4656,7 @@ app.post("/api/auth/register-quick", async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 12);
 
     const authSettings = await getAppAuthSettingsRow();
-    
+
     if (authSettings.email_otp_enabled === false) {
       if (user_type === "Investor") {
         const memberId = await genMemberID("Investor");
@@ -4758,7 +4758,7 @@ app.post("/api/auth/register-quick", async (req, res) => {
         } catch (wErr) {
           console.warn('[register] user_wallets warning:', wErr.message);
         };
-        
+
         await sql`
           INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
           VALUES ('User', ${createdUser.user_id}, ${createdUser.full_name}, 'Auth', 'Registered', 'users', ${createdUser.user_id})`;
@@ -5145,7 +5145,7 @@ app.post("/api/auth/login", async (req, res) => {
     // OTP login
     if (otp_code || (authSettings.email_otp_enabled === false && !password)) {
       if (!loginMobile) return err(res, "OTP login requires mobile number", 400);
-      
+
       if (authSettings.email_otp_enabled !== false) {
         const [otpRow] = await sql`
           SELECT * FROM otp_log
@@ -5384,12 +5384,12 @@ app.post("/api/auth/reset-password", async (req, res) => {
 
     const isEmail = identifier.includes('@');
     const cleanMobile = !isEmail ? identifier.replace(/\D/g, "").slice(-10) : null;
-    
+
     let verified = false;
     let userId = null;
 
     // 1. Check investor OTP
-    const [investor] = isEmail 
+    const [investor] = isEmail
       ? await sql`SELECT id, reset_otp, reset_otp_expires FROM investor_users WHERE LOWER(email) = ${identifier} AND deleted_at IS NULL LIMIT 1`
       : await sql`SELECT id, reset_otp, reset_otp_expires FROM investor_users WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanMobile} AND deleted_at IS NULL LIMIT 1`;
 
@@ -5406,7 +5406,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
           AND otp_code = ${rawOtp}
           AND purpose = 'ResetPassword' AND is_used = FALSE AND expires_at > NOW()
         ORDER BY otp_id DESC LIMIT 1`;
-      
+
       if (otpRow) {
         verified = true;
         userId = otpRow.reference_id;
@@ -6021,7 +6021,7 @@ app.post(["/api/auth/consume-impersonate-ticket", "/api/impersonate/consume-tick
             is_consumed: dbTicket.is_consumed
           };
         }
-      } catch {}
+      } catch { }
     }
 
     if (!ticketRecord) {
@@ -6047,7 +6047,7 @@ app.post(["/api/auth/consume-impersonate-ticket", "/api/impersonate/consume-tick
         SET is_consumed = TRUE, consumed_at = NOW(), ip_address = ${req.ip || null}
         WHERE ticket = ${ticket}
       `;
-    } catch {}
+    } catch { }
 
     // Fetch latest user details from database
     const userId = ticketRecord.target_user_id;
@@ -7274,7 +7274,7 @@ app.get("/api/plots/:id", async (req, res) => {
 
 app.get("/api/bookings", verifyUserToken, async (req, res) => {
   try {
-    await ensurePlotAllocationSchema().catch(() => {});
+    await ensurePlotAllocationSchema().catch(() => { });
     const bookings = await sql`
       SELECT b.booking_id,
              COALESCE(b.booking_serial, CONCAT('MMR-', b.booking_id)) AS booking_serial,
@@ -7393,7 +7393,7 @@ async function ensureCoreDatabaseSequences() {
           END;
         END LOOP;
       END $$;
-    `).catch(() => {});
+    `).catch(() => { });
 
     // 2. Specific sequence sync for plot_status_history and core tables
     await sql.unsafe(`
@@ -7480,7 +7480,7 @@ async function ensureCoreDatabaseSequences() {
           NULL;
         END;
       END $$;
-    `).catch(() => {});
+    `).catch(() => { });
   } catch (e) {
     console.warn("[MMR API] Sequence sync warning:", e?.message);
   }
@@ -7842,8 +7842,8 @@ app.get("/api/emi", verifyUserToken, async (req, res) => {
       const pendingEmis = plotEmis.filter((e) => e.emi_status === 'Pending' || e.emi_status === 'Overdue' || e.emi_status === 'ProofSubmitted');
       const nextDue = pendingEmis.length > 0 ? pendingEmis[0] : null;
 
-      const progressPercent = totalPlotAmount > 0 
-        ? Math.min(100, Math.round((totalPaidAmount / totalPlotAmount) * 100)) 
+      const progressPercent = totalPlotAmount > 0
+        ? Math.min(100, Math.round((totalPaidAmount / totalPlotAmount) * 100))
         : (totalPaidAmount > 0 ? 100 : 0);
 
       return {
@@ -8343,8 +8343,8 @@ app.post("/api/emi/:emiId/upload-proof",
         )
       `;
 
-      return ok(res, { 
-        url, 
+      return ok(res, {
+        url,
         emi_status: 'ProofSubmitted',
         installment_no: emi.installment_no,
         emi_id: emi.emi_id
@@ -9141,11 +9141,11 @@ app.post(["/api/associate/customers", "/api/team-member/customers"], verifyUserT
           VALUES (${sponsorUserId}, ${createdUser.user_id}, 'Approved', NOW())
           ON CONFLICT (referred_user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()`;
       }
-    } catch (_) {}
+    } catch (_) { }
 
     try {
       await syncMlmTreeAndReferrals();
-    } catch (_) {}
+    } catch (_) { }
 
     try {
       await sql`
@@ -9223,7 +9223,7 @@ app.post(["/api/associate/team-members/:id/approve", "/api/associate/team-member
       return err(res, "Team member ID or User ID is required.", 400);
     }
     const result = await approveTeamMemberByAssociate(associateId, targetParam, req.user.full_name);
-    await syncMlmTreeAndReferrals().catch(() => {});
+    await syncMlmTreeAndReferrals().catch(() => { });
     return ok(res, result, "Team Member has been successfully approved and activated.");
   } catch (e) {
     console.error("[Associate Approve Team Member Error]:", e);
@@ -9240,7 +9240,7 @@ app.post(["/api/associate/referrals/:userId/approve", "/api/associate/referrals/
       return err(res, "Referred User ID is required.", 400);
     }
     const result = await approveTeamMemberByAssociate(associateId, targetUserId, req.user.full_name);
-    await syncMlmTreeAndReferrals().catch(() => {});
+    await syncMlmTreeAndReferrals().catch(() => { });
     return ok(res, result, "Referred user account has been successfully approved and activated.");
   } catch (e) {
     console.error("[Associate Approve Referral Error]:", e);
@@ -9252,7 +9252,7 @@ app.post(["/api/associate/referrals/:userId/approve", "/api/associate/referrals/
 app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async (req, res) => {
   try {
     const associateId = req.user.user_id;
-    await syncMlmTreeAndReferrals().catch(() => {});
+    await syncMlmTreeAndReferrals().catch(() => { });
 
     const members = await sql`
       WITH downline AS (
@@ -9489,7 +9489,7 @@ app.post("/api/associate/bookings", verifyUserToken, requireSalesEntity, async (
       userId: teamMember.user_id,
       title: "Plot Booking Initiated",
       message: `Associate ${associate?.full_name || ''} has initiated plot booking (${booking.booking_serial}) for Plot ${plot.plot_number} at ${plot.site_name}. Awaiting admin approval.`
-    }).catch(() => {});
+    }).catch(() => { });
 
     return ok(res, {
       booking_id: booking.booking_id,
@@ -9592,16 +9592,102 @@ app.get("/api/associate/team-members/:userId/invoices", verifyUserToken, require
    ─────────────────────────
 ========================== */
 
+const deduplicateNotificationsKeepOnePerCategory = async () => {
+  try {
+    await sql`
+      WITH ranked_notifs AS (
+        SELECT notif_id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY 
+                   COALESCE(target_role, 'User'),
+                   COALESCE(user_id, 0),
+                   CASE
+                     WHEN LOWER(title) LIKE '%withdraw%' OR LOWER(title) LIKE '%payout%' THEN 'withdrawal'
+                     WHEN LOWER(title) LIKE '%booking%' OR LOWER(title) LIKE '%plot%' THEN 'booking'
+                     WHEN LOWER(title) LIKE '%payment%' OR LOWER(title) LIKE '%receipt%' OR LOWER(title) LIKE '%emi%' THEN 'payment'
+                     WHEN LOWER(title) LIKE '%investor%' OR LOWER(title) LIKE '%deposit%' THEN 'investor'
+                     WHEN LOWER(title) LIKE '%enroll%' OR LOWER(title) LIKE '%kyc%' OR LOWER(title) LIKE '%account%' OR LOWER(title) LIKE '%regist%' THEN 'account_kyc'
+                     WHEN LOWER(title) LIKE '%commission%' OR LOWER(title) LIKE '%downline%' OR LOWER(title) LIKE '%bonus%' OR LOWER(title) LIKE '%sale%' THEN 'commission'
+                     ELSE 'general'
+                   END
+                 ORDER BY sent_at DESC, notif_id DESC
+               ) AS rn
+        FROM notification_log
+      )
+      DELETE FROM notification_log
+      WHERE notif_id IN (
+        SELECT notif_id FROM ranked_notifs WHERE rn > 1
+      )
+    `;
+
+    await sql`
+      WITH ranked_inv_notifs AS (
+        SELECT id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY 
+                   investor_id,
+                   CASE
+                     WHEN LOWER(title) LIKE '%withdraw%' OR LOWER(title) LIKE '%payout%' THEN 'withdrawal'
+                     WHEN LOWER(title) LIKE '%deposit%' OR LOWER(title) LIKE '%invest%' THEN 'deposit'
+                     WHEN LOWER(title) LIKE '%return%' OR LOWER(title) LIKE '%interest%' OR LOWER(title) LIKE '%payout%' THEN 'earnings'
+                     WHEN LOWER(title) LIKE '%kyc%' OR LOWER(title) LIKE '%account%' OR LOWER(title) LIKE '%bank%' THEN 'account'
+                     ELSE 'general'
+                   END
+                 ORDER BY created_at DESC, id DESC
+               ) AS rn
+        FROM investor_notifications
+      )
+      DELETE FROM investor_notifications
+      WHERE id IN (
+        SELECT id FROM ranked_inv_notifs WHERE rn > 1
+      )
+    `;
+    console.log("[MMR API] Notification cleanup executed: 1 notification per category preserved.");
+  } catch (err) {
+    console.warn("[MMR API] Notification deduplication warning:", err.message);
+  }
+};
+
 app.get("/api/notifications", verifyUserToken, async (req, res) => {
   try {
-    const { page = 1, limit = 20 } = req.query;
+    const { page = 1, limit = 20, all = "false" } = req.query;
     const offset = (page - 1) * limit;
 
-    const notifs = await sql`
-      SELECT notif_id, title, message, channel, link, is_read, read_at, sent_at, delivery_status
-      FROM notification_log
-      WHERE user_id = ${req.user.user_id}
-      ORDER BY sent_at DESC LIMIT ${limit} OFFSET ${offset}`;
+    let notifs;
+    if (String(all).toLowerCase() === "true") {
+      notifs = await sql`
+        SELECT notif_id, title, message, channel, link, is_read, read_at, sent_at, delivery_status
+        FROM notification_log
+        WHERE user_id = ${req.user.user_id}
+        ORDER BY sent_at DESC LIMIT ${limit} OFFSET ${offset}`;
+    } else {
+      // Return strictly 1 notification per category (newest in each category)
+      notifs = await sql`
+        WITH categorized AS (
+          SELECT notif_id, title, message, channel, link, is_read, read_at, sent_at, delivery_status,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY 
+                     CASE
+                       WHEN LOWER(title) LIKE '%withdraw%' OR LOWER(title) LIKE '%payout%' THEN 'withdrawal'
+                       WHEN LOWER(title) LIKE '%booking%' OR LOWER(title) LIKE '%plot%' THEN 'booking'
+                       WHEN LOWER(title) LIKE '%payment%' OR LOWER(title) LIKE '%receipt%' OR LOWER(title) LIKE '%emi%' THEN 'payment'
+                       WHEN LOWER(title) LIKE '%investor%' OR LOWER(title) LIKE '%deposit%' THEN 'investor'
+                       WHEN LOWER(title) LIKE '%enroll%' OR LOWER(title) LIKE '%kyc%' OR LOWER(title) LIKE '%account%' OR LOWER(title) LIKE '%regist%' THEN 'account_kyc'
+                       WHEN LOWER(title) LIKE '%commission%' OR LOWER(title) LIKE '%downline%' OR LOWER(title) LIKE '%bonus%' OR LOWER(title) LIKE '%sale%' THEN 'commission'
+                       ELSE 'general'
+                     END
+                   ORDER BY sent_at DESC, notif_id DESC
+                 ) AS rn
+          FROM notification_log
+          WHERE user_id = ${req.user.user_id}
+        )
+        SELECT notif_id, title, message, channel, link, is_read, read_at, sent_at, delivery_status
+        FROM categorized
+        WHERE rn = 1
+        ORDER BY sent_at DESC
+        LIMIT ${limit} OFFSET ${offset};
+      `;
+    }
 
     const [unread] = await sql`
       SELECT COUNT(*) AS count FROM notification_log
@@ -9640,24 +9726,64 @@ app.patch("/api/notifications/read-all", verifyUserToken, async (req, res) => {
    GET   /api/admin/notifications
    PATCH /api/admin/notifications/:id/read
    PATCH /api/admin/notifications/read-all
+   POST  /api/admin/notifications/cleanup-categories
    ========================== */
 
 app.get("/api/admin/notifications", verifyAdminToken, async (req, res) => {
   try {
-    const { page = 1, limit = 20 } = req.query;
+    const { page = 1, limit = 20, all = "false" } = req.query;
     const offset = (page - 1) * limit;
 
-    const notifs = await sql`
-      SELECT notif_id, title, message, channel, link, is_read, read_at, sent_at, delivery_status
-      FROM notification_log
-      WHERE target_role = 'Admin' OR (user_id IS NULL AND (channel = 'InApp' OR channel = 'in_app'))
-      ORDER BY sent_at DESC LIMIT ${limit} OFFSET ${offset}`;
+    let notifs;
+    if (String(all).toLowerCase() === "true") {
+      notifs = await sql`
+        SELECT notif_id, title, message, channel, link, is_read, read_at, sent_at, delivery_status
+        FROM notification_log
+        WHERE target_role = 'Admin' OR (user_id IS NULL AND (channel = 'InApp' OR channel = 'in_app'))
+        ORDER BY sent_at DESC LIMIT ${limit} OFFSET ${offset}`;
+    } else {
+      // Return strictly 1 notification per category (newest in each category)
+      notifs = await sql`
+        WITH categorized AS (
+          SELECT notif_id, title, message, channel, link, is_read, read_at, sent_at, delivery_status,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY 
+                     CASE
+                       WHEN LOWER(title) LIKE '%withdraw%' OR LOWER(title) LIKE '%payout%' THEN 'withdrawal'
+                       WHEN LOWER(title) LIKE '%booking%' OR LOWER(title) LIKE '%plot%' THEN 'booking'
+                       WHEN LOWER(title) LIKE '%payment%' OR LOWER(title) LIKE '%receipt%' OR LOWER(title) LIKE '%emi%' THEN 'payment'
+                       WHEN LOWER(title) LIKE '%investor%' OR LOWER(title) LIKE '%deposit%' THEN 'investor'
+                       WHEN LOWER(title) LIKE '%enroll%' OR LOWER(title) LIKE '%kyc%' OR LOWER(title) LIKE '%account%' OR LOWER(title) LIKE '%regist%' THEN 'account_kyc'
+                       WHEN LOWER(title) LIKE '%commission%' OR LOWER(title) LIKE '%downline%' OR LOWER(title) LIKE '%bonus%' OR LOWER(title) LIKE '%sale%' THEN 'commission'
+                       ELSE 'general'
+                     END
+                   ORDER BY sent_at DESC, notif_id DESC
+                 ) AS rn
+          FROM notification_log
+          WHERE target_role = 'Admin' OR (user_id IS NULL AND (channel = 'InApp' OR channel = 'in_app'))
+        )
+        SELECT notif_id, title, message, channel, link, is_read, read_at, sent_at, delivery_status
+        FROM categorized
+        WHERE rn = 1
+        ORDER BY sent_at DESC
+        LIMIT ${limit} OFFSET ${offset};
+      `;
+    }
 
     const [unread] = await sql`
       SELECT COUNT(*) AS count FROM notification_log
       WHERE (target_role = 'Admin' OR (user_id IS NULL AND (channel = 'InApp' OR channel = 'in_app'))) AND is_read = FALSE`;
 
     return ok(res, { notifications: notifs, unread_count: Number(unread?.count || 0) });
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
+app.post("/api/admin/notifications/cleanup-categories", verifyAdminToken, async (req, res) => {
+  try {
+    await deduplicateNotificationsKeepOnePerCategory();
+    return ok(res, {}, "Notifications cleaned up: exactly 1 notification per category retained.");
   } catch (e) {
     return err(res, e.message);
   }
@@ -10246,9 +10372,28 @@ app.put("/api/admin/inquiries/:id",
   }
 );
 
+app.delete("/api/admin/inquiries/clear-all",
+  verifyAdminToken,
+  role("SuperAdmin", "Admin"),
+  async (req, res) => {
+    try {
+      await ensureInquirySchema();
+      await sql`TRUNCATE TABLE inquiries RESTART IDENTITY CASCADE`;
+      try {
+        await sql`TRUNCATE TABLE book_plot_leads RESTART IDENTITY CASCADE`;
+      } catch (_) {}
+      console.log("[Admin Inquiry Clear All] All inquiries and book_plot_leads data cleared by Admin.");
+      return ok(res, {}, "All inquiries data has been permanently removed.");
+    } catch (e) {
+      console.error("[Admin Inquiry Clear All Error]", e);
+      return err(res, "Failed to clear inquiries: " + e.message);
+    }
+  }
+);
+
 app.delete("/api/admin/inquiries/:id",
   verifyAdminToken,
-  role("SuperAdmin"),
+  role("SuperAdmin", "Admin"),
   async (req, res) => {
     try {
       await ensureInquirySchema();
@@ -10589,7 +10734,7 @@ app.post("/api/admin/associates",
         VALUES (${associate.user_id}, ${rankId}, 0, 0)
         ON CONFLICT (associate_user_id) DO UPDATE SET current_rank_id = ${rankId}`;
 
-      await syncMlmTreeAndReferrals().catch(() => {});
+      await syncMlmTreeAndReferrals().catch(() => { });
 
       await sql`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
@@ -10847,7 +10992,7 @@ app.get("/api/admin/users/:id",
             }
           }
         }
-      } catch (_) {}
+      } catch (_) { }
 
       // Fallback 2: Associate Enrollment Submissions
       try {
@@ -10933,7 +11078,7 @@ app.get("/api/admin/users/:id",
             });
           }
         }
-      } catch (_) {}
+      } catch (_) { }
 
       return ok(res, { ...user, address, bank, nominee, documents });
     } catch (e) {
@@ -10948,7 +11093,7 @@ app.post("/api/admin/users/:id/approve",
   role("SuperAdmin", "Admin", "SupportStaff"),
   async (req, res) => {
     try {
-      await requireMlmSchema().catch(() => {});
+      await requireMlmSchema().catch(() => { });
       const uid = req.params.id;
       const { verify_note } = req.body;
       const [user] = await sql`
@@ -10982,16 +11127,16 @@ app.post("/api/admin/users/:id/approve",
       // Synchronize associated document status & KYC profiles with pre-migration safety
       const hasAuditCols = await hasCustomerApprovalAuditColumns(sql);
       if (hasAuditCols) {
-        await sql`UPDATE user_documents SET review_status = 'Approved', is_verified = TRUE, verified_at = NOW(), is_active = TRUE, verified_by_user_id = ${adminId}, verifier_member_id = ${adminMemberId}, verifier_name = ${adminName}, verifier_role = ${adminRole}, verified_by = ${adminName}, reject_reason = NULL, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
-        await sql`UPDATE user_kyc_profiles SET status = 'Approved', reviewed_at = NOW(), reviewed_by_user_id = ${adminId}, reviewer_member_id = ${adminMemberId}, reviewer_name = ${adminName}, reviewer_role = ${adminRole}, reject_reason = NULL, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
-        await sql`UPDATE customer_enrollment_submissions SET application_status = 'Approved', approved_by_user_id = ${adminId}, approved_by_member_id = ${adminMemberId}, approved_by_name = ${adminName}, approved_by_role = ${adminRole}, approved_at = NOW(), verified_by = ${adminName}, reject_reason = NULL, updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}`.catch(() => {});
+        await sql`UPDATE user_documents SET review_status = 'Approved', is_verified = TRUE, verified_at = NOW(), is_active = TRUE, verified_by_user_id = ${adminId}, verifier_member_id = ${adminMemberId}, verifier_name = ${adminName}, verifier_role = ${adminRole}, verified_by = ${adminName}, reject_reason = NULL, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => { });
+        await sql`UPDATE user_kyc_profiles SET status = 'Approved', reviewed_at = NOW(), reviewed_by_user_id = ${adminId}, reviewer_member_id = ${adminMemberId}, reviewer_name = ${adminName}, reviewer_role = ${adminRole}, reject_reason = NULL, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => { });
+        await sql`UPDATE customer_enrollment_submissions SET application_status = 'Approved', approved_by_user_id = ${adminId}, approved_by_member_id = ${adminMemberId}, approved_by_name = ${adminName}, approved_by_role = ${adminRole}, approved_at = NOW(), verified_by = ${adminName}, reject_reason = NULL, updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}`.catch(() => { });
       } else {
-        await sql`UPDATE user_documents SET review_status = 'Approved', is_verified = TRUE, verified_at = NOW(), is_active = TRUE, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
-        await sql`UPDATE user_kyc_profiles SET status = 'Approved', reviewed_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
-        await sql`UPDATE customer_enrollment_submissions SET application_status = 'Approved', updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}`.catch(() => {});
+        await sql`UPDATE user_documents SET review_status = 'Approved', is_verified = TRUE, verified_at = NOW(), is_active = TRUE, updated_at = NOW() WHERE user_id = ${uid}`.catch(() => { });
+        await sql`UPDATE user_kyc_profiles SET status = 'Approved', reviewed_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => { });
+        await sql`UPDATE customer_enrollment_submissions SET application_status = 'Approved', updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}`.catch(() => { });
       }
-      await sql`UPDATE associate_enrollment SET status = 'Approved', is_verified = TRUE, updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email) = LOWER(${user.email || ''}) OR contact_no_1 = ${user.mobile_no || ''}`.catch(() => {});
-      await sql`UPDATE team_members SET status = 'active', updated_at = NOW() WHERE user_id = ${uid} OR (mobile_no IS NOT NULL AND ${user.mobile_no || ''} != '' AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(${user.mobile_no || ''}, '\\D', '', 'g'), 10))`.catch(() => {});
+      await sql`UPDATE associate_enrollment SET status = 'Approved', is_verified = TRUE, updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email) = LOWER(${user.email || ''}) OR contact_no_1 = ${user.mobile_no || ''}`.catch(() => { });
+      await sql`UPDATE team_members SET status = 'active', updated_at = NOW() WHERE user_id = ${uid} OR (mobile_no IS NOT NULL AND ${user.mobile_no || ''} != '' AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(${user.mobile_no || ''}, '\\D', '', 'g'), 10))`.catch(() => { });
 
       // For associate: insert tracker + MLM node
       if (user.user_type === "Associate") {
@@ -11036,7 +11181,7 @@ app.post("/api/admin/users/:id/approve",
                                 target_table, target_record_id, new_value)
         VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
                 'UserApproval', 'Approved', 'users', ${uid},
-                ${JSON.stringify({ member_id: memberId, note: verify_note || "" })})`.catch(() => {});
+                ${JSON.stringify({ member_id: memberId, note: verify_note || "" })})`.catch(() => { });
 
       return ok(res, { member_id: memberId, invitation_code: invCode },
         `User and KYC documents approved successfully. Member ID: ${memberId}`);
@@ -11065,13 +11210,13 @@ app.post("/api/admin/users/:id/reject",
 
       const hasAuditColsReject = await hasCustomerApprovalAuditColumns(sql);
       if (hasAuditColsReject) {
-        await sql`UPDATE user_documents SET review_status = 'Rejected', reject_reason = ${rejection_reason}, rejected_by_user_id = ${req.admin.admin_id}, rejected_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
-        await sql`UPDATE user_kyc_profiles SET status = 'Rejected', reject_reason = ${rejection_reason}, rejected_by_user_id = ${req.admin.admin_id}, rejected_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
-        await sql`UPDATE customer_enrollment_submissions SET application_status = 'Rejected', reject_reason = ${rejection_reason}, rejected_by_user_id = ${req.admin.admin_id}, rejected_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+        await sql`UPDATE user_documents SET review_status = 'Rejected', reject_reason = ${rejection_reason}, rejected_by_user_id = ${req.admin.admin_id}, rejected_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => { });
+        await sql`UPDATE user_kyc_profiles SET status = 'Rejected', reject_reason = ${rejection_reason}, rejected_by_user_id = ${req.admin.admin_id}, rejected_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => { });
+        await sql`UPDATE customer_enrollment_submissions SET application_status = 'Rejected', reject_reason = ${rejection_reason}, rejected_by_user_id = ${req.admin.admin_id}, rejected_at = NOW(), updated_at = NOW() WHERE user_id = ${uid}`.catch(() => { });
       } else {
-        await sql`UPDATE user_documents SET review_status = 'Rejected', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
-        await sql`UPDATE user_kyc_profiles SET status = 'Rejected', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
-        await sql`UPDATE customer_enrollment_submissions SET application_status = 'Rejected', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => {});
+        await sql`UPDATE user_documents SET review_status = 'Rejected', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => { });
+        await sql`UPDATE user_kyc_profiles SET status = 'Rejected', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => { });
+        await sql`UPDATE customer_enrollment_submissions SET application_status = 'Rejected', updated_at = NOW() WHERE user_id = ${uid}`.catch(() => { });
       }
 
       await sql`
@@ -11079,7 +11224,7 @@ app.post("/api/admin/users/:id/reject",
                                target_table, target_record_id, new_value)
         VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
                 'UserApproval', 'Rejected', 'users', ${uid},
-                ${JSON.stringify({ reason: rejection_reason, custom: rejection_custom })})`.catch(() => {});
+                ${JSON.stringify({ reason: rejection_reason, custom: rejection_custom })})`.catch(() => { });
 
       return ok(res, {}, "User rejected");
     } catch (e) {
@@ -11118,7 +11263,7 @@ app.post("/api/admin/users/:id/blacklist",
       await sql`UPDATE users SET account_status = 'Blacklisted', updated_at = NOW() WHERE user_id = ${req.params.id}`;
       await sql`
         INSERT INTO blacklist_registry (user_id, blacklisted_by_admin_id, blacklist_reason)
-        VALUES (${req.params.id}, ${req.admin.admin_id}, ${reason})`.catch(() => {});
+        VALUES (${req.params.id}, ${req.admin.admin_id}, ${reason})`.catch(() => { });
       return ok(res, {}, "User blacklisted");
     } catch (e) {
       console.error("[Blacklist User Error]", e);
@@ -11171,17 +11316,17 @@ async function ensurePlotAllocationSchema() {
           ALTER TABLE bookings ALTER COLUMN workflow_status TYPE VARCHAR(80) USING workflow_status::text;
         END IF;
       END $$;
-    `).catch(() => {});
-    await sql.unsafe(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(14,2) DEFAULT NULL; ALTER TABLE bookings ADD COLUMN IF NOT EXISTS area_unit VARCHAR(50) DEFAULT NULL; ALTER TABLE plots ADD COLUMN IF NOT EXISTS area_unit VARCHAR(50) DEFAULT 'Gaj';`).catch(() => {});
-    await sql`ALTER TABLE notification_log ALTER COLUMN channel TYPE VARCHAR(60) USING channel::text`.catch(() => {});
-    await sql`ALTER TABLE notification_log ADD COLUMN IF NOT EXISTS link VARCHAR(255)`.catch(() => {});
-    await sql`ALTER TABLE notification_log ADD COLUMN IF NOT EXISTS target_role VARCHAR(50)`.catch(() => {});
-    await sql`ALTER TABLE investor_notifications ADD COLUMN IF NOT EXISTS link VARCHAR(255)`.catch(() => {});
-    await sql`ALTER TYPE booking_status_enum ADD VALUE IF NOT EXISTS 'Allocated'`.catch(() => {});
-    await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'Full'`.catch(() => {});
-    await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'FullPayment'`.catch(() => {});
-    await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'InApp'`.catch(() => {});
-    await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'inapp'`.catch(() => {});
+    `).catch(() => { });
+    await sql.unsafe(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(14,2) DEFAULT NULL; ALTER TABLE bookings ADD COLUMN IF NOT EXISTS area_unit VARCHAR(50) DEFAULT NULL; ALTER TABLE plots ADD COLUMN IF NOT EXISTS area_unit VARCHAR(50) DEFAULT 'Gaj';`).catch(() => { });
+    await sql`ALTER TABLE notification_log ALTER COLUMN channel TYPE VARCHAR(60) USING channel::text`.catch(() => { });
+    await sql`ALTER TABLE notification_log ADD COLUMN IF NOT EXISTS link VARCHAR(255)`.catch(() => { });
+    await sql`ALTER TABLE notification_log ADD COLUMN IF NOT EXISTS target_role VARCHAR(50)`.catch(() => { });
+    await sql`ALTER TABLE investor_notifications ADD COLUMN IF NOT EXISTS link VARCHAR(255)`.catch(() => { });
+    await sql`ALTER TYPE booking_status_enum ADD VALUE IF NOT EXISTS 'Allocated'`.catch(() => { });
+    await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'Full'`.catch(() => { });
+    await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'FullPayment'`.catch(() => { });
+    await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'InApp'`.catch(() => { });
+    await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'inapp'`.catch(() => { });
 
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS site_id INTEGER`;
@@ -11212,7 +11357,7 @@ app.get("/api/admin/bookings",
   role("SuperAdmin", "SiteManager", "FinanceManager"),
   async (req, res) => {
     try {
-      await ensurePlotAllocationSchema().catch(() => {});
+      await ensurePlotAllocationSchema().catch(() => { });
       const { status, site_id, payment_status, from_date, to_date, search, page = 1, limit = 20 } = req.query;
       const safeLimit = Math.min(Number(limit) || 20, 100);
       const offset = ((Number(page) || 1) - 1) * safeLimit;
@@ -11358,7 +11503,7 @@ app.get("/api/admin/bookings/:id",
   role("SuperAdmin", "SiteManager", "FinanceManager"),
   async (req, res) => {
     try {
-      await ensurePlotAllocationSchema().catch(() => {});
+      await ensurePlotAllocationSchema().catch(() => { });
       const [booking] = await sql`
         SELECT b.*,
                json_build_object(
@@ -11399,34 +11544,34 @@ app.get("/api/admin/bookings/:id",
       let payment_proofs = [];
       try {
         payment_proofs = await sql`SELECT * FROM booking_payment_proofs WHERE booking_id = ${req.params.id}`;
-      } catch (_) {}
+      } catch (_) { }
 
       let emi_schedule = [];
       try {
         emi_schedule = await sql`SELECT emi_id, installment_no, due_date, emi_amount, late_fee_amount, total_due, paid_amount, paid_date, emi_status FROM emi_schedules WHERE booking_id = ${req.params.id} ORDER BY installment_no`;
-      } catch (_) {}
+      } catch (_) { }
 
       let history = [];
       try {
         history = await sql`SELECT event_type, event_note, plot_status_at_time, created_at FROM plot_booking_history WHERE booking_id = ${req.params.id} ORDER BY created_at ASC`;
-      } catch (_) {}
+      } catch (_) { }
 
       let appointment = null;
       try {
-        const [ap] = await sql`SELECT * FROM booking_appointments WHERE booking_id = ${req.params.id} LIMIT 1`;
-        appointment = ap || null;
-      } catch (_) {}
+const [ap] = await sql`SELECT * FROM booking_appointments WHERE booking_id = ${req.params.id} LIMIT 1`;
+appointment = ap || null;
+      } catch (_) { }
 
-      let registry = null;
-      try {
-        const [reg] = await sql`SELECT * FROM registry_records WHERE booking_id = ${req.params.id} LIMIT 1`;
-        registry = reg || null;
-      } catch (_) {}
+let registry = null;
+try {
+  const [reg] = await sql`SELECT * FROM registry_records WHERE booking_id = ${req.params.id} LIMIT 1`;
+  registry = reg || null;
+} catch (_) { }
 
-      let other_bookings_on_plot = [];
-      if (booking.plot_id) {
-        try {
-          other_bookings_on_plot = await sql`
+let other_bookings_on_plot = [];
+if (booking.plot_id) {
+  try {
+    other_bookings_on_plot = await sql`
             SELECT b.booking_id, b.booking_serial, b.booking_status, b.advance_amount, b.remaining_balance,
                    COALESCE(b.queue_position, 1) AS queue_position, COALESCE(b.refund_due, FALSE) AS refund_due,
                    b.refund_reason, COALESCE(b.booking_date, b.created_at) AS booking_date,
@@ -11435,47 +11580,47 @@ app.get("/api/admin/bookings/:id",
             LEFT JOIN users u ON u.user_id = b.user_id
             WHERE b.plot_id = ${booking.plot_id} AND b.booking_id != ${booking.booking_id}
             ORDER BY b.queue_position ASC, b.created_at ASC`;
-        } catch (_) {}
-      }
+  } catch (_) { }
+}
 
-      let booked_by_user = null;
-      let sold_by_user = null;
-      let associate_user = null;
-      try {
-        if (booking.booked_by_user_id) {
-          const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${booking.booked_by_user_id}`;
-          booked_by_user = u || null;
-        }
-        if (booking.sold_by_user_id) {
-          const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${booking.sold_by_user_id}`;
-          sold_by_user = u || null;
-        }
-        if (booking.associate_user_id) {
-          const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${booking.associate_user_id}`;
-          associate_user = u || null;
-        }
-      } catch (_) {}
+let booked_by_user = null;
+let sold_by_user = null;
+let associate_user = null;
+try {
+  if (booking.booked_by_user_id) {
+    const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${booking.booked_by_user_id}`;
+    booked_by_user = u || null;
+  }
+  if (booking.sold_by_user_id) {
+    const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${booking.sold_by_user_id}`;
+    sold_by_user = u || null;
+  }
+  if (booking.associate_user_id) {
+    const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${booking.associate_user_id}`;
+    associate_user = u || null;
+  }
+} catch (_) { }
 
-      return ok(res, {
-        ...booking,
-        booked_by: booking.booked_by_user_id,
-        sold_by: booking.sold_by_user_id,
-        associate: booking.associate_user_id,
-        booked_by_user,
-        sold_by_user,
-        associate_user,
-        payment_proofs,
-        emi_schedule,
-        history,
-        appointment,
-        payments,
-        registry,
-        other_bookings_on_plot
-      });
+return ok(res, {
+  ...booking,
+  booked_by: booking.booked_by_user_id,
+  sold_by: booking.sold_by_user_id,
+  associate: booking.associate_user_id,
+  booked_by_user,
+  sold_by_user,
+  associate_user,
+  payment_proofs,
+  emi_schedule,
+  history,
+  appointment,
+  payments,
+  registry,
+  other_bookings_on_plot
+});
     } catch (e) {
-      console.error("[Admin Booking Detail Error]:", e);
-      return err(res, e.message);
-    }
+  console.error("[Admin Booking Detail Error]:", e);
+  return err(res, e.message);
+}
   }
 );
 
@@ -11553,7 +11698,7 @@ app.post("/api/admin/bookings/:id/confirm",
           await sql`
             INSERT INTO plot_booking_history (plot_id, booking_id, user_id, event_type, event_note, triggered_by_admin, plot_status_at_time, created_at)
             VALUES (${booking.plot_id}, ${other.booking_id}, ${other.user_id}, 'BookingWaitlisted', 'Plot allotted to another booking. Placed on waitlist.', ${req.admin.admin_id}, 'Booked', NOW())`;
-        } catch (_) {}
+        } catch (_) { }
 
         dispatchBookingNotification('booking_waitlisted', {
           userId: other.user_id,
@@ -12165,11 +12310,11 @@ app.post("/api/admin/sites/:siteId/detected-plots",
           COALESCE((SELECT MAX(plot_id) FROM plots), 0) + 1,
           false
         );
-      `.catch(() => {});
-      await sql`ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(50) NOT NULL DEFAULT 'PLOT'`.catch(() => {});
-      await sql`ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(50)`.catch(() => {});
-      await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type`.catch(() => {});
-      await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check`.catch(() => {});
+      `.catch(() => { });
+      await sql`ALTER TABLE plots ADD COLUMN IF NOT EXISTS unit_type VARCHAR(50) NOT NULL DEFAULT 'PLOT'`.catch(() => { });
+      await sql`ALTER TABLE plots ALTER COLUMN unit_type TYPE VARCHAR(50)`.catch(() => { });
+      await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS chk_plots_unit_type`.catch(() => { });
+      await sql`ALTER TABLE plots DROP CONSTRAINT IF EXISTS plots_unit_type_check`.catch(() => { });
       await sql.unsafe(`
         DO $$
         DECLARE
@@ -12183,7 +12328,7 @@ app.post("/api/admin/sites/:siteId/detected-plots",
                 EXECUTE 'ALTER TABLE plots DROP CONSTRAINT IF EXISTS ' || quote_ident(r.constraint_name) || ' CASCADE';
             END LOOP;
         END $$;
-      `).catch(() => {});
+      `).catch(() => { });
 
       const prefix = String(site.site_prefix || sitePrefixFromName(site.site_name)).toUpperCase();
       let created = 0;
@@ -12201,7 +12346,7 @@ app.post("/api/admin/sites/:siteId/detected-plots",
         let [plot] = item.plot_id
           ? await sql`SELECT plot_id, site_id, plot_number, unit_type, is_active FROM plots WHERE plot_id = ${item.plot_id} AND site_id = ${req.params.siteId}`
           : await sql`SELECT plot_id, site_id, plot_number, unit_type, is_active FROM plots WHERE site_id = ${req.params.siteId} AND plot_number = ${requestedNumber}`;
-        
+
         if (!plot) {
           try {
             [plot] = await sql`
@@ -12224,7 +12369,7 @@ app.post("/api/admin/sites/:siteId/detected-plots",
                   COALESCE((SELECT MAX(plot_id) FROM plots), 0) + 1,
                   false
                 );
-              `.catch(() => {});
+              `.catch(() => { });
               [plot] = await sql`
                 INSERT INTO plots (
                   site_id, plot_number, unit_type, plot_area, plot_category, base_price,
@@ -12275,7 +12420,7 @@ app.post("/api/admin/sites/:siteId/detected-plots",
         UPDATE sites
         SET total_plots = (SELECT COUNT(*) FROM plots WHERE site_id = ${req.params.siteId} AND is_active = TRUE)
         WHERE site_id = ${req.params.siteId}
-      `.catch(() => {});
+      `.catch(() => { });
       await logAdminAudit(req, "SiteManagement", "SaveDetectedPlots", "sites", req.params.siteId, sql.json({ created, updated }));
       return ok(res, { created, updated, plots: saved }, "Detected plot polygons saved.");
     } catch (e) {
@@ -12793,7 +12938,7 @@ app.post(["/api/admin/sites", "/api/admin/new-site-area"],
           COALESCE((SELECT MAX(site_id) FROM sites), 0) + 1,
           false
         );
-      `.catch(() => {});
+      `.catch(() => { });
 
       let site;
       try {
@@ -12824,7 +12969,7 @@ app.post(["/api/admin/sites", "/api/admin/new-site-area"],
               COALESCE((SELECT MAX(site_id) FROM sites), 0) + 1,
               false
             );
-          `.catch(() => {});
+          `.catch(() => { });
 
           const [retried] = await sql`
             INSERT INTO sites (
@@ -13038,9 +13183,9 @@ const handleSiteMapUpload = async (req, res) => {
     await sql`
       UPDATE sites SET map_image_url = ${saved.url}, map_public_id = ${null}, updated_at = NOW()
       WHERE site_id = ${siteId}`;
-    
+
     if (oldSite.map_image_url) {
-      await deleteFileFromStorage(oldSite.map_image_url, oldSite.map_public_id).catch(() => {});
+      await deleteFileFromStorage(oldSite.map_image_url, oldSite.map_public_id).catch(() => { });
     }
 
     return ok(res, { map_image_url: saved.url, url: saved.url, site_id: siteId }, "Map image uploaded successfully");
@@ -13076,9 +13221,9 @@ const handlePropertyImageUpload = async (req, res) => {
     await sql`
       UPDATE sites SET property_image_url = ${saved.url}, property_image_public_id = ${null}, updated_at = NOW()
       WHERE site_id = ${siteId}`;
-    
+
     if (oldSite.property_image_url) {
-      await deleteFileFromStorage(oldSite.property_image_url, oldSite.property_image_public_id).catch(() => {});
+      await deleteFileFromStorage(oldSite.property_image_url, oldSite.property_image_public_id).catch(() => { });
     }
 
     return ok(res, { property_image_url: saved.url, url: saved.url, site_id: siteId }, "Property image uploaded successfully");
@@ -13183,7 +13328,7 @@ app.post("/api/admin/sites/:id/plots",
           COALESCE((SELECT MAX(plot_id) FROM plots), 0) + 1,
           false
         );
-      `.catch(() => {});
+      `.catch(() => { });
 
       const [plot] = await sql`
         INSERT INTO plots (site_id, plot_number, plot_area, plot_category,
@@ -13222,7 +13367,7 @@ app.post("/api/admin/plots",
           COALESCE((SELECT MAX(plot_id) FROM plots), 0) + 1,
           false
         );
-      `.catch(() => {});
+      `.catch(() => { });
 
       const [plot] = await sql`
         INSERT INTO plots (site_id, plot_number, plot_area, plot_category,
@@ -13288,7 +13433,7 @@ app.put("/api/admin/plots/:id",
             ${areaGaj > 0 ? (Number(base_price) / (areaGaj * 9)) : null},
             ${req.admin.admin_id}, NOW(), 'MANUAL_EDIT'
           )
-        `.catch(() => {});
+        `.catch(() => { });
       }
 
       if (plot_status && plot_status !== oldPlot.plot_status) {
@@ -13414,13 +13559,13 @@ app.delete("/api/admin/plots/:id",
       await sql`
         INSERT INTO plot_polygon_history (plot_id, old_coordinates, new_coordinates, changed_by_admin_id, change_reason)
         VALUES (${req.params.id}, ${sql.json(existingCoords?.coordinates || [])}, '[]'::jsonb, ${req.admin.admin_id}, ${req.body?.reason || 'Soft deleted by admin in Plot Detector Tool'})
-      `.catch(() => {});
+      `.catch(() => { });
 
       await sql`
         UPDATE sites
         SET total_plots = (SELECT COUNT(*) FROM plots WHERE site_id = ${plot.site_id} AND is_active = TRUE)
         WHERE site_id = ${plot.site_id}
-      `.catch(() => {});
+      `.catch(() => { });
 
       await logAdminAudit(req, "PlotManagement", "DeletePlot", "plots", req.params.id, sql.json({ site_id: plot.site_id, plot_number: plot.plot_number }));
       return ok(res, { plot_id: Number(req.params.id), plot_number: plot.plot_number }, "Unit deleted safely");
@@ -13739,7 +13884,7 @@ app.get("/api/admin/associates/:id",
           sql`SELECT * FROM associate_payout_requests WHERE associate_user_id = ${uid} ORDER BY requested_at DESC LIMIT 50`.catch(() => []),
           sql`SELECT * FROM associate_status_history WHERE associate_user_id = ${uid} ORDER BY changed_at DESC LIMIT 50`.catch(() => []),
         ]);
-      } catch {}
+      } catch { }
 
       profile.team_size = teamMembers.length;
       profile.team_active_count = teamMembers.filter(m => ['approved', 'active', 'Active', 'Approved'].includes(m.status) || ['Active', 'Approved'].includes(m.account_status)).length;
@@ -13757,14 +13902,14 @@ app.post("/api/admin/impersonate/:user_id", verifyAdminToken, role("SuperAdmin",
   try {
     const { user_id } = req.params;
     let [user] = await sql`SELECT user_id, full_name, email, user_type, member_id, account_status, mobile_no FROM users WHERE user_id = ${user_id}`;
-    
+
     // Fallback: If not found in users, check team_members table (read-only query)
     if (!user) {
       const isNum = !isNaN(Number(user_id));
       const [tm] = isNum
         ? await sql`SELECT * FROM team_members WHERE (id = ${Number(user_id)} OR user_id = ${Number(user_id)}) AND LOWER(status) IN ('approved', 'active') LIMIT 1`
         : await sql`SELECT * FROM team_members WHERE team_member_uid = ${String(user_id)} AND LOWER(status) IN ('approved', 'active') LIMIT 1`;
-      
+
       if (tm && tm.user_id) {
         [user] = await sql`SELECT user_id, full_name, email, user_type, member_id, account_status, mobile_no FROM users WHERE user_id = ${tm.user_id}`;
       }
@@ -13854,7 +13999,7 @@ app.post("/api/admin/fix-sequence", verifyAdminToken, role("SuperAdmin", "Admin"
       ORDER BY registered_at ASC`;
     let seq = 1;
     let changed = 0;
-    
+
     // First pass: prevent unique constraint collisions by temp renaming if needed
     for (const u of users) {
       const newCode = "MMR" + String(seq).padStart(5, "0");
@@ -13863,7 +14008,7 @@ app.post("/api/admin/fix-sequence", verifyAdminToken, role("SuperAdmin", "Admin"
       }
       seq++;
     }
-    
+
     seq = 1;
     // Second pass: apply correct codes
     for (const u of users) {
@@ -13874,7 +14019,7 @@ app.post("/api/admin/fix-sequence", verifyAdminToken, role("SuperAdmin", "Admin"
       }
       seq++;
     }
-    
+
     return ok(res, { checked: users.length, changed }, "Successfully re-sequenced associates");
   } catch (e) {
     return err(res, "Failed to resequence: " + e.message);
@@ -13887,12 +14032,12 @@ app.get("/api/admin/associates",
   async (req, res) => {
     try {
       const { search = "", status = "", account_status = "", rank = "", sponsor = "", page = 1, limit, pageSize } = req.query;
-      
+
       const filterStatus = String(status || account_status || "").trim();
       const pageNumber = Math.max(Number(page) || 1, 1);
       const actualLimit = Math.min(Math.max(Number(limit) || Number(pageSize) || 20, 1), 10000);
       const searchTerm = `%${String(search || "").trim()}%`;
-      
+
       let rows = [];
       let total = 0;
 
@@ -13988,7 +14133,7 @@ app.get("/api/admin/associates",
           ORDER BY u.registered_at DESC NULLS LAST, u.user_id DESC
           LIMIT ${actualLimit} OFFSET ${(pageNumber - 1) * actualLimit}`;
       }
-        
+
       total = Number(rows[0]?.total_count || 0);
       const items = rows.map(({ total_count, ...row }) => row);
       return ok(res, { items, users: items, associates: items, total, totalRecords: total, page: pageNumber, pageSize: actualLimit, limit: actualLimit });
@@ -14061,8 +14206,8 @@ app.post("/api/admin/system/reset-associate-customer-data",
 
       await sql`DELETE FROM users WHERE user_id > 1`;
       await ensureAdminUserAccount();
-      await sql`SELECT setval('users_user_id_seq', (SELECT COALESCE(MAX(user_id), 1) FROM users))`.catch(() => {});
-      await sql`SELECT setval(pg_get_serial_sequence('associate_enrollment', 'id'), 1, false)`.catch(() => {});
+      await sql`SELECT setval('users_user_id_seq', (SELECT COALESCE(MAX(user_id), 1) FROM users))`.catch(() => { });
+      await sql`SELECT setval(pg_get_serial_sequence('associate_enrollment', 'id'), 1, false)`.catch(() => { });
 
       return ok(res, { success: true }, "Associate and Customer data reset successfully. Ready for fresh registrations.");
     } catch (e) {
@@ -14076,8 +14221,8 @@ app.get("/api/admin/associates/:id/network-tree",
   role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"),
   async (req, res) => {
     try {
-      await requireMlmSchema().catch(() => {});
-      await syncMlmTreeAndReferrals().catch(() => {});
+      await requireMlmSchema().catch(() => { });
+      await syncMlmTreeAndReferrals().catch(() => { });
       const rows = await sql`
         SELECT u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id,
                u.account_status AS status, COALESCE(r.rank_name, 'Associate') AS rank,
@@ -14105,7 +14250,7 @@ app.get("/api/admin/associates/:id/network-tree",
 
 const changeAssociateStatus = async (req, res, newStatus) => {
   try {
-    await requireMlmSchema().catch(() => {});
+    await requireMlmSchema().catch(() => { });
     const { reason = null, duration_days = null } = req.body || {};
     const [old] = await sql`
       SELECT account_status 
@@ -14126,7 +14271,7 @@ const changeAssociateStatus = async (req, res, newStatus) => {
           VALUES (${req.params.id}, ${req.admin.admin_id}, ${reason || 'Blacklisted by admin'})`;
       }
       await logAdminAudit(req, "MLM", `Associate${newStatus}`, "users", req.params.id, sql.json({ reason, duration_days }));
-    } catch {}
+    } catch { }
     return ok(res, {}, `Associate marked ${newStatus}`);
   } catch (e) {
     return err(res, e.message);
@@ -14177,8 +14322,8 @@ app.get("/api/admin/team-members",
   role("SuperAdmin", "Admin", "FinanceManager", "SiteManager", "SupportStaff"),
   async (req, res) => {
     try {
-      await ensureTeamMembersTable().catch(() => {});
-      await syncExistingTeamMembersFromUsers().catch(() => {});
+      await ensureTeamMembersTable().catch(() => { });
+      await syncExistingTeamMembersFromUsers().catch(() => { });
       const { status = "", associate_id = "", search = "", page = 1, limit = 20, pageSize = 20 } = req.query;
       const pageNumber = Math.max(Number(page) || 1, 1);
       const actualLimit = Math.min(Math.max(Number(limit) || Number(pageSize) || 20, 1), 10000);
@@ -14890,7 +15035,7 @@ app.put("/api/admin/team-members/:id",
       const mobileNo = (b.mobile_no || b.mobileNo || existing.mobile_no || "").trim();
       const emailId = (b.email_id || b.emailId || b.email || existing.email_id || "").trim().toLowerCase();
       const fullAddress = (b.full_address || b.fullAddress || b.address || existing.full_address || "").trim();
-      
+
       const nomineeName = (b.nominee_name || b.nomineeName || existing.nominee_name || "").trim();
       const nomineeRelation = (b.nominee_relation || b.nomineeRelation || existing.nominee_relation || "").trim();
       const nomineeAgeDob = (b.nominee_age_dob || b.nomineeAgeDob || existing.nominee_age_dob || "").trim();
@@ -14951,7 +15096,7 @@ app.put("/api/admin/team-members/:id",
         if (fullAddress) {
           const updatedAddr = await sql`UPDATE user_addresses SET address_line1 = ${fullAddress}, updated_at = NOW() WHERE user_id = ${existing.user_id} AND address_type = 'Permanent' RETURNING id`.catch(() => []);
           if (!updatedAddr || updatedAddr.length === 0) {
-            await sql`INSERT INTO user_addresses (user_id, address_type, address_line1, city, state, pin_code, created_at, updated_at) VALUES (${existing.user_id}, 'Permanent', ${fullAddress}, 'Lucknow', 'Uttar Pradesh', '226001', NOW(), NOW())`.catch(() => {});
+            await sql`INSERT INTO user_addresses (user_id, address_type, address_line1, city, state, pin_code, created_at, updated_at) VALUES (${existing.user_id}, 'Permanent', ${fullAddress}, 'Lucknow', 'Uttar Pradesh', '226001', NOW(), NOW())`.catch(() => { });
           }
         }
 
@@ -14970,7 +15115,7 @@ app.put("/api/admin/team-members/:id",
             await sql`
               INSERT INTO user_bank_details (user_id, bank_name, branch_name, account_number, ifsc_code, created_at, updated_at)
               VALUES (${existing.user_id}, ${bankName || null}, ${branchName || null}, ${accountNo || null}, ${ifscCode || null}, NOW(), NOW())
-            `.catch(() => {});
+            `.catch(() => { });
           }
         }
 
@@ -14988,7 +15133,7 @@ app.put("/api/admin/team-members/:id",
             await sql`
               INSERT INTO user_nominees (user_id, nominee_name, relationship, contact_number, created_at, updated_at)
               VALUES (${existing.user_id}, ${nomineeName}, ${nomineeRelation || null}, ${nomineeContactNo || null}, NOW(), NOW())
-            `.catch(() => {});
+            `.catch(() => { });
           }
         }
       }
@@ -15051,7 +15196,7 @@ app.delete("/api/admin/team-members/:id",
       await sql`DELETE FROM team_members WHERE id = ${existing.id}`;
 
       if (existing.user_id) {
-        await sql`UPDATE users SET account_status = 'Inactive', is_active = false WHERE user_id = ${existing.user_id}`.catch(() => {});
+        await sql`UPDATE users SET account_status = 'Inactive', is_active = false WHERE user_id = ${existing.user_id}`.catch(() => { });
       }
 
       await logAdminAudit(req, "MLM", "DeleteTeamMember", "team_members", existing.id, sql.json({ team_member_uid: existing.team_member_uid, full_name: existing.full_name }));
@@ -16021,8 +16166,8 @@ app.get("/api/admin/dashboard",
     const startedAt = Date.now();
     console.log("[Dashboard API Start] /api/admin/dashboard");
     try {
-      await ensureInquirySchema().catch(() => {});
-      await requireMlmSchema().catch(() => {});
+      await ensureInquirySchema().catch(() => { });
+      await requireMlmSchema().catch(() => { });
 
       // 1. Stats with bulletproof safe queries
       let rawStats = {};
@@ -17165,15 +17310,15 @@ if (shouldStartServer) {
   if (process.env.NODE_ENV !== "test" && process.env.DB_BACKUP_SCHEDULER_DISABLED !== "true") {
     try {
       startBackupScheduler({
-      logAudit: async (action, backup) => {
-        try {
-          await sql`
+        logAudit: async (action, backup) => {
+          try {
+            await sql`
             INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
             VALUES ('System', null, 'Automatic Backup Scheduler', 'DatabaseBackup', ${action},
                     'database_backup_files', ${backup?.id || null}, ${JSON.stringify(backup || {})})`;
-        } catch { }
-      },
-    });
+          } catch { }
+        },
+      });
     } catch (schedErr) {
       console.warn("[MMR API] Backup scheduler init warning:", schedErr.message);
     }
@@ -17201,13 +17346,13 @@ if (shouldStartServer) {
         requireMlmSchema().catch((e) => console.warn("[MMR API] MLM schema warning:", e.message)),
         requireCommissionEngineSchema().catch((e) => console.warn("[MMR API] Commission schema warning:", e.message)),
         ensureAdminUserAccount().catch((e) => console.warn("[MMR API] Admin account ensure warning:", e.message)),
-        sql`ALTER TABLE user_documents ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`.catch(() => {}),
+        sql`ALTER TABLE user_documents ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`.catch(() => { }),
         (async () => {
           try {
-            await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE`.catch(() => {});
-            await sql`ALTER TABLE users ALTER COLUMN is_verified SET DEFAULT FALSE`.catch(() => {});
-            await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS sponsor_id INTEGER`.catch(() => {});
-            await sql`UPDATE users SET sponsor_id = sponsor_user_id WHERE sponsor_id IS NULL AND sponsor_user_id IS NOT NULL`.catch(() => {});
+            await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE`.catch(() => { });
+            await sql`ALTER TABLE users ALTER COLUMN is_verified SET DEFAULT FALSE`.catch(() => { });
+            await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS sponsor_id INTEGER`.catch(() => { });
+            await sql`UPDATE users SET sponsor_id = sponsor_user_id WHERE sponsor_id IS NULL AND sponsor_user_id IS NOT NULL`.catch(() => { });
             // 1. Reset unverified associates (who do NOT have an approved enrollment in associate_enrollment)
             await sql`
               UPDATE users
@@ -17255,7 +17400,7 @@ if (shouldStartServer) {
           } catch (verErr) {
             console.warn("[MMR API] is_verified column ensure warning:", verErr.message);
           }
-        })().catch(() => {}),
+        })().catch(() => { }),
         (async () => {
           try {
             await sql.unsafe(`
@@ -17277,7 +17422,7 @@ if (shouldStartServer) {
               DO $$ BEGIN
                 ALTER TYPE user_type_enum ADD VALUE IF NOT EXISTS 'TEAM_MEMBER';
               EXCEPTION WHEN duplicate_object THEN null; END $$;
-            `).catch(() => {});
+            `).catch(() => { });
 
             await sql`
               UPDATE users
@@ -17303,12 +17448,13 @@ if (shouldStartServer) {
           } catch (syncErr) {
             console.warn("[MMR API] User types sync warning:", syncErr.message);
           }
-        })().catch(() => {}),
+        })().catch(() => { }),
         ensureHomeExperienceSchema().catch(() => { }),
         ensureHomeSlidersSchema().catch(() => { }),
         ensureSiteHtmlMapSchema().catch(() => { }),
         ensureAnalyticsSchema().catch(() => { }),
         ensureReceiptsTable().catch((e) => console.warn("[MMR API] Receipts schema warning:", e.message)),
+        deduplicateNotificationsKeepOnePerCategory().catch((e) => console.warn("[MMR API] Notification cleanup warning:", e.message)),
       ]).catch(() => { });
     } catch (error) {
       console.warn("[MMR API] Schema initialization warning:", error.message);

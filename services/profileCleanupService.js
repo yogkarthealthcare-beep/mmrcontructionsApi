@@ -15,9 +15,13 @@ import path from "path";
  */
 async function safeTxExec(tx, label, fn) {
     try {
-        await tx.savepoint(async (sp) => {
-            await fn(sp);
-        });
+        if (typeof tx?.savepoint === 'function') {
+            await tx.savepoint(async (sp) => {
+                await fn(sp);
+            });
+        } else {
+            await fn(tx);
+        }
     } catch (err) {
         console.warn(`[ProfileCleanupService] Safe cleanup skipped for [${label}]:`, err.message);
     }
@@ -407,26 +411,30 @@ export async function deleteCustomerProfile(customerId, adminActor = { admin_id:
 
     // 2. Locate Enrollment Submissions
     let submissions = [];
-    if (isUuid) {
-        submissions = await sql`
-            SELECT id, user_id, application_no, applicant_name,
-                   photo_first_applicant_url, photo_co_applicant_url,
-                   signature_sole_first_applicant_url, signature_co_applicant_url,
-                   signature_authorized_signatory_url
-            FROM customer_enrollment_submissions
-            WHERE id = ${rawId}::uuid
-        `;
-    } else {
-        submissions = await sql`
-            SELECT id, user_id, application_no, applicant_name,
-                   photo_first_applicant_url, photo_co_applicant_url,
-                   signature_sole_first_applicant_url, signature_co_applicant_url,
-                   signature_authorized_signatory_url
-            FROM customer_enrollment_submissions
-            WHERE (${uid > 0} AND user_id = ${uid})
-               OR (${Boolean(mobile)} AND mobile_1 = ${mobile})
-               OR (${Boolean(pan)} AND UPPER(pan_no) = ${pan})
-        `;
+    try {
+        if (isUuid) {
+            submissions = await sql`
+                SELECT id, user_id, application_no, applicant_name,
+                       photo_first_applicant_url, photo_co_applicant_url,
+                       signature_sole_first_applicant_url, signature_co_applicant_url,
+                       signature_authorized_signatory_url
+                FROM customer_enrollment_submissions
+                WHERE id = ${rawId}::uuid
+            `;
+        } else {
+            submissions = await sql`
+                SELECT id, user_id, application_no, applicant_name,
+                       photo_first_applicant_url, photo_co_applicant_url,
+                       signature_sole_first_applicant_url, signature_co_applicant_url,
+                       signature_authorized_signatory_url
+                FROM customer_enrollment_submissions
+                WHERE (${uid > 0} AND user_id = ${uid})
+                   OR (${Boolean(mobile)} AND mobile_1 = ${mobile})
+                   OR (${Boolean(pan)} AND UPPER(pan_no) = ${pan})
+            `;
+        }
+    } catch (subErr) {
+        console.warn("[ProfileCleanupService] customer_enrollment_submissions lookup warning:", subErr.message);
     }
 
     if (!targetUser && (!submissions || submissions.length === 0)) {
