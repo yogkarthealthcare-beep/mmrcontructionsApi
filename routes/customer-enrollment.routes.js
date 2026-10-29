@@ -663,7 +663,7 @@ router.get("/customer-enrollment/sponsor-lookup/:code", authUser, async (req, re
                NULLIF(TRIM(ces.application_no), ''),
                CASE 
                  WHEN tm.id IS NOT NULL THEN ('MMR-TM-' || LPAD(COALESCE(tm.slot_number, u.user_id)::text, 4, '0'))
-                 WHEN LOWER(u.user_type::TEXT) = 'associate' THEN ('MMR-ASC-' || LPAD(u.user_id::text, 5, '0'))
+                 WHEN LOWER(u.user_type::TEXT) = 'associate' THEN ('MMR-ASC-' || LPAD(u.user_id::text, 4, '0'))
                  WHEN LOWER(u.user_type::TEXT) = 'customer' THEN ('MMR-CUS-' || LPAD(u.user_id::text, 5, '0'))
                  ELSE ('MMR-' || LPAD(u.user_id::text, 5, '0'))
                END

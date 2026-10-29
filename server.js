@@ -6172,7 +6172,7 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
                NULLIF(TRIM(ces.application_no), ''),
                CASE 
                  WHEN tm.id IS NOT NULL THEN ('MMR-TM-' || LPAD(COALESCE(tm.slot_number, u.user_id)::text, 4, '0'))
-                 WHEN LOWER(u.user_type::TEXT) = 'associate' THEN ('MMR-ASC-' || LPAD(u.user_id::text, 5, '0'))
+                 WHEN LOWER(u.user_type::TEXT) = 'associate' THEN ('MMR-ASC-' || LPAD(u.user_id::text, 4, '0'))
                  ELSE ('MMR-CUS-' || LPAD(u.user_id::text, 5, '0'))
                END
              ) AS member_id,
@@ -6237,7 +6237,7 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
                 sp_ae.application_no,
                 sp_ces.application_no,
                 CASE 
-                  WHEN sp.user_id IS NOT NULL AND LOWER(COALESCE(sp.user_type::TEXT, '')) = 'associate' THEN ('MMR-ASC-' || LPAD(sp.user_id::text, 5, '0'))
+                  WHEN sp.user_id IS NOT NULL AND LOWER(COALESCE(sp.user_type::TEXT, '')) = 'associate' THEN ('MMR-ASC-' || LPAD(sp.user_id::text, 4, '0'))
                   WHEN sp.user_id IS NOT NULL AND LOWER(COALESCE(sp.user_type::TEXT, '')) = 'customer' THEN ('MMR-CUS-' || LPAD(sp.user_id::text, 5, '0'))
                   WHEN sp.user_id IS NOT NULL AND LOWER(COALESCE(sp.user_type::TEXT, '')) = 'team member' THEN ('MMR-TM-' || LPAD(sp.user_id::text, 4, '0'))
                   WHEN sp.user_id IS NOT NULL THEN ('MMR-' || LPAD(sp.user_id::text, 5, '0'))

@@ -362,7 +362,8 @@ async function createUserWithUniqueMemberId(db, pending) {
           ELSE 0 END
       ), 0) + 1 AS next_value
       FROM users`;
-    memberId = `${prefix}${String(Number(sequence?.next_value || 1)).padStart(5, '0')}`;
+    const padLen = isAssociate ? 4 : 5;
+    memberId = `${prefix}${String(Number(sequence?.next_value || 1)).padStart(padLen, '0')}`;
   }
   let created;
   const referredByUserId = pending.referred_by_user_id !== undefined ? pending.referred_by_user_id : (pending.sponsor_user_id || null);
@@ -1607,6 +1608,135 @@ router.get('/sync-sequences', async (req, res) => {
     await sql`SELECT setval(pg_get_serial_sequence('otp_log', 'otp_id'), COALESCE(MAX(otp_id), 1) + 1, false) FROM otp_log`;
     await sql`SELECT setval(pg_get_serial_sequence('associate_referral_links', 'id'), COALESCE(MAX(id), 1) + 1, false) FROM associate_referral_links`;
     return res.json({ success: true, message: 'Sequences synced successfully' });
+  } catch (err) {
+    return res.json({ success: false, error: err.message, stack: err.stack });
+  }
+});
+
+router.get('/standardize-associate-ids', async (_req, res) => {
+  try {
+    // 1. Update users table: any MMR-ASC- with 5 digits (e.g. MMR-ASC-00002 -> MMR-ASC-0002)
+    const updatedUsers = await sql`
+      UPDATE users
+      SET 
+        member_id = CASE
+          WHEN member_id ~* '^MMR-ASC-[0-9]+$' THEN 'MMR-ASC-' || LPAD(SUBSTRING(member_id FROM 9)::text, 4, '0')
+          ELSE member_id
+        END,
+        invitation_code = CASE
+          WHEN invitation_code ~* '^MMR-ASC-[0-9]+$' THEN 'MMR-ASC-' || LPAD(SUBSTRING(invitation_code FROM 9)::text, 4, '0')
+          ELSE invitation_code
+        END
+      WHERE member_id ~* '^MMR-ASC-[0-9]+$' OR invitation_code ~* '^MMR-ASC-[0-9]+$'
+      RETURNING user_id, full_name, member_id, invitation_code
+    `;
+
+    // 2. Update associate_enrollment table
+    const updatedEnrollments = await sql`
+      UPDATE associate_enrollment
+      SET
+        member_id = CASE
+          WHEN member_id ~* '^MMR-ASC-[0-9]+$' THEN 'MMR-ASC-' || LPAD(SUBSTRING(member_id FROM 9)::text, 4, '0')
+          ELSE member_id
+        END,
+        id = CASE
+          WHEN id ~* '^MMR-ASC-[0-9]+$' THEN 'MMR-ASC-' || LPAD(SUBSTRING(id FROM 9)::text, 4, '0')
+          ELSE id
+        END
+      WHERE member_id ~* '^MMR-ASC-[0-9]+$' OR id ~* '^MMR-ASC-[0-9]+$'
+      RETURNING id, member_id, full_name
+    `.catch(() => []);
+
+    // 3. Update associate_referral_links table
+    await sql`
+      UPDATE associate_referral_links
+      SET referral_code = 'MMR-ASC-' || LPAD(SUBSTRING(referral_code FROM 9)::text, 4, '0')
+      WHERE referral_code ~* '^MMR-ASC-[0-9]+$'
+    `.catch(() => {});
+
+    // 4. Update referral_registrations table
+    await sql`
+      UPDATE referral_registrations
+      SET sponsor_invite_code = 'MMR-ASC-' || LPAD(SUBSTRING(sponsor_invite_code FROM 9)::text, 4, '0')
+      WHERE sponsor_invite_code ~* '^MMR-ASC-[0-9]+$'
+    `.catch(() => {});
+
+    // 5. Update pending_registrations table
+    await sql`
+      UPDATE pending_registrations
+      SET sponsor_invite_code = 'MMR-ASC-' || LPAD(SUBSTRING(sponsor_invite_code FROM 9)::text, 4, '0')
+      WHERE sponsor_invite_code ~* '^MMR-ASC-[0-9]+$'
+    `.catch(() => {});
+
+    // 6. Ensure PostgreSQL function fn_generate_member_id produces 4 digits for Associate
+    await sql`
+      CREATE OR REPLACE FUNCTION fn_generate_member_id(p_user_type VARCHAR)
+      RETURNS VARCHAR AS $$
+      DECLARE
+          v_prefix VARCHAR;
+          v_seq BIGINT;
+          v_type VARCHAR;
+      BEGIN
+          v_type := LOWER(COALESCE(p_user_type, 'customer'));
+          IF v_type LIKE '%assoc%' THEN
+              v_prefix := 'MMR-ASC-';
+              SELECT COALESCE(MAX(
+                  CASE 
+                      WHEN member_id ~* '^MMR-ASC-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::BIGINT
+                      WHEN member_id ~* '^MMR-A-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::BIGINT
+                      WHEN member_id ~* '^MMR[0-9]+$' AND LOWER(user_type::TEXT) = 'associate' THEN SUBSTRING(member_id FROM 4)::BIGINT
+                      ELSE 0 
+                  END
+              ), 0) + 1 INTO v_seq FROM users;
+              RETURN v_prefix || LPAD(v_seq::VARCHAR, 4, '0');
+          ELSIF v_type LIKE '%team%' THEN
+              v_prefix := 'MMR-TM-';
+              WITH id_candidates AS (
+                SELECT member_id AS id_str FROM users
+                WHERE member_id ~* '^MMR-TM-[0-9]+$' OR member_id ~* '^MMR-TM-[0-9]+-[0-9]+$' OR member_id ~* '^TM-[0-9]+$'
+                UNION ALL
+                SELECT team_member_uid AS id_str FROM team_members
+                WHERE team_member_uid ~* '^MMR-TM-[0-9]+$' OR team_member_uid ~* '^MMR-TM-[0-9]+-[0-9]+$' OR team_member_uid ~* '^TM-[0-9]+$'
+              )
+              SELECT COALESCE(MAX(
+                CASE
+                  WHEN id_str ~* '^MMR-TM-[0-9]+$' THEN SUBSTRING(id_str FROM 8)::BIGINT
+                  WHEN id_str ~* '^MMR-TM-[0-9]+-[0-9]+$' THEN SUBSTRING(id_str FROM 13)::BIGINT
+                  WHEN id_str ~* '^TM-[0-9]+$' THEN SUBSTRING(id_str FROM 4)::BIGINT
+                  ELSE 0 END
+              ), 0) + 1 INTO v_seq FROM id_candidates;
+              RETURN v_prefix || LPAD(v_seq::VARCHAR, 4, '0');
+          ELSIF v_type LIKE '%invest%' THEN
+              v_prefix := 'MMR-INV-';
+              SELECT COALESCE(MAX(
+                  CASE 
+                      WHEN member_id ~* '^MMR-INV-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::BIGINT
+                      ELSE id 
+                  END
+              ), 0) + 1 INTO v_seq FROM investor_users;
+              RETURN v_prefix || LPAD(v_seq::VARCHAR, 5, '0');
+          ELSE
+              v_prefix := 'MMR-CUS-';
+              SELECT COALESCE(MAX(
+                  CASE 
+                      WHEN member_id ~* '^MMR-CUS-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::BIGINT
+                      WHEN member_id ~* '^MMR-C-[0-9]+$' THEN SUBSTRING(member_id FROM 7)::BIGINT
+                      WHEN member_id ~* '^MMR[0-9]+$' AND LOWER(user_type::TEXT) = 'customer' THEN SUBSTRING(member_id FROM 4)::BIGINT
+                      ELSE 0 
+                  END
+              ), 0) + 1 INTO v_seq FROM users;
+              RETURN v_prefix || LPAD(v_seq::VARCHAR, 5, '0');
+          END IF;
+      END;
+      $$ LANGUAGE plpgsql;
+    `;
+
+    return res.json({
+      success: true,
+      message: 'Associate IDs standardized to 4 digits',
+      updatedUsers,
+      updatedEnrollments
+    });
   } catch (err) {
     return res.json({ success: false, error: err.message, stack: err.stack });
   }
