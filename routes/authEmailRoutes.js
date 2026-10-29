@@ -97,12 +97,14 @@ async function ensureAppAuthSettingsSchema() {
       CREATE TABLE IF NOT EXISTS app_auth_settings (
         id SERIAL PRIMARY KEY,
         email_otp_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-        whatsapp_otp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        sms_otp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`;
+    await sql`ALTER TABLE app_auth_settings ADD COLUMN IF NOT EXISTS sms_otp_enabled BOOLEAN DEFAULT FALSE`;
+    await sql`ALTER TABLE app_auth_settings ADD COLUMN IF NOT EXISTS email_otp_enabled BOOLEAN DEFAULT TRUE`;
     const [existing] = await sql`SELECT id FROM app_auth_settings LIMIT 1`;
     if (!existing) {
-      await sql`INSERT INTO app_auth_settings (email_otp_enabled, whatsapp_otp_enabled) VALUES (TRUE, FALSE)`;
+      await sql`INSERT INTO app_auth_settings (email_otp_enabled, sms_otp_enabled) VALUES (TRUE, FALSE)`;
     }
     appAuthSettingsReady = true;
   } catch (err) {
@@ -114,10 +116,10 @@ async function getAppAuthSettingsRow() {
   try {
     await ensureAppAuthSettingsSchema();
     const [row] = await sql`SELECT * FROM app_auth_settings LIMIT 1`;
-    return row || { email_otp_enabled: true, whatsapp_otp_enabled: false };
+    return row || { email_otp_enabled: true, sms_otp_enabled: false };
   } catch (e) {
     console.error('[authEmailRoutes] getAppAuthSettingsRow error:', e);
-    return { email_otp_enabled: true, whatsapp_otp_enabled: false };
+    return { email_otp_enabled: true, sms_otp_enabled: false };
   }
 }
 
@@ -614,12 +616,14 @@ router.post('/register-quick', async (req, res) => {
     } = validation.value;
 
     const authSettings = await getAppAuthSettingsRow();
-    const isOtpEnabled = authSettings?.email_otp_enabled !== false;
+    const isEmailOtpEnabled = authSettings?.email_otp_enabled !== false;
+    const isSmsOtpEnabled = Boolean(authSettings?.sms_otp_enabled);
+    const isOtpRequired = isEmailOtpEnabled || isSmsOtpEnabled;
 
     // ─────────────────────────────────────────────────────────────
-    // IF EMAIL OTP IS DISABLED (BYPASS OTP & DIRECT REGISTRATION)
+    // IF BOTH EMAIL & SMS OTP ARE DISABLED (BYPASS OTP & DIRECT REGISTRATION)
     // ─────────────────────────────────────────────────────────────
-    if (!isOtpEnabled) {
+    if (!isOtpRequired) {
       console.log(`[Registration:${requestId}] Email OTP is disabled. Creating ${userType} directly without OTP.`);
       const passwordHash = await bcrypt.hash(password, 12);
 
@@ -906,7 +910,7 @@ router.post('/register-quick', async (req, res) => {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // IF EMAIL OTP IS ENABLED (NORMAL OTP EMAIL FLOW)
+    // IF EMAIL OR SMS OTP IS ENABLED (NORMAL OTP DISPATCH FLOW)
     // ─────────────────────────────────────────────────────────────
     await ensurePendingRegistrationTable();
     console.log(`[Registration:${requestId}] Pending registration table ensured`);
@@ -940,16 +944,50 @@ router.post('/register-quick', async (req, res) => {
       )`;
     console.log(`[Registration:${requestId}] Pending record created`);
 
-    console.log(`[Registration:${requestId}] Sending OTP email...`, { email });
-    await sendEmail(email, 'Verify your MMR account', otpEmailHtml(otp, 'Verification'));
-    console.log(`[Registration:${requestId}] OTP email sent`);
+    // Dispatch Email OTP if enabled
+    if (isEmailOtpEnabled) {
+      try {
+        console.log(`[Registration:${requestId}] Sending OTP email...`, { email });
+        await sendEmail(email, 'Verify your MMR account', otpEmailHtml(otp, 'Verification'));
+        console.log(`[Registration:${requestId}] OTP email sent`);
+      } catch (mailErr) {
+        console.warn(`[Registration:${requestId}] OTP email failed:`, mailErr.message);
+      }
+    }
 
-    const responseData = { email, user_type: userType };
+    // Dispatch SMS OTP to contact / mobile if enabled
+    if (isSmsOtpEnabled && mobileNo) {
+      try {
+        console.log(`[Registration:${requestId}] Sending OTP SMS to contact...`, { mobileNo });
+        await twoFactorService.sendCustomOtp({
+          mobile: mobileNo,
+          otp,
+          template: 'OTP Verification',
+          purpose: 'Registration'
+        });
+        console.log(`[Registration:${requestId}] OTP SMS sent`);
+      } catch (smsErr) {
+        console.warn(`[Registration:${requestId}] OTP SMS failed:`, smsErr.message);
+      }
+    }
+
+    const responseData = {
+      email,
+      mobile: mobileNo,
+      user_type: userType,
+      email_otp_sent: isEmailOtpEnabled,
+      sms_otp_sent: isSmsOtpEnabled
+    };
     console.log(`[Registration:${requestId}] Registration initiated`, responseData);
     return ok(
       res,
       responseData,
-      'OTP sent to your email. Verify OTP to complete registration.',
+      isEmailOtpEnabled && isSmsOtpEnabled
+        ? 'Registration initiated. OTP sent to your email and mobile number.'
+        : isEmailOtpEnabled
+          ? 'Registration initiated. OTP sent to your email address.'
+          : 'Registration initiated. OTP sent via SMS to your mobile number.',
+      200
     );
   } catch (e) {
     logRegistrationError(`[Registration:${requestId}] Registration Error`, e);
@@ -1016,13 +1054,35 @@ router.post('/verify-email-otp', async (req, res) => {
   try {
     await ensurePendingRegistrationTable();
 
-    const email = normalizeEmail(req.body.email);
-    const otp = String(req.body.otp || '').trim();
-    if (!email || !otp) return err(res, 'email and otp are required', 400);
+    const email = req.body.email ? normalizeEmail(req.body.email) : '';
+    const rawMobile = req.body.mobile || req.body.mobile_no || '';
+    const cleanMobile = rawMobile ? String(rawMobile).replace(/\D/g, '').slice(-10) : '';
+    const otp = String(req.body.otp || req.body.otp_code || '').trim();
 
-    const [pending] = await sql`
-      SELECT * FROM pending_registrations
-      WHERE email = ${email}`;
+    if ((!email && !cleanMobile) || !otp) {
+      return err(res, 'Email or Mobile Number and OTP are required', 400);
+    }
+
+    let pending = null;
+    if (email && cleanMobile) {
+      const [row] = await sql`
+        SELECT * FROM pending_registrations
+        WHERE email = ${email} OR RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}
+        LIMIT 1`;
+      pending = row;
+    } else if (email) {
+      const [row] = await sql`
+        SELECT * FROM pending_registrations
+        WHERE email = ${email}
+        LIMIT 1`;
+      pending = row;
+    } else {
+      const [row] = await sql`
+        SELECT * FROM pending_registrations
+        WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}
+        LIMIT 1`;
+      pending = row;
+    }
 
     if (!pending) return err(res, 'No pending registration found. Please sign up again.', 400);
     if (pending.attempts >= 5) {
@@ -1348,24 +1408,37 @@ router.get('/sync-sequences', async (req, res) => {
   }
 });
 
-router.post('/resend-email-otp', async (req, res) => {
+router.post(['/resend-email-otp', '/resend-otp'], async (req, res) => {
   try {
     const authSettings = await getAppAuthSettingsRow();
-    if (authSettings.email_otp_enabled === false) {
+    const isEmailOtpEnabled = authSettings?.email_otp_enabled !== false;
+    const isSmsOtpEnabled = Boolean(authSettings?.sms_otp_enabled);
+
+    if (!isEmailOtpEnabled && !isSmsOtpEnabled) {
       return ok(res, { otpBypassed: true }, 'OTP verification is disabled.');
     }
 
-    const email = normalizeEmail(req.body.email);
-    if (!email || !isEmail(email)) return err(res, 'Valid email required', 400);
+    const email = req.body.email ? normalizeEmail(req.body.email) : '';
+    const rawMobile = req.body.mobile || req.body.mobile_no || '';
+    const cleanMobile = rawMobile ? String(rawMobile).replace(/\D/g, '').slice(-10) : '';
+
+    if (!email && !cleanMobile) return err(res, 'Valid email or mobile number required', 400);
 
     await ensurePendingRegistrationTable();
 
-    const [pending] = await sql`
-      SELECT email FROM pending_registrations
-      WHERE email = ${email}`;
+    let pending = null;
+    if (email) {
+      const [row] = await sql`SELECT * FROM pending_registrations WHERE email = ${email} LIMIT 1`;
+      pending = row;
+    } else {
+      const [row] = await sql`SELECT * FROM pending_registrations WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile} LIMIT 1`;
+      pending = row;
+    }
+
     if (!pending) return err(res, 'No pending registration found. Please sign up again.', 404);
 
-    if (!(await canResend(email))) {
+    const lookupKey = pending.email || cleanMobile;
+    if (!(await canResend(lookupKey))) {
       return err(res, 'Please wait 60 seconds before requesting a new OTP', 429);
     }
 
@@ -1375,11 +1448,30 @@ router.post('/resend-email-otp', async (req, res) => {
     await sql`
       UPDATE pending_registrations
       SET otp_code = ${otp}, attempts = 0, expires_at = ${expires}, updated_at = NOW()
-      WHERE email = ${email}`;
+      WHERE email = ${pending.email}`;
 
-    await sendEmail(email, 'Your MMR verification OTP', otpEmailHtml(otp, 'Verification'));
+    if (isEmailOtpEnabled && pending.email) {
+      try {
+        await sendEmail(pending.email, 'Your MMR verification OTP', otpEmailHtml(otp, 'Verification'));
+      } catch (mailErr) {
+        console.warn('[Resend OTP Email Error]:', mailErr.message);
+      }
+    }
 
-    return ok(res, { email }, 'OTP resent to email');
+    if (isSmsOtpEnabled && pending.mobile_no) {
+      try {
+        await twoFactorService.sendCustomOtp({
+          mobile: pending.mobile_no,
+          otp,
+          template: 'OTP Verification',
+          purpose: 'Registration'
+        });
+      } catch (smsErr) {
+        console.warn('[Resend OTP SMS Error]:', smsErr.message);
+      }
+    }
+
+    return ok(res, { email: pending.email, mobile: pending.mobile_no }, 'OTP resent successfully');
   } catch (e) {
     console.error('[resend-email-otp]', e);
     return err(res, e.message);

@@ -12,6 +12,7 @@ import { triggerEnrollmentEmailAsync } from "../services/enrollmentEmail.service
 import { triggerWithdrawalRequestEmailsAsync, triggerWithdrawalStatusEmailsAsync } from "../services/businessNotificationEmail.service.js";
 import { triggerInvestorStatusEmailAsync, triggerInvestorDepositRequestEmailAsync, triggerInvestorDepositStatusEmailAsync } from "../services/phase2NotificationEmail.service.js";
 import { normalizeHumanName, isValidHumanName, calculateAge, isValidState } from "../utils/validationHelper.js";
+import twoFactorService from "../services/twoFactor.service.js";
 
 const router = express.Router();
 const upload = multer({
@@ -450,8 +451,40 @@ async function handleInvestorRegistration(req, res) {
       return err(res, "An account (Customer, Associate, or Investor) with this Email or Mobile Number already exists.", 409);
     }
 
+    const [authRow] = await sql`SELECT email_otp_enabled, sms_otp_enabled FROM app_auth_settings LIMIT 1`;
+    const isEmailOtpEnabled = authRow ? authRow.email_otp_enabled !== false : true;
+    const isSmsOtpEnabled = authRow ? Boolean(authRow.sms_otp_enabled) : false;
+    const isOtpRequired = isEmailOtpEnabled || isSmsOtpEnabled;
+
     const salt = await bcrypt.genSalt(10);
     const password_hash = await bcrypt.hash(password, salt);
+
+    if (!isOtpRequired) {
+      const [invSeq] = await sql`
+        SELECT COALESCE(MAX(
+          CASE
+            WHEN member_id ~* '^MMR-INV-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
+            ELSE id END
+        ), 0) + 1 AS next_value
+        FROM investor_users`;
+      const memberId = `MMR-INV-${String(Number(invSeq?.next_value || 1)).padStart(5, '0')}`;
+
+      const [createdInvestor] = await sql`
+        INSERT INTO investor_users (
+          member_id, full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
+        ) VALUES (
+          ${memberId}, ${cleanName}, ${cleanMobile10}, ${cleanEmail}, ${password_hash},
+          'active', true, NOW(), NOW()
+        )
+        RETURNING id, member_id, full_name, email, mobile_number, status, is_verified`;
+
+      return ok(res, {
+        otpBypassed: true,
+        user: createdInvestor,
+        redirect: '/investor/login'
+      }, "Registration successful. Account is active.", 201);
+    }
+
     const otp = String(Math.floor(100000 + Math.random() * 900000));
     const expires = new Date(Date.now() + 15 * 60 * 1000);
 
@@ -483,17 +516,37 @@ async function handleInvestorRegistration(req, res) {
         ${cleanEmail}, ${cleanMobile}, 'Investor', ${full_name.trim()}, ${password_hash}, ${otp}, ${expires}
       )`;
 
-    try {
-      await sendEmail({
-        to: cleanEmail,
-        subject: "Verify your MMR Constructions Investor account",
-        html: `<p>Hello ${full_name.trim()},</p><p>Your OTP for Investor account registration is: <strong>${otp}</strong></p><p>This OTP expires in 15 minutes.</p>`
-      });
-    } catch (mailErr) {
-      console.warn("[Investor Verification Mail Error]", mailErr.message);
+    if (isEmailOtpEnabled) {
+      try {
+        await sendEmail({
+          to: cleanEmail,
+          subject: "Verify your MMR Constructions Investor account",
+          html: `<p>Hello ${full_name.trim()},</p><p>Your OTP for Investor account registration is: <strong>${otp}</strong></p><p>This OTP expires in 15 minutes.</p>`
+        });
+      } catch (mailErr) {
+        console.warn("[Investor Verification Mail Error]", mailErr.message);
+      }
     }
 
-    return ok(res, { email: cleanEmail, mobile_number: cleanMobile }, "OTP sent to your email. Please verify OTP to activate your account.", 201);
+    if (isSmsOtpEnabled && cleanMobile) {
+      try {
+        await twoFactorService.sendCustomOtp({
+          mobile: cleanMobile,
+          otp,
+          template: "OTP Verification",
+          purpose: "Registration"
+        });
+      } catch (smsErr) {
+        console.warn("[Investor Verification SMS Error]", smsErr.message);
+      }
+    }
+
+    return ok(res, {
+      email: cleanEmail,
+      mobile_number: cleanMobile,
+      email_otp_sent: isEmailOtpEnabled,
+      sms_otp_sent: isSmsOtpEnabled
+    }, "OTP sent. Please verify OTP to activate your account.", 201);
   } catch (e) {
     console.error("Investor Signup Error:", e);
     return err(res, e.message || "Failed to process signup.");

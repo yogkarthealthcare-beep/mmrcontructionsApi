@@ -206,6 +206,26 @@ async function verifyOrCreateAdminTables() {
     }
 
     try {
+      console.log("=== SYNCHRONIZING APP AUTH SETTINGS SCHEMA ===");
+      await sql`
+        CREATE TABLE IF NOT EXISTS app_auth_settings (
+          id SERIAL PRIMARY KEY,
+          email_otp_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+          sms_otp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`;
+      await sql`ALTER TABLE app_auth_settings ADD COLUMN IF NOT EXISTS sms_otp_enabled BOOLEAN DEFAULT FALSE`;
+      await sql`ALTER TABLE app_auth_settings ADD COLUMN IF NOT EXISTS email_otp_enabled BOOLEAN DEFAULT TRUE`;
+      const [existingAuth] = await sql`SELECT id FROM app_auth_settings LIMIT 1`;
+      if (!existingAuth) {
+        await sql`INSERT INTO app_auth_settings (email_otp_enabled, sms_otp_enabled) VALUES (TRUE, FALSE)`;
+      }
+      console.log("App auth settings schema synchronized successfully ✅");
+    } catch (authErr) {
+      console.warn("App auth settings schema sync warning:", authErr.message);
+    }
+
+    try {
       console.log("=== SYNCHRONIZING INSTALLMENT REMINDER SCHEMA ===");
       await ensureInstallmentReminderSchema(sql);
       console.log("Installment reminder schema synchronized successfully ✅");

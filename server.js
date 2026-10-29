@@ -1234,12 +1234,14 @@ const ensureAppAuthSettingsSchema = () => {
         CREATE TABLE IF NOT EXISTS app_auth_settings (
           id SERIAL PRIMARY KEY,
           email_otp_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-          whatsapp_otp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+          sms_otp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`;
+      await sql`ALTER TABLE app_auth_settings ADD COLUMN IF NOT EXISTS sms_otp_enabled BOOLEAN DEFAULT FALSE`;
+      await sql`ALTER TABLE app_auth_settings ADD COLUMN IF NOT EXISTS email_otp_enabled BOOLEAN DEFAULT TRUE`;
       const [existing] = await sql`SELECT id FROM app_auth_settings LIMIT 1`;
       if (!existing) {
-        await sql`INSERT INTO app_auth_settings (email_otp_enabled, whatsapp_otp_enabled) VALUES (TRUE, FALSE)`;
+        await sql`INSERT INTO app_auth_settings (email_otp_enabled, sms_otp_enabled) VALUES (TRUE, FALSE)`;
       }
     })();
   }
@@ -1249,7 +1251,7 @@ const ensureAppAuthSettingsSchema = () => {
 const getAppAuthSettingsRow = async () => {
   await ensureAppAuthSettingsSchema();
   const [row] = await sql`SELECT * FROM app_auth_settings LIMIT 1`;
-  return row || { email_otp_enabled: true, whatsapp_otp_enabled: false };
+  return row || { email_otp_enabled: true, sms_otp_enabled: false };
 };
 
 const safeNullableText = (value, maxLength = 1000) => {
@@ -2811,12 +2813,12 @@ app.post("/api/admin/auth-settings",
   role("SuperAdmin", "Admin"),
   async (req, res) => {
     try {
-      const { email_otp_enabled, whatsapp_otp_enabled } = req.body;
+      const { email_otp_enabled, sms_otp_enabled } = req.body;
       await ensureAppAuthSettingsSchema();
       await sql`
         UPDATE app_auth_settings SET
         email_otp_enabled = ${Boolean(email_otp_enabled)},
-        whatsapp_otp_enabled = ${Boolean(whatsapp_otp_enabled)},
+        sms_otp_enabled = ${Boolean(sms_otp_enabled)},
         updated_at = NOW()
       `;
       const settings = await getAppAuthSettingsRow();
@@ -4260,8 +4262,8 @@ app.post("/api/auth/send-otp", async (req, res) => {
     if (!mobile_no) return err(res, "mobile_no required", 400);
 
     const authSettings = await getAppAuthSettingsRow();
-    if (authSettings.email_otp_enabled === false) {
-      return ok(res, { otpBypassed: true }, "OTP is disabled. Bypassing.");
+    if (authSettings.sms_otp_enabled === false) {
+      return ok(res, { otpBypassed: true }, "SMS OTP is disabled. Bypassing.");
     }
 
     const otp = genOTP();
