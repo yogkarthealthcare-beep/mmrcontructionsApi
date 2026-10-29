@@ -147,6 +147,14 @@ async function ensurePendingRegistrationTable() {
   await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS referred_by_user_id INTEGER`;
   await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS referred_by_source TEXT`;
   await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS referred_by_set_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS email_otp_code TEXT`;
+  await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS sms_otp_code TEXT`;
+  await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE`;
+  await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS mobile_verified BOOLEAN DEFAULT FALSE`;
+  await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS email_otp_expires_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS sms_otp_expires_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS email_otp_attempts INTEGER DEFAULT 0`;
+  await sql`ALTER TABLE pending_registrations ADD COLUMN IF NOT EXISTS sms_otp_attempts INTEGER DEFAULT 0`;
   ensureRegistrationUniqueIndexes().catch((error) => {
     console.warn('[Associate Registration] Unique index check skipped; existing duplicates may need cleanup.', {
       message: error?.message,
@@ -915,7 +923,9 @@ router.post('/register-quick', async (req, res) => {
     await ensurePendingRegistrationTable();
     console.log(`[Registration:${requestId}] Pending registration table ensured`);
 
-    const otp = genOTP();
+    // Separate OTPs for Email and Contact Number verification
+    const emailOtp = genOTP();
+    const smsOtp = genOTP(); // Distinct SMS OTP
     const expires = new Date(Date.now() + 10 * 60 * 1000);
     console.log(`[Registration:${requestId}] Hashing password...`);
     const passwordHash = await bcrypt.hash(password, 12);
@@ -927,29 +937,37 @@ router.post('/register-quick', async (req, res) => {
       WHERE email = ${email} OR mobile_no = ${mobileNo}`;
     console.log(`[Registration:${requestId}] Old pending registration cleanup complete`);
 
-    console.log(`[Registration:${requestId}] Creating pending record...`, {
+    console.log(`[Registration:${requestId}] Creating pending record with separate OTPs...`, {
       user_type: userType,
       email,
       mobile_no: mobileNo,
       sponsor_user_id: sponsorUserId,
       expires_at: expires,
+      emailOtp,
+      smsOtp
     });
     await sql`
       INSERT INTO pending_registrations (
         email, mobile_no, user_type, full_name, password_hash,
-        sponsor_user_id, sponsor_invite_code, referred_by_user_id, referred_by_source, optional_data, otp_code, expires_at
+        sponsor_user_id, sponsor_invite_code, referred_by_user_id, referred_by_source, optional_data,
+        otp_code, email_otp_code, sms_otp_code,
+        email_verified, mobile_verified,
+        email_otp_expires_at, sms_otp_expires_at, expires_at
       ) VALUES (
         ${email}, ${mobileNo}, ${userType}, ${fullName}, ${passwordHash},
-        ${sponsorUserId}, ${sponsorInviteCode}, ${referredByUserId}, ${referredBySource}, ${sql.json(optionalData || {})}, ${otp}, ${expires}
+        ${sponsorUserId}, ${sponsorInviteCode}, ${referredByUserId}, ${referredBySource}, ${sql.json(optionalData || {})},
+        ${emailOtp}, ${emailOtp}, ${smsOtp},
+        ${!isEmailOtpEnabled}, ${!isSmsOtpEnabled},
+        ${expires}, ${expires}, ${expires}
       )`;
     console.log(`[Registration:${requestId}] Pending record created`);
 
     // Dispatch Email OTP if enabled
     if (isEmailOtpEnabled) {
       try {
-        console.log(`[Registration:${requestId}] Sending OTP email...`, { email });
-        await sendEmail(email, 'Verify your MMR account', otpEmailHtml(otp, 'Verification'));
-        console.log(`[Registration:${requestId}] OTP email sent`);
+        console.log(`[Registration:${requestId}] Sending Email OTP to ${email}...`);
+        await sendEmail(email, 'Verify your MMR account (Email OTP)', otpEmailHtml(emailOtp, 'Email Verification'));
+        console.log(`[Registration:${requestId}] Email OTP sent`);
       } catch (mailErr) {
         console.warn(`[Registration:${requestId}] OTP email failed:`, mailErr.message);
       }
@@ -958,14 +976,14 @@ router.post('/register-quick', async (req, res) => {
     // Dispatch SMS OTP to contact / mobile if enabled
     if (isSmsOtpEnabled && mobileNo) {
       try {
-        console.log(`[Registration:${requestId}] Sending OTP SMS to contact...`, { mobileNo });
+        console.log(`[Registration:${requestId}] Sending SMS OTP to contact ${mobileNo}...`);
         await twoFactorService.sendCustomOtp({
           mobile: mobileNo,
-          otp,
+          otp: smsOtp,
           template: 'OTP Verification',
           purpose: 'Registration'
         });
-        console.log(`[Registration:${requestId}] OTP SMS sent`);
+        console.log(`[Registration:${requestId}] SMS OTP sent to contact number`);
       } catch (smsErr) {
         console.warn(`[Registration:${requestId}] OTP SMS failed:`, smsErr.message);
       }
@@ -975,18 +993,22 @@ router.post('/register-quick', async (req, res) => {
       email,
       mobile: mobileNo,
       user_type: userType,
+      email_otp_required: isEmailOtpEnabled,
+      sms_otp_required: isSmsOtpEnabled,
       email_otp_sent: isEmailOtpEnabled,
-      sms_otp_sent: isSmsOtpEnabled
+      sms_otp_sent: isSmsOtpEnabled,
+      email_verified: !isEmailOtpEnabled,
+      mobile_verified: !isSmsOtpEnabled
     };
     console.log(`[Registration:${requestId}] Registration initiated`, responseData);
     return ok(
       res,
       responseData,
       isEmailOtpEnabled && isSmsOtpEnabled
-        ? 'Registration initiated. OTP sent to your email and mobile number.'
+        ? 'Registration initiated. Separate OTPs have been sent to your email and contact number.'
         : isEmailOtpEnabled
           ? 'Registration initiated. OTP sent to your email address.'
-          : 'Registration initiated. OTP sent via SMS to your mobile number.',
+          : 'Registration initiated. OTP sent via SMS to your mobile / contact number.',
       200
     );
   } catch (e) {
@@ -1050,6 +1072,365 @@ router.post('/send-email-otp', async (req, res) => {
   }
 });
 
+async function findPendingRegistration(email, cleanMobile) {
+  let pending = null;
+  if (email && cleanMobile) {
+    const [row] = await sql`
+      SELECT * FROM pending_registrations
+      WHERE email = ${email} OR RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}
+      LIMIT 1`;
+    pending = row;
+  } else if (email) {
+    const [row] = await sql`
+      SELECT * FROM pending_registrations
+      WHERE email = ${email}
+      LIMIT 1`;
+    pending = row;
+  } else if (cleanMobile) {
+    const [row] = await sql`
+      SELECT * FROM pending_registrations
+      WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}
+      LIMIT 1`;
+    pending = row;
+  }
+  return pending;
+}
+
+async function completeUserRegistration(pending, res) {
+  const email = pending.email;
+
+  if (pending.user_type === 'Investor') {
+    const [dupInvestorEmail] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`;
+    if (dupInvestorEmail) {
+      await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
+      return err(res, 'Email already registered', 409);
+    }
+    const [dupInvestorMobile] = await sql`
+      SELECT id FROM investor_users
+      WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${pending.mobile_no} AND deleted_at IS NULL LIMIT 1`;
+    if (dupInvestorMobile) {
+      await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
+      return err(res, 'Mobile number already registered', 409);
+    }
+
+    const [invSeq] = await sql`
+      SELECT COALESCE(MAX(
+        CASE
+          WHEN member_id ~* '^MMR-INV-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
+          ELSE id END
+      ), 0) + 1 AS next_value
+      FROM investor_users`;
+    const memberId = `MMR-INV-${String(Number(invSeq?.next_value || 1)).padStart(5, '0')}`;
+
+    const [createdInvestor] = await sql`
+      INSERT INTO investor_users (
+        member_id, full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
+      ) VALUES (
+        ${memberId}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email}, ${pending.password_hash},
+        'active', true, NOW(), NOW()
+      )
+      RETURNING id, member_id, full_name, email, mobile_number, status, is_verified`;
+
+    await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
+
+    const payload = {
+      id: createdInvestor.id,
+      user_id: createdInvestor.id,
+      member_id: createdInvestor.member_id,
+      user_type: 'Investor',
+      role: 'Investor',
+      email: createdInvestor.email,
+      full_name: createdInvestor.full_name,
+    };
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) throw new Error("JWT_SECRET is not configured");
+    const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
+    const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '30d' });
+    const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: '60d' });
+
+    return ok(res, {
+      completed: true,
+      token,
+      refresh_token: refreshToken,
+      user: {
+        id: createdInvestor.id,
+        user_id: createdInvestor.id,
+        full_name: createdInvestor.full_name,
+        email: createdInvestor.email,
+        mobile_no: createdInvestor.mobile_number,
+        mobile_number: createdInvestor.mobile_number,
+        user_type: 'Investor',
+        role: 'Investor',
+        status: 'active',
+        account_status: 'active',
+        is_verified: true,
+        email_verified: true,
+      },
+      redirect: '/investor/dashboard'
+    }, 'Investor registration verified and completed successfully.');
+  }
+
+  const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${email}`;
+  const [dupInvestorEmail] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`;
+  if (dupEmail || dupInvestorEmail) {
+    await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
+    return err(res, 'Email already registered', 409);
+  }
+
+  const cleanPendingMobile10 = String(pending.mobile_no).replace(/\D/g, "").slice(-10);
+  const [dupMobile] = await sql`
+    SELECT user_id FROM users
+    WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanPendingMobile10}`;
+  const [dupInvestorMobile] = await sql`
+    SELECT id FROM investor_users
+    WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanPendingMobile10} AND deleted_at IS NULL LIMIT 1`;
+  if (dupMobile || dupInvestorMobile) {
+    await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
+    return err(res, 'Mobile number already registered', 409);
+  }
+
+  const newUser = await sql.begin(async (tx) => {
+    const createdUser = await createUserWithUniqueMemberId(tx, pending);
+
+    if (pending.optional_data?.address || pending.optional_data?.city || pending.optional_data?.state) {
+      try {
+        await tx`
+          CREATE TABLE IF NOT EXISTS user_addresses (
+            address_id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+            address_type VARCHAR(50) DEFAULT 'Permanent',
+            address_line1 TEXT,
+            city VARCHAR(100),
+            state VARCHAR(100),
+            pin_code VARCHAR(20),
+            created_at TIMESTAMPTZ DEFAULT NOW()
+          )`;
+        await tx`
+          INSERT INTO user_addresses (user_id, address_type, address_line1, city, state)
+          VALUES (
+            ${createdUser.user_id}, 'Permanent', ${pending.optional_data.address || null},
+            ${pending.optional_data.city || null}, ${pending.optional_data.state || null}
+          )`;
+      } catch (addrErr) {
+        console.warn('[completeUserRegistration] user_addresses warning:', addrErr.message);
+      }
+    }
+
+    if (pending.sponsor_user_id) {
+      try {
+        await tx`
+          CREATE TABLE IF NOT EXISTS referral_registrations (
+            id SERIAL PRIMARY KEY,
+            sponsor_user_id INTEGER REFERENCES users(user_id),
+            referred_user_id INTEGER UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
+            sponsor_invite_code VARCHAR(80),
+            registration_source VARCHAR(80) DEFAULT 'ReferralLink',
+            referral_level INTEGER NOT NULL DEFAULT 1,
+            status VARCHAR(30) NOT NULL DEFAULT 'Pending',
+            approved_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )`;
+        await tx`
+          INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, registration_source, status, approved_at)
+          VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, ${pending.sponsor_invite_code}, 'Signup', 'Approved', NOW())`;
+      } catch (refErr) {
+        console.warn('[completeUserRegistration] referral_registrations warning:', refErr.message);
+      }
+
+      try {
+        await tx`
+          CREATE TABLE IF NOT EXISTS associate_referral_links (
+            id SERIAL PRIMARY KEY,
+            associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            invite_code VARCHAR(80) NOT NULL UNIQUE,
+            referral_url TEXT,
+            total_clicks INTEGER NOT NULL DEFAULT 0,
+            total_registrations INTEGER NOT NULL DEFAULT 0,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )`;
+        await tx`
+          UPDATE associate_referral_links
+          SET total_registrations = total_registrations + 1, updated_at = NOW()
+          WHERE associate_user_id = ${pending.sponsor_user_id}`;
+      } catch (linkErr) {
+        console.warn('[completeUserRegistration] associate_referral_links warning:', linkErr.message);
+      }
+
+      try {
+        await tx`
+          CREATE TABLE IF NOT EXISTS mlm_network (
+            id SERIAL PRIMARY KEY,
+            associate_user_id INTEGER UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
+            sponsor_user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+            level INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )`;
+        await tx`
+          INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
+          VALUES (${createdUser.user_id}, ${pending.sponsor_user_id},
+            COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${pending.sponsor_user_id}), 0) + 1)`;
+      } catch (mlmErr) {
+        console.warn('[completeUserRegistration] mlm_network warning:', mlmErr.message);
+      }
+
+      try {
+        await tx`
+          CREATE TABLE IF NOT EXISTS mlm_tree_closure (
+            ancestor_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            descendant_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            depth INTEGER NOT NULL,
+            PRIMARY KEY (ancestor_user_id, descendant_user_id)
+          )`;
+        await tx`
+          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+          VALUES (${createdUser.user_id}, ${createdUser.user_id}, 0)
+          ON CONFLICT DO NOTHING`;
+        await tx`
+          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+          SELECT ancestor_user_id, ${createdUser.user_id}, depth + 1
+          FROM mlm_tree_closure
+          WHERE descendant_user_id = ${pending.sponsor_user_id}
+          ON CONFLICT DO NOTHING`;
+        await tx`
+          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+          VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, 1)
+          ON CONFLICT DO NOTHING`;
+      } catch (treeErr) {
+        console.warn('[completeUserRegistration] mlm_tree_closure warning:', treeErr.message);
+      }
+    } else {
+      try {
+        await tx`
+          CREATE TABLE IF NOT EXISTS mlm_tree_closure (
+            ancestor_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            descendant_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            depth INTEGER NOT NULL,
+            PRIMARY KEY (ancestor_user_id, descendant_user_id)
+          )`;
+        await tx`
+          INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
+          VALUES (${createdUser.user_id}, ${createdUser.user_id}, 0)
+          ON CONFLICT DO NOTHING`;
+      } catch (treeErr) {
+        console.warn('[completeUserRegistration] mlm_tree_closure self warning:', treeErr.message);
+      }
+    }
+
+    try {
+      await tx`
+        CREATE TABLE IF NOT EXISTS user_wallets (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+          user_role VARCHAR(50),
+          available_balance NUMERIC(12,2) DEFAULT 0,
+          pending_withdrawal_balance NUMERIC(12,2) DEFAULT 0,
+          total_added_fund NUMERIC(12,2) DEFAULT 0,
+          total_withdrawn NUMERIC(12,2) DEFAULT 0,
+          total_commission NUMERIC(12,2) DEFAULT 0,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        )`;
+      await tx`
+        INSERT INTO user_wallets (user_id, user_role, available_balance, pending_withdrawal_balance, total_added_fund, total_withdrawn, total_commission)
+        VALUES (${createdUser.user_id}, ${pending.user_type}, 0, 0, 0, 0, 0)
+        ON CONFLICT DO NOTHING`;
+    } catch (wErr) {
+      console.warn('[completeUserRegistration] user_wallets warning:', wErr.message);
+    }
+
+    await tx`DELETE FROM pending_registrations WHERE email = ${email}`;
+
+    try {
+      await tx`
+        CREATE TABLE IF NOT EXISTS audit_log (
+          id SERIAL PRIMARY KEY,
+          actor_type VARCHAR(50),
+          actor_id INTEGER,
+          actor_name VARCHAR(150),
+          module VARCHAR(50),
+          action VARCHAR(100),
+          target_table VARCHAR(50),
+          target_record_id INTEGER,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        )`;
+      await tx`
+        INSERT INTO audit_log
+          (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+        VALUES
+          ('User', ${createdUser.user_id}, ${createdUser.full_name},
+           'Auth', 'RegisteredAfterOtp', 'users', ${createdUser.user_id})`;
+    } catch (auditErr) {
+      console.warn('[completeUserRegistration] audit_log warning:', auditErr.message);
+    }
+
+    return createdUser;
+  });
+
+  const payload = {
+    user_id: newUser.user_id,
+    user_type: newUser.user_type,
+    member_id: newUser.member_id,
+    email: newUser.email,
+  };
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret) throw new Error("JWT_SECRET is not configured");
+  const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
+  const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '30d' });
+  const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: '60d' });
+
+  return ok(res, {
+    completed: true,
+    token,
+    refresh_token: refreshToken,
+    user: {
+      user_id: newUser.user_id,
+      full_name: newUser.full_name,
+      user_type: newUser.user_type,
+      member_id: newUser.member_id,
+      invitation_code: newUser.invitation_code || null,
+      account_status: pending.user_type === 'Customer' ? 'Active' : 'Pending',
+      email_verified: true,
+      is_verified: true,
+    },
+    redirect: newUser.user_type === 'Associate' ? '/associate/dashboard' : '/user/dashboard',
+  }, pending.user_type === 'Customer'
+    ? 'Verification successful. Your customer account is active.'
+    : 'Verification successful. Registration completed and is pending admin approval.');
+}
+
+router.get('/otp-status', async (req, res) => {
+  try {
+    await ensurePendingRegistrationTable();
+    const email = req.query.email ? normalizeEmail(req.query.email) : '';
+    const rawMobile = req.query.mobile || req.query.mobile_no || '';
+    const cleanMobile = rawMobile ? String(rawMobile).replace(/\D/g, '').slice(-10) : '';
+
+    const authSettings = await getAppAuthSettingsRow();
+    const isEmailRequired = authSettings?.email_otp_enabled !== false;
+    const isSmsRequired = Boolean(authSettings?.sms_otp_enabled);
+
+    let pending = null;
+    if (email || cleanMobile) {
+      pending = await findPendingRegistration(email, cleanMobile);
+    }
+
+    return ok(res, {
+      email: pending?.email || email,
+      mobile: pending?.mobile_no || cleanMobile,
+      user_type: pending?.user_type || 'Customer',
+      email_otp_required: isEmailRequired,
+      sms_otp_required: isSmsRequired,
+      email_verified: Boolean(pending?.email_verified),
+      mobile_verified: Boolean(pending?.mobile_verified),
+      is_pending: Boolean(pending),
+    });
+  } catch (e) {
+    return err(res, e.message);
+  }
+});
+
 router.post('/verify-email-otp', async (req, res) => {
   try {
     await ensurePendingRegistrationTable();
@@ -1057,336 +1438,159 @@ router.post('/verify-email-otp', async (req, res) => {
     const email = req.body.email ? normalizeEmail(req.body.email) : '';
     const rawMobile = req.body.mobile || req.body.mobile_no || '';
     const cleanMobile = rawMobile ? String(rawMobile).replace(/\D/g, '').slice(-10) : '';
-    const otp = String(req.body.otp || req.body.otp_code || '').trim();
+    const otp = String(req.body.otp || req.body.otp_code || req.body.email_otp || '').trim();
 
     if ((!email && !cleanMobile) || !otp) {
-      return err(res, 'Email or Mobile Number and OTP are required', 400);
+      return err(res, 'Email and OTP are required', 400);
     }
 
-    let pending = null;
-    if (email && cleanMobile) {
-      const [row] = await sql`
-        SELECT * FROM pending_registrations
-        WHERE email = ${email} OR RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}
-        LIMIT 1`;
-      pending = row;
-    } else if (email) {
-      const [row] = await sql`
-        SELECT * FROM pending_registrations
-        WHERE email = ${email}
-        LIMIT 1`;
-      pending = row;
-    } else {
-      const [row] = await sql`
-        SELECT * FROM pending_registrations
-        WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile}
-        LIMIT 1`;
-      pending = row;
+    const pending = await findPendingRegistration(email, cleanMobile);
+    if (!pending) return err(res, 'No pending registration found. Please sign up again.', 404);
+
+    if (pending.email_otp_attempts >= 5) {
+      return err(res, 'Too many invalid attempts on Email OTP. Please resend a new OTP.', 429);
+    }
+    const expires = pending.email_otp_expires_at || pending.expires_at;
+    if (new Date() > new Date(expires)) {
+      return err(res, 'Email OTP has expired. Please request a new OTP.', 400);
     }
 
-    if (!pending) return err(res, 'No pending registration found. Please sign up again.', 400);
-    if (pending.attempts >= 5) {
-      await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
-      return err(res, 'Too many OTP attempts. Please sign up again.', 429);
-    }
-    if (new Date() > new Date(pending.expires_at)) {
-      await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
-      return err(res, 'OTP expired. Please sign up again.', 400);
-    }
-    if (pending.otp_code !== otp) {
+    const validEmailOtp = pending.email_otp_code || pending.otp_code;
+    if (validEmailOtp !== otp) {
       await sql`
         UPDATE pending_registrations
-        SET attempts = attempts + 1, updated_at = NOW()
-        WHERE email = ${email}`;
-      return err(res, 'Invalid OTP. Please check and try again.', 400);
+        SET email_otp_attempts = COALESCE(email_otp_attempts, 0) + 1, updated_at = NOW()
+        WHERE email = ${pending.email}`;
+      return err(res, 'Invalid Email OTP. Please check the code sent to your email.', 400);
     }
 
-    if (pending.user_type === 'Investor') {
-      const [dupInvestorEmail] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`;
-      if (dupInvestorEmail) {
-        await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
-        return err(res, 'Email already registered', 409);
-      }
-      const [dupInvestorMobile] = await sql`
-        SELECT id FROM investor_users
-        WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${pending.mobile_no} AND deleted_at IS NULL LIMIT 1`;
-      if (dupInvestorMobile) {
-        await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
-        return err(res, 'Mobile number already registered', 409);
-      }
+    // Mark email verified
+    await sql`
+      UPDATE pending_registrations
+      SET email_verified = TRUE, updated_at = NOW()
+      WHERE email = ${pending.email}`;
+    pending.email_verified = true;
 
-      const [invSeq] = await sql`
-        SELECT COALESCE(MAX(
-          CASE
-            WHEN member_id ~* '^MMR-INV-[0-9]+$' THEN SUBSTRING(member_id FROM 9)::integer
-            ELSE id END
-        ), 0) + 1 AS next_value
-        FROM investor_users`;
-      const memberId = `MMR-INV-${String(Number(invSeq?.next_value || 1)).padStart(5, '0')}`;
+    const authSettings = await getAppAuthSettingsRow();
+    const isSmsOtpRequired = Boolean(authSettings?.sms_otp_enabled);
 
-      const [createdInvestor] = await sql`
-        INSERT INTO investor_users (
-          member_id, full_name, mobile_number, email, password_hash, status, is_verified, created_at, updated_at
-        ) VALUES (
-          ${memberId}, ${pending.full_name}, ${pending.mobile_no}, ${pending.email}, ${pending.password_hash},
-          'active', true, NOW(), NOW()
-        )
-        RETURNING id, member_id, full_name, email, mobile_number, status, is_verified`;
-
-      await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
-
-      const payload = {
-        id: createdInvestor.id,
-        user_id: createdInvestor.id,
-        member_id: createdInvestor.member_id,
-        user_type: 'Investor',
-        role: 'Investor',
-        email: createdInvestor.email,
-        full_name: createdInvestor.full_name,
-      };
-      const jwtSecret = process.env.JWT_SECRET;
-      if (!jwtSecret) throw new Error("JWT_SECRET is not configured");
-      const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
-      const token = jwt.sign(payload, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '30d' });
-      const refreshToken = jwt.sign(payload, jwtRefreshSecret, { expiresIn: '60d' });
-
+    // If SMS OTP is also required and not yet verified:
+    if (isSmsOtpRequired && !pending.mobile_verified) {
       return ok(res, {
-        token,
-        refresh_token: refreshToken,
-        user: {
-          id: createdInvestor.id,
-          user_id: createdInvestor.id,
-          full_name: createdInvestor.full_name,
-          email: createdInvestor.email,
-          mobile_no: createdInvestor.mobile_number,
-          mobile_number: createdInvestor.mobile_number,
-          user_type: 'Investor',
-          role: 'Investor',
-          status: 'active',
-          account_status: 'active',
-          is_verified: true,
-          email_verified: true,
-        },
-        redirect: '/investor/dashboard'
-      }, 'Investor registration verified and completed successfully.');
-    }
-
-    const [dupEmail] = await sql`SELECT user_id FROM users WHERE LOWER(email) = ${email}`;
-    const [dupInvestorEmail] = await sql`SELECT id FROM investor_users WHERE LOWER(email) = ${email} AND deleted_at IS NULL LIMIT 1`;
-    if (dupEmail || dupInvestorEmail) {
-      await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
-      return err(res, 'Email already registered', 409);
-    }
-
-    const cleanPendingMobile10 = String(pending.mobile_no).replace(/\D/g, "").slice(-10);
-    const [dupMobile] = await sql`
-      SELECT user_id FROM users
-      WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanPendingMobile10}`;
-    const [dupInvestorMobile] = await sql`
-      SELECT id FROM investor_users
-      WHERE RIGHT(regexp_replace(mobile_number, '\\D', '', 'g'), 10) = ${cleanPendingMobile10} AND deleted_at IS NULL LIMIT 1`;
-    if (dupMobile || dupInvestorMobile) {
-      await sql`DELETE FROM pending_registrations WHERE email = ${email}`;
-      return err(res, 'Mobile number already registered', 409);
-    }
-
-    const newUser = await sql.begin(async (tx) => {
-      const createdUser = await createUserWithUniqueMemberId(tx, pending);
-
-      if (pending.optional_data?.address || pending.optional_data?.city || pending.optional_data?.state) {
-        try {
-          await tx`
-            CREATE TABLE IF NOT EXISTS user_addresses (
-              address_id SERIAL PRIMARY KEY,
-              user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
-              address_type VARCHAR(50) DEFAULT 'Permanent',
-              address_line1 TEXT,
-              city VARCHAR(100),
-              state VARCHAR(100),
-              pin_code VARCHAR(20),
-              created_at TIMESTAMPTZ DEFAULT NOW()
-            )`;
-          await tx`
-            INSERT INTO user_addresses (user_id, address_type, address_line1, city, state)
-            VALUES (
-              ${createdUser.user_id}, 'Permanent', ${pending.optional_data.address || null},
-              ${pending.optional_data.city || null}, ${pending.optional_data.state || null}
-            )`;
-        } catch (addrErr) {
-          console.warn('[verify-email-otp] optional user_addresses insert warning:', addrErr.message);
-        }
-      }
-
-      if (pending.sponsor_user_id) {
-        try {
-          await tx`
-            CREATE TABLE IF NOT EXISTS referral_registrations (
-              id SERIAL PRIMARY KEY,
-              sponsor_user_id INTEGER REFERENCES users(user_id),
-              referred_user_id INTEGER UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
-              sponsor_invite_code VARCHAR(80),
-              registration_source VARCHAR(80) DEFAULT 'ReferralLink',
-              referral_level INTEGER NOT NULL DEFAULT 1,
-              status VARCHAR(30) NOT NULL DEFAULT 'Pending',
-              approved_at TIMESTAMPTZ,
-              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )`;
-          await tx`
-            INSERT INTO referral_registrations (sponsor_user_id, referred_user_id, sponsor_invite_code, registration_source, status, approved_at)
-            VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, ${pending.sponsor_invite_code}, 'Signup', 'Approved', NOW())`;
-        } catch (refErr) {
-          console.warn('[verify-email-otp] referral_registrations warning:', refErr.message);
-        }
-
-        try {
-          await tx`
-            CREATE TABLE IF NOT EXISTS associate_referral_links (
-              id SERIAL PRIMARY KEY,
-              associate_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-              invite_code VARCHAR(80) NOT NULL UNIQUE,
-              referral_url TEXT,
-              total_clicks INTEGER NOT NULL DEFAULT 0,
-              total_registrations INTEGER NOT NULL DEFAULT 0,
-              is_active BOOLEAN NOT NULL DEFAULT TRUE,
-              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )`;
-          await tx`
-            UPDATE associate_referral_links
-            SET total_registrations = total_registrations + 1, updated_at = NOW()
-            WHERE associate_user_id = ${pending.sponsor_user_id}`;
-        } catch (linkErr) {
-          console.warn('[verify-email-otp] associate_referral_links warning:', linkErr.message);
-        }
-
-        try {
-          await tx`
-            CREATE TABLE IF NOT EXISTS mlm_network (
-              id SERIAL PRIMARY KEY,
-              associate_user_id INTEGER UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
-              sponsor_user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
-              level INTEGER NOT NULL DEFAULT 1,
-              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )`;
-          await tx`
-            INSERT INTO mlm_network (associate_user_id, sponsor_user_id, level)
-            VALUES (${createdUser.user_id}, ${pending.sponsor_user_id},
-              COALESCE((SELECT level FROM mlm_network WHERE associate_user_id = ${pending.sponsor_user_id}), 0) + 1)`;
-        } catch (mlmErr) {
-          console.warn('[verify-email-otp] mlm_network warning:', mlmErr.message);
-        }
-
-        try {
-          await tx`
-            CREATE TABLE IF NOT EXISTS mlm_tree_closure (
-              ancestor_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-              descendant_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-              depth INTEGER NOT NULL,
-              PRIMARY KEY (ancestor_user_id, descendant_user_id)
-            )`;
-          await tx`
-            INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-            VALUES (${createdUser.user_id}, ${createdUser.user_id}, 0)
-            ON CONFLICT DO NOTHING`;
-          await tx`
-            INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-            SELECT ancestor_user_id, ${createdUser.user_id}, depth + 1
-            FROM mlm_tree_closure
-            WHERE descendant_user_id = ${pending.sponsor_user_id}
-            ON CONFLICT DO NOTHING`;
-          await tx`
-            INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-            VALUES (${pending.sponsor_user_id}, ${createdUser.user_id}, 1)
-            ON CONFLICT DO NOTHING`;
-        } catch (treeErr) {
-          console.warn('[verify-email-otp] mlm_tree_closure warning:', treeErr.message);
-        }
-      } else {
-        try {
-          await tx`
-            CREATE TABLE IF NOT EXISTS mlm_tree_closure (
-              ancestor_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-              descendant_user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-              depth INTEGER NOT NULL,
-              PRIMARY KEY (ancestor_user_id, descendant_user_id)
-            )`;
-          await tx`
-            INSERT INTO mlm_tree_closure (ancestor_user_id, descendant_user_id, depth)
-            VALUES (${createdUser.user_id}, ${createdUser.user_id}, 0)
-            ON CONFLICT DO NOTHING`;
-        } catch (treeErr) {
-          console.warn('[verify-email-otp] mlm_tree_closure self warning:', treeErr.message);
-        }
-      }
-
-      await tx`DELETE FROM pending_registrations WHERE email = ${email}`;
-
-      try {
-        await tx`
-          CREATE TABLE IF NOT EXISTS audit_log (
-            id SERIAL PRIMARY KEY,
-            actor_type VARCHAR(50),
-            actor_id INTEGER,
-            actor_name VARCHAR(150),
-            module VARCHAR(50),
-            action VARCHAR(100),
-            target_table VARCHAR(50),
-            target_record_id INTEGER,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-          )`;
-        await tx`
-          INSERT INTO audit_log
-            (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-          VALUES
-            ('User', ${createdUser.user_id}, ${createdUser.full_name},
-             'Auth', 'RegisteredAfterEmailOtp', 'users', ${createdUser.user_id})`;
-      } catch (auditErr) {
-        console.warn('[verify-email-otp] audit_log warning:', auditErr.message);
-      }
-
-      return createdUser;
-    });
-
-    const payload = {
-      user_id: newUser.user_id,
-      user_type: newUser.user_type,
-      member_id: newUser.member_id,
-      email: newUser.email,
-    };
-    const jwtSecret = process.env.JWT_SECRET;
-    if (!jwtSecret) throw new Error("JWT_SECRET is not configured");
-    const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
-    const token = jwt.sign(payload, jwtSecret, {
-      expiresIn: process.env.JWT_EXPIRES_IN || '30d',
-    });
-    const refreshToken = jwt.sign(payload, jwtRefreshSecret, {
-      expiresIn: '60d',
-    });
-
-    return ok(res, {
-      token,
-      refresh_token: refreshToken,
-      user: {
-        user_id: newUser.user_id,
-        full_name: newUser.full_name,
-        user_type: newUser.user_type,
-        member_id: newUser.member_id,
-        invitation_code: newUser.invitation_code || null,
-        account_status: pending.user_type === 'Customer' ? 'Active' : 'Pending',
         email_verified: true,
-      },
-      redirect: newUser.user_type === 'Associate' ? '/associate/dashboard' : '/user/dashboard',
-    }, pending.user_type === 'Customer'
-      ? 'Email verified. Your customer account is active.'
-      : 'Email verified. Registration completed and is pending admin approval.');
+        mobile_verified: false,
+        completed: false
+      }, 'Email verified successfully! Now please enter the OTP sent to your contact number.');
+    }
+
+    // If both (or all required) are verified, complete registration!
+    return await completeUserRegistration(pending, res);
   } catch (e) {
     logRegistrationError('[verify-email-otp]', e);
-    if (e?.status) return err(res, e.message, e.status);
-    if (e?.code === '23505') {
-      return err(res, registrationConflictMessage(e), 409);
+    return err(res, e.message || 'Verification failed');
+  }
+});
+
+router.post(['/verify-sms-otp', '/verify-contact-otp', '/verify-mobile-otp'], async (req, res) => {
+  try {
+    await ensurePendingRegistrationTable();
+
+    const email = req.body.email ? normalizeEmail(req.body.email) : '';
+    const rawMobile = req.body.mobile || req.body.mobile_no || '';
+    const cleanMobile = rawMobile ? String(rawMobile).replace(/\D/g, '').slice(-10) : '';
+    const otp = String(req.body.otp || req.body.otp_code || req.body.sms_otp || req.body.mobile_otp || '').trim();
+
+    if ((!email && !cleanMobile) || !otp) {
+      return err(res, 'Contact Number and OTP are required', 400);
     }
-    const cleanMsg = e?.message ? String(e.message).slice(0, 200) : 'Unable to complete registration right now. Please try again.';
-    return err(res, cleanMsg, 500);
+
+    const pending = await findPendingRegistration(email, cleanMobile);
+    if (!pending) return err(res, 'No pending registration found. Please sign up again.', 404);
+
+    if (pending.sms_otp_attempts >= 5) {
+      return err(res, 'Too many invalid attempts on Contact Number OTP. Please resend a new OTP.', 429);
+    }
+    const expires = pending.sms_otp_expires_at || pending.expires_at;
+    if (new Date() > new Date(expires)) {
+      return err(res, 'Contact Number OTP has expired. Please request a new OTP.', 400);
+    }
+
+    const validSmsOtp = pending.sms_otp_code;
+    if (validSmsOtp !== otp) {
+      await sql`
+        UPDATE pending_registrations
+        SET sms_otp_attempts = COALESCE(sms_otp_attempts, 0) + 1, updated_at = NOW()
+        WHERE email = ${pending.email}`;
+      return err(res, 'Invalid Contact Number OTP. Please check the SMS code sent to your mobile.', 400);
+    }
+
+    // Mark mobile verified
+    await sql`
+      UPDATE pending_registrations
+      SET mobile_verified = TRUE, updated_at = NOW()
+      WHERE email = ${pending.email}`;
+    pending.mobile_verified = true;
+
+    const authSettings = await getAppAuthSettingsRow();
+    const isEmailOtpRequired = authSettings?.email_otp_enabled !== false;
+
+    // If Email OTP is also required and not yet verified:
+    if (isEmailOtpRequired && !pending.email_verified) {
+      return ok(res, {
+        email_verified: false,
+        mobile_verified: true,
+        completed: false
+      }, 'Contact number verified successfully! Now please enter the OTP sent to your email.');
+    }
+
+    // If both (or all required) are verified, complete registration!
+    return await completeUserRegistration(pending, res);
+  } catch (e) {
+    logRegistrationError('[verify-sms-otp]', e);
+    return err(res, e.message || 'Verification failed');
+  }
+});
+
+router.post(['/verify-both-otp', '/verify-all-otp'], async (req, res) => {
+  try {
+    await ensurePendingRegistrationTable();
+
+    const email = req.body.email ? normalizeEmail(req.body.email) : '';
+    const rawMobile = req.body.mobile || req.body.mobile_no || '';
+    const cleanMobile = rawMobile ? String(rawMobile).replace(/\D/g, '').slice(-10) : '';
+    const emailOtp = String(req.body.email_otp || '').trim();
+    const smsOtp = String(req.body.sms_otp || req.body.mobile_otp || '').trim();
+
+    const pending = await findPendingRegistration(email, cleanMobile);
+    if (!pending) return err(res, 'No pending registration found. Please sign up again.', 404);
+
+    const authSettings = await getAppAuthSettingsRow();
+    const isEmailRequired = authSettings?.email_otp_enabled !== false;
+    const isSmsRequired = Boolean(authSettings?.sms_otp_enabled);
+
+    if (isEmailRequired && !pending.email_verified) {
+      if (!emailOtp || emailOtp !== (pending.email_otp_code || pending.otp_code)) {
+        return err(res, 'Invalid Email OTP. Please check the code sent to your email.', 400);
+      }
+      pending.email_verified = true;
+    }
+
+    if (isSmsRequired && !pending.mobile_verified) {
+      if (!smsOtp || smsOtp !== pending.sms_otp_code) {
+        return err(res, 'Invalid Contact Number OTP. Please check the SMS code sent to your mobile.', 400);
+      }
+      pending.mobile_verified = true;
+    }
+
+    await sql`
+      UPDATE pending_registrations
+      SET email_verified = TRUE, mobile_verified = TRUE, updated_at = NOW()
+      WHERE email = ${pending.email}`;
+
+    return await completeUserRegistration(pending, res);
+  } catch (e) {
+    logRegistrationError('[verify-both-otp]', e);
+    return err(res, e.message || 'Verification failed');
   }
 });
 
@@ -1408,7 +1612,76 @@ router.get('/sync-sequences', async (req, res) => {
   }
 });
 
-router.post(['/resend-email-otp', '/resend-otp'], async (req, res) => {
+router.post(['/resend-email-otp'], async (req, res) => {
+  try {
+    const email = req.body.email ? normalizeEmail(req.body.email) : '';
+    const rawMobile = req.body.mobile || req.body.mobile_no || '';
+    const cleanMobile = rawMobile ? String(rawMobile).replace(/\D/g, '').slice(-10) : '';
+
+    const pending = await findPendingRegistration(email, cleanMobile);
+    if (!pending) return err(res, 'No pending registration found.', 404);
+
+    const lookupKey = pending.email || cleanMobile;
+    if (!(await canResend(lookupKey))) {
+      return err(res, 'Please wait 60 seconds before requesting a new OTP', 429);
+    }
+
+    const emailOtp = genOTP();
+    const expires = new Date(Date.now() + 10 * 60 * 1000);
+
+    await sql`
+      UPDATE pending_registrations
+      SET email_otp_code = ${emailOtp}, otp_code = ${emailOtp}, email_otp_attempts = 0, email_otp_expires_at = ${expires}, updated_at = NOW()
+      WHERE email = ${pending.email}`;
+
+    await sendEmail(pending.email, 'Your MMR verification OTP', otpEmailHtml(emailOtp, 'Verification'));
+
+    return ok(res, { email: pending.email }, 'New OTP sent to your email address.');
+  } catch (e) {
+    console.error('[resend-email-otp error]:', e);
+    return err(res, e.message);
+  }
+});
+
+router.post(['/resend-sms-otp', '/resend-contact-otp', '/resend-mobile-otp'], async (req, res) => {
+  try {
+    const email = req.body.email ? normalizeEmail(req.body.email) : '';
+    const rawMobile = req.body.mobile || req.body.mobile_no || '';
+    const cleanMobile = rawMobile ? String(rawMobile).replace(/\D/g, '').slice(-10) : '';
+
+    const pending = await findPendingRegistration(email, cleanMobile);
+    if (!pending) return err(res, 'No pending registration found.', 404);
+
+    const lookupKey = `${pending.email || cleanMobile}-sms`;
+    if (!(await canResend(lookupKey))) {
+      return err(res, 'Please wait 60 seconds before requesting a new SMS OTP', 429);
+    }
+
+    const smsOtp = genOTP();
+    const expires = new Date(Date.now() + 10 * 60 * 1000);
+
+    await sql`
+      UPDATE pending_registrations
+      SET sms_otp_code = ${smsOtp}, sms_otp_attempts = 0, sms_otp_expires_at = ${expires}, updated_at = NOW()
+      WHERE email = ${pending.email}`;
+
+    if (pending.mobile_no) {
+      await twoFactorService.sendCustomOtp({
+        mobile: pending.mobile_no,
+        otp: smsOtp,
+        template: 'OTP Verification',
+        purpose: 'Registration'
+      });
+    }
+
+    return ok(res, { mobile: pending.mobile_no }, 'New OTP sent via SMS to your contact number.');
+  } catch (e) {
+    console.error('[resend-sms-otp error]:', e);
+    return err(res, e.message);
+  }
+});
+
+router.post(['/resend-otp'], async (req, res) => {
   try {
     const authSettings = await getAppAuthSettingsRow();
     const isEmailOtpEnabled = authSettings?.email_otp_enabled !== false;
@@ -1422,47 +1695,39 @@ router.post(['/resend-email-otp', '/resend-otp'], async (req, res) => {
     const rawMobile = req.body.mobile || req.body.mobile_no || '';
     const cleanMobile = rawMobile ? String(rawMobile).replace(/\D/g, '').slice(-10) : '';
 
-    if (!email && !cleanMobile) return err(res, 'Valid email or mobile number required', 400);
-
-    await ensurePendingRegistrationTable();
-
-    let pending = null;
-    if (email) {
-      const [row] = await sql`SELECT * FROM pending_registrations WHERE email = ${email} LIMIT 1`;
-      pending = row;
-    } else {
-      const [row] = await sql`SELECT * FROM pending_registrations WHERE RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile} LIMIT 1`;
-      pending = row;
-    }
-
-    if (!pending) return err(res, 'No pending registration found. Please sign up again.', 404);
+    const pending = await findPendingRegistration(email, cleanMobile);
+    if (!pending) return err(res, 'No pending registration found.', 404);
 
     const lookupKey = pending.email || cleanMobile;
     if (!(await canResend(lookupKey))) {
       return err(res, 'Please wait 60 seconds before requesting a new OTP', 429);
     }
 
-    const otp = genOTP();
+    const emailOtp = genOTP();
+    const smsOtp = genOTP();
     const expires = new Date(Date.now() + 10 * 60 * 1000);
 
     await sql`
       UPDATE pending_registrations
-      SET otp_code = ${otp}, attempts = 0, expires_at = ${expires}, updated_at = NOW()
+      SET otp_code = ${emailOtp}, email_otp_code = ${emailOtp}, sms_otp_code = ${smsOtp},
+          attempts = 0, email_otp_attempts = 0, sms_otp_attempts = 0,
+          expires_at = ${expires}, email_otp_expires_at = ${expires}, sms_otp_expires_at = ${expires},
+          updated_at = NOW()
       WHERE email = ${pending.email}`;
 
-    if (isEmailOtpEnabled && pending.email) {
+    if (isEmailOtpEnabled && pending.email && !pending.email_verified) {
       try {
-        await sendEmail(pending.email, 'Your MMR verification OTP', otpEmailHtml(otp, 'Verification'));
+        await sendEmail(pending.email, 'Your MMR verification OTP', otpEmailHtml(emailOtp, 'Verification'));
       } catch (mailErr) {
         console.warn('[Resend OTP Email Error]:', mailErr.message);
       }
     }
 
-    if (isSmsOtpEnabled && pending.mobile_no) {
+    if (isSmsOtpEnabled && pending.mobile_no && !pending.mobile_verified) {
       try {
         await twoFactorService.sendCustomOtp({
           mobile: pending.mobile_no,
-          otp,
+          otp: smsOtp,
           template: 'OTP Verification',
           purpose: 'Registration'
         });
@@ -1471,9 +1736,9 @@ router.post(['/resend-email-otp', '/resend-otp'], async (req, res) => {
       }
     }
 
-    return ok(res, { email: pending.email, mobile: pending.mobile_no }, 'OTP resent successfully');
+    return ok(res, { email: pending.email, mobile: pending.mobile_no }, 'New OTPs have been sent.');
   } catch (e) {
-    console.error('[resend-email-otp]', e);
+    console.error('[resend-otp error]:', e);
     return err(res, e.message);
   }
 });
