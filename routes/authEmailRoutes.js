@@ -333,7 +333,7 @@ async function canResend(email) {
     WHERE email = ${normalizeEmail(email)}`;
 
   if (!last) return true;
-  return (Date.now() - new Date(last.updated_at).getTime()) > 60_000;
+  return (Date.now() - new Date(last.updated_at).getTime()) > 180_000; // 3 minutes cooldown
 }
 
 async function createUserWithUniqueMemberId(db, pending) {
@@ -1052,7 +1052,7 @@ router.post('/send-email-otp', async (req, res) => {
     if (!pending) return err(res, 'Start registration before requesting OTP', 404);
 
     if (!(await canResend(email))) {
-      return err(res, 'Please wait 60 seconds before requesting a new OTP', 429);
+      return err(res, 'Please wait 3 minutes before requesting a new OTP', 429);
     }
 
     const otp = genOTP();
@@ -1623,7 +1623,7 @@ router.post(['/resend-email-otp'], async (req, res) => {
 
     const lookupKey = pending.email || cleanMobile;
     if (!(await canResend(lookupKey))) {
-      return err(res, 'Please wait 60 seconds before requesting a new OTP', 429);
+      return err(res, 'Please wait 3 minutes before requesting a new OTP', 429);
     }
 
     const emailOtp = genOTP();
@@ -1654,7 +1654,7 @@ router.post(['/resend-sms-otp', '/resend-contact-otp', '/resend-mobile-otp'], as
 
     const lookupKey = `${pending.email || cleanMobile}-sms`;
     if (!(await canResend(lookupKey))) {
-      return err(res, 'Please wait 60 seconds before requesting a new SMS OTP', 429);
+      return err(res, 'Please wait 3 minutes before requesting a new SMS OTP', 429);
     }
 
     const smsOtp = genOTP();
@@ -1700,7 +1700,7 @@ router.post(['/resend-otp'], async (req, res) => {
 
     const lookupKey = pending.email || cleanMobile;
     if (!(await canResend(lookupKey))) {
-      return err(res, 'Please wait 60 seconds before requesting a new OTP', 429);
+      return err(res, 'Please wait 3 minutes before requesting a new OTP', 429);
     }
 
     const emailOtp = genOTP();
