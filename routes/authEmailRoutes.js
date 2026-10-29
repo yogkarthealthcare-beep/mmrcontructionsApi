@@ -1615,57 +1615,48 @@ router.get('/sync-sequences', async (req, res) => {
 
 router.get('/standardize-associate-ids', async (_req, res) => {
   try {
-    // 1. Update users table: any MMR-ASC- with 5 digits (e.g. MMR-ASC-00002 -> MMR-ASC-0002)
+    // 1. Specifically fix Vikas Rajput and any associate to exact LPAD(user_id, 4, '0')
     const updatedUsers = await sql`
       UPDATE users
       SET 
-        member_id = CASE
-          WHEN member_id ~* '^MMR-ASC-[0-9]+$' THEN 'MMR-ASC-' || LPAD(SUBSTRING(member_id FROM 9)::text, 4, '0')
-          ELSE member_id
-        END,
-        invitation_code = CASE
-          WHEN invitation_code ~* '^MMR-ASC-[0-9]+$' THEN 'MMR-ASC-' || LPAD(SUBSTRING(invitation_code FROM 9)::text, 4, '0')
-          ELSE invitation_code
-        END
-      WHERE member_id ~* '^MMR-ASC-[0-9]+$' OR invitation_code ~* '^MMR-ASC-[0-9]+$'
+        member_id = 'MMR-ASC-' || LPAD(user_id::text, 4, '0'),
+        invitation_code = 'MMR-ASC-' || LPAD(user_id::text, 4, '0')
+      WHERE (LOWER(user_type::text) = 'associate' OR member_id ~* '^MMR-ASC-') AND user_id != 1
       RETURNING user_id, full_name, member_id, invitation_code
     `;
 
     // 2. Update associate_enrollment table
     const updatedEnrollments = await sql`
-      UPDATE associate_enrollment
+      UPDATE associate_enrollment ae
       SET
-        member_id = CASE
-          WHEN member_id ~* '^MMR-ASC-[0-9]+$' THEN 'MMR-ASC-' || LPAD(SUBSTRING(member_id FROM 9)::text, 4, '0')
-          ELSE member_id
-        END,
-        id = CASE
-          WHEN id ~* '^MMR-ASC-[0-9]+$' THEN 'MMR-ASC-' || LPAD(SUBSTRING(id FROM 9)::text, 4, '0')
-          ELSE id
-        END
-      WHERE member_id ~* '^MMR-ASC-[0-9]+$' OR id ~* '^MMR-ASC-[0-9]+$'
-      RETURNING id, member_id, full_name
+        member_id = u.member_id,
+        id = u.member_id
+      FROM users u
+      WHERE (ae.user_id = u.user_id OR (ae.user_id IS NULL AND LOWER(TRIM(ae.full_name)) = LOWER(TRIM(u.full_name))))
+        AND u.member_id ~* '^MMR-ASC-'
+      RETURNING ae.id, ae.member_id, ae.full_name
     `.catch(() => []);
 
     // 3. Update associate_referral_links table
     await sql`
-      UPDATE associate_referral_links
-      SET referral_code = 'MMR-ASC-' || LPAD(SUBSTRING(referral_code FROM 9)::text, 4, '0')
-      WHERE referral_code ~* '^MMR-ASC-[0-9]+$'
+      UPDATE associate_referral_links arl
+      SET referral_code = u.invitation_code
+      FROM users u
+      WHERE arl.user_id = u.user_id AND u.invitation_code ~* '^MMR-ASC-'
     `.catch(() => {});
 
     // 4. Update referral_registrations table
     await sql`
       UPDATE referral_registrations
-      SET sponsor_invite_code = 'MMR-ASC-' || LPAD(SUBSTRING(sponsor_invite_code FROM 9)::text, 4, '0')
-      WHERE sponsor_invite_code ~* '^MMR-ASC-[0-9]+$'
+      SET sponsor_invite_code = 'MMR-ASC-0002'
+      WHERE sponsor_invite_code IN ('MMR-ASC-00002', 'MMR-ASC-0000')
     `.catch(() => {});
 
     // 5. Update pending_registrations table
     await sql`
       UPDATE pending_registrations
-      SET sponsor_invite_code = 'MMR-ASC-' || LPAD(SUBSTRING(sponsor_invite_code FROM 9)::text, 4, '0')
-      WHERE sponsor_invite_code ~* '^MMR-ASC-[0-9]+$'
+      SET sponsor_invite_code = 'MMR-ASC-0002'
+      WHERE sponsor_invite_code IN ('MMR-ASC-00002', 'MMR-ASC-0000')
     `.catch(() => {});
 
     // 6. Ensure PostgreSQL function fn_generate_member_id produces 4 digits for Associate
