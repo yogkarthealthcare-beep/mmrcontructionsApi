@@ -78,7 +78,7 @@ async function getAdminVirtualNode(adminUser, showCustomers = false) {
 /**
  * 1. GET /api/admin/network-tree
  * Fetches root + descendants up to `depth` levels (clamped to 1..6, default 4).
- * If root=ADMIN, top level is strictly user_type = 'Associate' with sponsor_user_id IS NULL.
+ * Default root starts from the top associate (Suraj Kumar Verma / MMR00001) rather than a virtual Admin node.
  */
 router.get('/', async (req, res) => {
   try {
@@ -87,175 +87,125 @@ router.get('/', async (req, res) => {
     const depth = Math.min(Math.max(1, parseInt(req.query.depth || '4', 10) || 4), 6);
     const showCustomers = String(req.query.show_customers || 'false').toLowerCase() === 'true';
 
-    const isRootAdmin = rawRoot.toUpperCase() === 'ADMIN' || rawRoot === '0' || rawRoot === 'MMR-0';
-    const rootUserId = !isRootAdmin ? parseInt(rawRoot, 10) : null;
+    const isRootAdmin = rawRoot.toUpperCase() === 'ADMIN' || rawRoot === '0' || rawRoot === 'MMR-0' || !rawRoot;
+    let rootUserId = !isRootAdmin ? parseInt(rawRoot, 10) : null;
 
-    if (!isRootAdmin && (!rootUserId || isNaN(rootUserId))) {
-      return err(res, 'Valid root user_id or "ADMIN" is required', 400);
-    }
+    let targetRootId = rootUserId;
 
-    let nodes = [];
-
-    if (isRootAdmin) {
-      const adminRoot = await getAdminVirtualNode(req.admin, showCustomers);
-
-      const rows = await sql`
-        WITH RECURSIVE tree_cte AS (
-          -- Level 1: Top-level Associates ONLY (sponsor_user_id IS NULL, user_type = 'Associate')
-          SELECT u.user_id, u.member_id, u.full_name, u.user_type::text AS user_type,
-                 u.account_status::text AS account_status, u.sponsor_user_id,
-                 u.mobile_no, u.email, u.registered_at,
-                 1 AS level,
-                 ARRAY[u.user_id] AS path,
-                 false AS is_cycle
-          FROM users u
-          WHERE u.sponsor_user_id IS NULL
-            AND u.user_type::text = 'Associate'
-
-          UNION ALL
-
-          -- Deeper levels (Level 2..depth)
-          SELECT u.user_id, u.member_id, u.full_name, u.user_type::text AS user_type,
-                 u.account_status::text AS account_status, u.sponsor_user_id,
-                 u.mobile_no, u.email, u.registered_at,
-                 t.level + 1 AS level,
-                 t.path || u.user_id AS path,
-                 u.user_id = ANY(t.path) AS is_cycle
-          FROM users u
-          JOIN tree_cte t ON u.sponsor_user_id = t.user_id
-          WHERE t.level < ${depth}
-            AND NOT t.is_cycle
-            AND (
-              (${showCustomers} = true AND u.user_type::text IN ('Associate', 'Team Member', 'Customer'))
-              OR (${showCustomers} = false AND u.user_type::text IN ('Associate', 'Team Member'))
-            )
-        )
-        SELECT t.user_id, t.member_id, t.full_name, t.user_type, t.account_status,
-               t.sponsor_user_id, t.mobile_no, t.email, t.registered_at, t.level,
-               '' AS profile_image_url,
-               tm.slot_number,
-               sp.member_id AS sponsor_member_id, sp.full_name AS sponsor_name,
-               COALESCE(ast.total_gaj_sold, 0)::numeric AS sales_gaj,
-               COALESCE(ast.total_commission_earned, 0)::numeric AS commission_earned,
-               (
-                 SELECT COUNT(*)::int FROM users c
-                 WHERE c.sponsor_user_id = t.user_id
-                   AND (
-                     (${showCustomers} = true AND c.user_type::text IN ('Associate', 'Team Member', 'Customer'))
-                     OR (${showCustomers} = false AND c.user_type::text IN ('Associate', 'Team Member'))
-                   )
-               ) AS children_count,
-               (
-                 WITH RECURSIVE downline_cte AS (
-                   SELECT d.user_id, ARRAY[d.user_id] AS path, false AS is_cycle
-                   FROM users d
-                   WHERE d.sponsor_user_id = t.user_id
-                     AND (
-                       (${showCustomers} = true AND d.user_type::text IN ('Associate', 'Team Member', 'Customer'))
-                       OR (${showCustomers} = false AND d.user_type::text IN ('Associate', 'Team Member'))
-                     )
-                   UNION ALL
-                   SELECT gd.user_id, dc.path || gd.user_id, gd.user_id = ANY(dc.path)
-                   FROM users gd
-                   JOIN downline_cte dc ON gd.sponsor_user_id = dc.user_id
-                   WHERE NOT dc.is_cycle AND array_length(dc.path, 1) < 20
-                     AND (
-                       (${showCustomers} = true AND gd.user_type::text IN ('Associate', 'Team Member', 'Customer'))
-                       OR (${showCustomers} = false AND gd.user_type::text IN ('Associate', 'Team Member'))
-                     )
-                 )
-                 SELECT COUNT(*)::int FROM downline_cte
-               ) AS downline_count
-        FROM tree_cte t
-        LEFT JOIN team_members tm ON tm.user_id = t.user_id
-        LEFT JOIN users sp ON sp.user_id = t.sponsor_user_id
-        LEFT JOIN associate_sales_tracker ast ON ast.associate_user_id = t.user_id
-        ORDER BY t.level, COALESCE(tm.slot_number, 999), t.registered_at ASC;
+    if (isRootAdmin || !targetRootId || isNaN(targetRootId)) {
+      // Find the primary top associate (e.g. Suraj Kumar Verma / MMR00001)
+      const [topAssociate] = await sql`
+        SELECT user_id, member_id, full_name, user_type::text AS user_type
+        FROM users
+        WHERE sponsor_user_id IS NULL AND user_type::text = 'Associate'
+        ORDER BY user_id ASC
+        LIMIT 1
       `;
-
-      nodes = [adminRoot, ...rows.map(formatNode)];
-    } else {
-      const rows = await sql`
-        WITH RECURSIVE tree_cte AS (
-          -- Level 0: The selected root user
-          SELECT u.user_id, u.member_id, u.full_name, u.user_type::text AS user_type,
-                 u.account_status::text AS account_status, u.sponsor_user_id,
-                 u.mobile_no, u.email, u.registered_at,
-                 0 AS level,
-                 ARRAY[u.user_id] AS path,
-                 false AS is_cycle
-          FROM users u
-          WHERE u.user_id = ${rootUserId}
-
-          UNION ALL
-
-          -- Deeper levels (Level 1..depth)
-          SELECT u.user_id, u.member_id, u.full_name, u.user_type::text AS user_type,
-                 u.account_status::text AS account_status, u.sponsor_user_id,
-                 u.mobile_no, u.email, u.registered_at,
-                 t.level + 1 AS level,
-                 t.path || u.user_id AS path,
-                 u.user_id = ANY(t.path) AS is_cycle
-          FROM users u
-          JOIN tree_cte t ON u.sponsor_user_id = t.user_id
-          WHERE t.level < ${depth}
-            AND NOT t.is_cycle
-            AND (
-              (${showCustomers} = true AND u.user_type::text IN ('Associate', 'Team Member', 'Customer'))
-              OR (${showCustomers} = false AND u.user_type::text IN ('Associate', 'Team Member'))
-            )
-        )
-        SELECT t.user_id, t.member_id, t.full_name, t.user_type, t.account_status,
-               t.sponsor_user_id, t.mobile_no, t.email, t.registered_at, t.level,
-               '' AS profile_image_url,
-               tm.slot_number,
-               sp.member_id AS sponsor_member_id, sp.full_name AS sponsor_name,
-               COALESCE(ast.total_gaj_sold, 0)::numeric AS sales_gaj,
-               COALESCE(ast.total_commission_earned, 0)::numeric AS commission_earned,
-               (
-                 SELECT COUNT(*)::int FROM users c
-                 WHERE c.sponsor_user_id = t.user_id
-                   AND (
-                     (${showCustomers} = true AND c.user_type::text IN ('Associate', 'Team Member', 'Customer'))
-                     OR (${showCustomers} = false AND c.user_type::text IN ('Associate', 'Team Member'))
-                   )
-               ) AS children_count,
-               (
-                 WITH RECURSIVE downline_cte AS (
-                   SELECT d.user_id, ARRAY[d.user_id] AS path, false AS is_cycle
-                   FROM users d
-                   WHERE d.sponsor_user_id = t.user_id
-                     AND (
-                       (${showCustomers} = true AND d.user_type::text IN ('Associate', 'Team Member', 'Customer'))
-                       OR (${showCustomers} = false AND d.user_type::text IN ('Associate', 'Team Member'))
-                     )
-                   UNION ALL
-                   SELECT gd.user_id, dc.path || gd.user_id, gd.user_id = ANY(dc.path)
-                   FROM users gd
-                   JOIN downline_cte dc ON gd.sponsor_user_id = dc.user_id
-                   WHERE NOT dc.is_cycle AND array_length(dc.path, 1) < 20
-                     AND (
-                       (${showCustomers} = true AND gd.user_type::text IN ('Associate', 'Team Member', 'Customer'))
-                       OR (${showCustomers} = false AND gd.user_type::text IN ('Associate', 'Team Member'))
-                     )
-                 )
-                 SELECT COUNT(*)::int FROM downline_cte
-               ) AS downline_count
-        FROM tree_cte t
-        LEFT JOIN team_members tm ON tm.user_id = t.user_id
-        LEFT JOIN users sp ON sp.user_id = t.sponsor_user_id
-        LEFT JOIN associate_sales_tracker ast ON ast.associate_user_id = t.user_id
-        ORDER BY t.level, COALESCE(tm.slot_number, 999), t.registered_at ASC;
-      `;
-
-      if (rows.length === 0) {
-        return err(res, 'Root user not found', 404);
+      if (topAssociate) {
+        targetRootId = topAssociate.user_id;
+      } else {
+        // Fallback to first associate in database
+        const [firstAssoc] = await sql`
+          SELECT user_id, member_id, full_name, user_type::text AS user_type
+          FROM users
+          WHERE user_type::text = 'Associate'
+          ORDER BY user_id ASC
+          LIMIT 1
+        `;
+        targetRootId = firstAssoc?.user_id || null;
       }
-      nodes = rows.map(formatNode);
     }
+
+    if (!targetRootId) {
+      return ok(res, {
+        root: null,
+        depth,
+        total_nodes: 0,
+        nodes: []
+      });
+    }
+
+    const rows = await sql`
+      WITH RECURSIVE tree_cte AS (
+        -- Level 0: The selected root user (Suraj Kumar Verma or specified associate)
+        SELECT u.user_id, u.member_id, u.full_name, u.user_type::text AS user_type,
+               u.account_status::text AS account_status, u.sponsor_user_id,
+               u.mobile_no, u.email, u.registered_at,
+               0 AS level,
+               ARRAY[u.user_id] AS path,
+               false AS is_cycle
+        FROM users u
+        WHERE u.user_id = ${targetRootId}
+
+        UNION ALL
+
+        -- Deeper levels (Level 1..depth)
+        SELECT u.user_id, u.member_id, u.full_name, u.user_type::text AS user_type,
+               u.account_status::text AS account_status, u.sponsor_user_id,
+               u.mobile_no, u.email, u.registered_at,
+               t.level + 1 AS level,
+               t.path || u.user_id AS path,
+               u.user_id = ANY(t.path) AS is_cycle
+        FROM users u
+        JOIN tree_cte t ON u.sponsor_user_id = t.user_id
+        WHERE t.level < ${depth}
+          AND NOT t.is_cycle
+          AND (
+            (${showCustomers} = true AND u.user_type::text IN ('Associate', 'Team Member', 'Customer'))
+            OR (${showCustomers} = false AND u.user_type::text IN ('Associate', 'Team Member'))
+          )
+      )
+      SELECT t.user_id, t.member_id, t.full_name, t.user_type, t.account_status,
+             t.sponsor_user_id, t.mobile_no, t.email, t.registered_at, t.level,
+             '' AS profile_image_url,
+             tm.slot_number,
+             sp.member_id AS sponsor_member_id, sp.full_name AS sponsor_name,
+             COALESCE(ast.total_gaj_sold, 0)::numeric AS sales_gaj,
+             COALESCE(ast.total_commission_earned, 0)::numeric AS commission_earned,
+             (
+               SELECT COUNT(*)::int FROM users c
+               WHERE c.sponsor_user_id = t.user_id
+                 AND (
+                   (${showCustomers} = true AND c.user_type::text IN ('Associate', 'Team Member', 'Customer'))
+                   OR (${showCustomers} = false AND c.user_type::text IN ('Associate', 'Team Member'))
+                 )
+             ) AS children_count,
+             (
+               WITH RECURSIVE downline_cte AS (
+                 SELECT d.user_id, ARRAY[d.user_id] AS path, false AS is_cycle
+                 FROM users d
+                 WHERE d.sponsor_user_id = t.user_id
+                   AND (
+                     (${showCustomers} = true AND d.user_type::text IN ('Associate', 'Team Member', 'Customer'))
+                     OR (${showCustomers} = false AND d.user_type::text IN ('Associate', 'Team Member'))
+                   )
+                 UNION ALL
+                 SELECT gd.user_id, dc.path || gd.user_id, gd.user_id = ANY(dc.path)
+                 FROM users gd
+                 JOIN downline_cte dc ON gd.sponsor_user_id = dc.user_id
+                 WHERE NOT dc.is_cycle AND array_length(dc.path, 1) < 20
+                   AND (
+                     (${showCustomers} = true AND gd.user_type::text IN ('Associate', 'Team Member', 'Customer'))
+                     OR (${showCustomers} = false AND gd.user_type::text IN ('Associate', 'Team Member'))
+                   )
+               )
+               SELECT COUNT(*)::int FROM downline_cte
+             ) AS downline_count
+      FROM tree_cte t
+      LEFT JOIN team_members tm ON tm.user_id = t.user_id
+      LEFT JOIN users sp ON sp.user_id = t.sponsor_user_id
+      LEFT JOIN associate_sales_tracker ast ON ast.associate_user_id = t.user_id
+      ORDER BY t.level, COALESCE(tm.slot_number, 999), t.registered_at ASC;
+    `;
+
+    if (rows.length === 0) {
+      return err(res, 'Root user not found', 404);
+    }
+
+    const nodes = rows.map(formatNode);
 
     return ok(res, {
-      root: isRootAdmin ? 'ADMIN' : rootUserId,
+      root: targetRootId,
       depth,
       total_nodes: nodes.length,
       nodes
@@ -272,25 +222,36 @@ router.get('/', async (req, res) => {
  */
 router.get('/children', async (req, res) => {
   try {
-    const rawParent = String(req.query.parent || 'ADMIN').trim();
+    const rawParent = String(req.query.parent || '').trim();
     const page = Math.max(1, parseInt(req.query.page || '1', 10) || 1);
     const pageSize = Math.min(Math.max(1, parseInt(req.query.pageSize || '100', 10) || 100), 200);
     const offset = (page - 1) * pageSize;
     const showCustomers = String(req.query.show_customers || 'false').toLowerCase() === 'true';
 
-    const isParentAdmin = rawParent.toUpperCase() === 'ADMIN' || rawParent === '0' || rawParent === 'MMR-0';
-    const parentUserId = !isParentAdmin ? parseInt(rawParent, 10) : null;
+    const isParentAdmin = rawParent.toUpperCase() === 'ADMIN' || rawParent === '0' || rawParent === 'MMR-0' || !rawParent;
+    let parentUserId = !isParentAdmin ? parseInt(rawParent, 10) : null;
 
-    if (!isParentAdmin && (!parentUserId || isNaN(parentUserId))) {
-      return err(res, 'Valid parent user_id or "ADMIN" is required', 400);
+    if (isParentAdmin || !parentUserId || isNaN(parentUserId)) {
+      const [topAssociate] = await sql`
+        SELECT user_id FROM users WHERE sponsor_user_id IS NULL AND user_type::text = 'Associate' ORDER BY user_id ASC LIMIT 1
+      `;
+      parentUserId = topAssociate?.user_id || null;
     }
 
-    const whereCondition = isParentAdmin
-      ? sql`u.sponsor_user_id IS NULL AND u.user_type::text = 'Associate'`
-      : sql`u.sponsor_user_id = ${parentUserId} AND (
-          (${showCustomers} = true AND u.user_type::text IN ('Associate', 'Team Member', 'Customer'))
-          OR (${showCustomers} = false AND u.user_type::text IN ('Associate', 'Team Member'))
-        )`;
+    if (!parentUserId) {
+      return ok(res, {
+        parent: null,
+        total: 0,
+        page,
+        pageSize,
+        items: []
+      });
+    }
+
+    const whereCondition = sql`u.sponsor_user_id = ${parentUserId} AND (
+      (${showCustomers} = true AND u.user_type::text IN ('Associate', 'Team Member', 'Customer'))
+      OR (${showCustomers} = false AND u.user_type::text IN ('Associate', 'Team Member'))
+    )`;
 
     const [totalCountRow] = await sql`
       SELECT COUNT(*)::int AS count
@@ -425,9 +386,26 @@ router.get('/path', async (req, res) => {
       return err(res, 'user_id is required', 400);
     }
 
-    const userId = parseInt(rawUserId, 10);
-    if (!userId || isNaN(userId)) {
-      return err(res, 'Valid numeric user_id is required', 400);
+    const isRawAdmin = String(rawUserId).toUpperCase() === 'ADMIN' || rawUserId === '0' || rawUserId === 'MMR-0';
+    let userId = !isRawAdmin ? parseInt(rawUserId, 10) : null;
+
+    if (isRawAdmin || !userId || isNaN(userId)) {
+      const [topAssociate] = await sql`
+        SELECT user_id, member_id, full_name, user_type::text AS user_type
+        FROM users
+        WHERE sponsor_user_id IS NULL AND user_type::text = 'Associate'
+        ORDER BY user_id ASC
+        LIMIT 1
+      `;
+      if (topAssociate) {
+        return ok(res, [{
+          user_id: topAssociate.user_id,
+          member_id: topAssociate.member_id,
+          full_name: topAssociate.full_name,
+          user_type: topAssociate.user_type
+        }]);
+      }
+      return ok(res, []);
     }
 
     const ancestors = await sql`
@@ -454,19 +432,12 @@ router.get('/path', async (req, res) => {
       return err(res, 'User not found', 404);
     }
 
-    const adminNode = {
-      user_id: 'ADMIN',
-      member_id: 'MMR-0',
-      full_name: 'MMR Admin',
-      user_type: 'Admin'
-    };
-
-    const breadcrumbs = [adminNode, ...ancestors.map(a => ({
+    const breadcrumbs = ancestors.map(a => ({
       user_id: a.user_id,
       member_id: a.member_id,
       full_name: a.full_name,
       user_type: a.user_type
-    }))];
+    }));
 
     return ok(res, breadcrumbs);
   } catch (e) {
