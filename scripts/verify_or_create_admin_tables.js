@@ -1,6 +1,7 @@
 import sql from "../db.js";
 import bcrypt from "bcryptjs";
 import { ensureSalesAttributionSchema } from "../services/salesAttributionSchema.service.js";
+import { ensureInstallmentReminderSchema } from "../services/installmentReminder.service.js";
 
 async function verifyOrCreateAdminTables() {
   try {
@@ -202,6 +203,14 @@ async function verifyOrCreateAdminTables() {
       console.log("Sales attribution schema synchronized successfully ✅");
     } catch (schemaErr) {
       console.warn("Sales attribution schema sync warning:", schemaErr.message);
+    }
+
+    try {
+      console.log("=== SYNCHRONIZING INSTALLMENT REMINDER SCHEMA ===");
+      await ensureInstallmentReminderSchema(sql);
+      console.log("Installment reminder schema synchronized successfully ✅");
+    } catch (reminderErr) {
+      console.warn("Installment reminder schema sync warning:", reminderErr.message);
     }
 
     process.exit(0);

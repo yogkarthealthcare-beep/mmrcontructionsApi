@@ -60,6 +60,8 @@ import commissionService from "./services/commissionService.js";
 import installmentPlansRoutes from "./routes/installment-plans.routes.js";
 import installmentService from "./services/installmentService.js";
 import emiManagementRoutes from "./routes/emi-management.routes.js";
+import installmentReminderRoutes from "./routes/installment-reminder.routes.js";
+import { startInstallmentReminderScheduler } from "./services/installmentReminder.service.js";
 import { ensureSalesAttributionSchema } from "./services/salesAttributionSchema.service.js";
 import { isSponsorApprovalFeatureEnabled, hasCustomerApprovalAuditColumns } from "./services/customerApprovalAuthority.service.js";
 
@@ -362,6 +364,7 @@ app.use('/api', teamMemberCommissionsRoutes);
 app.use('/api', masterDataRoutes);
 app.use('/api', installmentPlansRoutes);
 app.use('/api', emiManagementRoutes);
+app.use('/api', installmentReminderRoutes);
 installmentService.ensureInstallmentSchema(sql).catch(err => console.error("[InstallmentSchema] Initialization error:", err));
 ensureSalesAttributionSchema(sql).catch(err => console.error("[SalesAttributionSchema] Initialization error:", err));
 
@@ -17321,6 +17324,14 @@ if (shouldStartServer) {
       });
     } catch (schedErr) {
       console.warn("[MMR API] Backup scheduler init warning:", schedErr.message);
+    }
+  }
+
+  if (process.env.NODE_ENV !== "test") {
+    try {
+      startInstallmentReminderScheduler();
+    } catch (reminderSchedErr) {
+      console.warn("[MMR API] Installment reminder scheduler init warning:", reminderSchedErr.message);
     }
   }
 
