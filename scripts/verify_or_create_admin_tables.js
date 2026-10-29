@@ -2,6 +2,7 @@ import sql from "../db.js";
 import bcrypt from "bcryptjs";
 import { ensureSalesAttributionSchema } from "../services/salesAttributionSchema.service.js";
 import { ensureInstallmentReminderSchema } from "../services/installmentReminder.service.js";
+import { seedRootAssociateSuraj } from "../services/rootAssociateService.js";
 
 async function verifyOrCreateAdminTables() {
   try {
@@ -231,6 +232,14 @@ async function verifyOrCreateAdminTables() {
       console.log("Installment reminder schema synchronized successfully ✅");
     } catch (reminderErr) {
       console.warn("Installment reminder schema sync warning:", reminderErr.message);
+    }
+
+    try {
+      console.log("=== ENSURING ROOT ASSOCIATE #1 (SURAJ KUMAR VERMA) ===");
+      await seedRootAssociateSuraj();
+      console.log("Root associate #1 synchronized successfully ✅");
+    } catch (seedErr) {
+      console.warn("Root associate seed warning:", seedErr.message);
     }
 
     process.exit(0);

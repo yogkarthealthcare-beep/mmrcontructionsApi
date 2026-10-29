@@ -40,6 +40,7 @@ import { ensureUnifiedPaymentSchema } from './services/unifiedPaymentSchema.serv
 import { runHistoricalPaymentMigration } from './services/unifiedPaymentMigration.service.js';
 import fileStorageService, { saveFileToVPS, deleteFileFromStorage, getStorageRoot } from "./services/fileStorage.service.js";
 import profileCleanupService, { deleteAssociateProfile, deleteCustomerProfile, deleteInvestorProfile } from "./services/profileCleanupService.js";
+import { seedRootAssociateSuraj } from "./services/rootAssociateService.js";
 import { startBackupScheduler } from "./services/databaseBackup.service.js";
 import { sendEmail, otpEmailHtml, passwordChangedEmailHtml } from "./emailService.js";
 import { getVersionInfo } from "./services/version.service.js";
@@ -10647,6 +10648,20 @@ app.put("/api/admin/customers/:id",
       return ok(res, customer, "Customer updated successfully");
     } catch (e) {
       return err(res, e.message);
+    }
+  }
+);
+
+app.post("/api/admin/associates/seed-root",
+  verifyAdminToken,
+  role("SuperAdmin", "Admin"),
+  async (req, res) => {
+    try {
+      const result = await seedRootAssociateSuraj();
+      return ok(res, result, "Root Associate Suraj Kumar Verma registered successfully");
+    } catch (e) {
+      console.error("[Seed Root Associate Error]:", e);
+      return err(res, "Failed to seed root associate: " + e.message);
     }
   }
 );
