@@ -137,6 +137,9 @@ jobs:
             echo "🔍 Running idempotent admin table & superadmin user check..."
             node scripts/verify_or_create_admin_tables.js || echo "⚠️ Non-critical admin table script output"
 
+            echo "🔍 Running customer approval hierarchy schema migration check..."
+            node scripts/ensure_customer_approval_schema.js || echo "⚠️ Non-critical customer approval schema output"
+
             echo "🧹 Clearing inquiries table data per user request..."
             node scripts/clear_inquiries_table.js || echo "⚠️ Non-critical inquiries clear script output"
 

@@ -1148,15 +1148,7 @@ export async function updateTeamMemberRecord(
     throw new Error("Team member not found");
   }
 
-  if (existing.is_final_submitted && !isAdmin) {
-    const err: any = new Error("Enrollment is permanently finalized and cannot be modified.");
-    err.statusCode = 403;
-    throw err;
-  }
 
-  if (existing.status !== "pending" && !isAdmin) {
-    throw new Error("Only pending team member records can be updated");
-  }
 
   const isFinalSubmit = (data.isFinalSubmit === true || (data as any).isFinalSubmit === 'true' || (data as any).is_final_submitted === true || (data as any).is_final_submitted === 'true');
 
@@ -1225,11 +1217,6 @@ export async function finalSubmitTeamMemberRecord(
     throw err;
   }
 
-  if (existing.is_final_submitted && !isAdmin) {
-    const err: any = new Error("Enrollment is permanently finalized and cannot be modified.");
-    err.statusCode = 403;
-    throw err;
-  }
 
   const [updated] = await sql`
     UPDATE team_members
@@ -1732,6 +1719,7 @@ export async function approveTeamMemberByAssociate(
 
   return approvedRecord;
 }
+
 
 
 

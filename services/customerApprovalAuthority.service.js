@@ -469,9 +469,14 @@ export async function hasCustomerApprovalAuditColumns(sql) {
         AND column_name = 'approved_by_user_id'
       LIMIT 1
     `;
-    cachedSchemaStatus = Boolean(rows && rows.length > 0);
-    lastCheckTime = now;
-    return cachedSchemaStatus;
+    if (rows && rows.length > 0) {
+      cachedSchemaStatus = true;
+      lastCheckTime = now;
+      return true;
+    }
+
+    // Automatically apply additive migration if columns are missing
+    return await ensureCustomerApprovalSchema(sql);
   } catch (err) {
     console.warn("[hasCustomerApprovalAuditColumns] Schema check warning:", err.message);
     return false;
@@ -479,12 +484,71 @@ export async function hasCustomerApprovalAuditColumns(sql) {
 }
 
 /**
- * Read-only schema verification.
- * Does NOT execute any DDL (no ALTER TABLE).
- * Returns true if migration 20261020000000 has been applied, false otherwise.
+ * Ensures required audit columns from migration 20261020000000 exist across
+ * customer_enrollment_submissions, user_documents, and user_kyc_profiles.
+ * Safe, idempotent DDL (IF NOT EXISTS).
  */
 export async function ensureCustomerApprovalSchema(sql) {
-  return await hasCustomerApprovalAuditColumns(sql);
+  try {
+    await sql`
+      ALTER TABLE customer_enrollment_submissions
+        ADD COLUMN IF NOT EXISTS approved_by_user_id INTEGER,
+        ADD COLUMN IF NOT EXISTS approved_by_member_id VARCHAR(50),
+        ADD COLUMN IF NOT EXISTS approved_by_name VARCHAR(150),
+        ADD COLUMN IF NOT EXISTS approved_by_role VARCHAR(50),
+        ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS reject_reason TEXT,
+        ADD COLUMN IF NOT EXISTS rejected_by_user_id INTEGER,
+        ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ
+    `;
+
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ces_approved_by ON customer_enrollment_submissions(approved_by_user_id)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ces_approved_at ON customer_enrollment_submissions(approved_at)
+    `;
+
+    await sql`
+      ALTER TABLE user_documents
+        ADD COLUMN IF NOT EXISTS verified_by_user_id INTEGER,
+        ADD COLUMN IF NOT EXISTS verifier_member_id VARCHAR(50),
+        ADD COLUMN IF NOT EXISTS verifier_name VARCHAR(150),
+        ADD COLUMN IF NOT EXISTS verifier_role VARCHAR(50),
+        ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS reject_reason TEXT,
+        ADD COLUMN IF NOT EXISTS rejected_by_user_id INTEGER,
+        ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ
+    `;
+
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_user_docs_verifier_uid ON user_documents(verified_by_user_id)
+    `;
+
+    await sql`
+      ALTER TABLE user_kyc_profiles
+        ADD COLUMN IF NOT EXISTS reviewed_by_user_id INTEGER,
+        ADD COLUMN IF NOT EXISTS reviewer_member_id VARCHAR(50),
+        ADD COLUMN IF NOT EXISTS reviewer_name VARCHAR(150),
+        ADD COLUMN IF NOT EXISTS reviewer_role VARCHAR(50),
+        ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS reject_reason TEXT,
+        ADD COLUMN IF NOT EXISTS rejected_by_user_id INTEGER,
+        ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ
+    `;
+
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_user_kyc_reviewer_uid ON user_kyc_profiles(reviewed_by_user_id)
+    `;
+
+    console.log("[CustomerApprovalSchema] Successfully ensured customer approval hierarchy schema.");
+    cachedSchemaStatus = true;
+    lastCheckTime = Date.now();
+    return true;
+  } catch (err) {
+    console.error("[ensureCustomerApprovalSchema] Migration error:", err.message);
+    return false;
+  }
 }
 
 export function resetSchemaCheckCache() {

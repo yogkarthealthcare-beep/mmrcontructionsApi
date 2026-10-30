@@ -64,7 +64,7 @@ import emiManagementRoutes from "./routes/emi-management.routes.js";
 import installmentReminderRoutes from "./routes/installment-reminder.routes.js";
 import { startInstallmentReminderScheduler } from "./services/installmentReminder.service.js";
 import { ensureSalesAttributionSchema } from "./services/salesAttributionSchema.service.js";
-import { isSponsorApprovalFeatureEnabled, hasCustomerApprovalAuditColumns } from "./services/customerApprovalAuthority.service.js";
+import { isSponsorApprovalFeatureEnabled, hasCustomerApprovalAuditColumns, ensureCustomerApprovalSchema } from "./services/customerApprovalAuthority.service.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -17516,6 +17516,7 @@ if (shouldStartServer) {
         ensureSiteHtmlMapSchema().catch(() => { }),
         ensureAnalyticsSchema().catch(() => { }),
         ensureReceiptsTable().catch((e) => console.warn("[MMR API] Receipts schema warning:", e.message)),
+        ensureCustomerApprovalSchema(sql).catch((e) => console.warn("[MMR API] Customer approval schema warning:", e.message)),
         deduplicateNotificationsKeepOnePerCategory().catch((e) => console.warn("[MMR API] Notification cleanup warning:", e.message)),
       ]).catch(() => { });
     } catch (error) {
