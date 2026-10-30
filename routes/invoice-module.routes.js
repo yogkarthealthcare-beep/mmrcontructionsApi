@@ -400,7 +400,8 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
                COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
                COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
                COALESCE(s.site_name, 'MMR City') AS site_name,
-               u.full_name, u.mobile_no, u.email, u.father_name, u.address,
+               u.full_name, u.mobile_no, u.email, u.father_name,
+               COALESCE((SELECT address_line1 FROM user_addresses WHERE user_id = u.user_id LIMIT 1), '') AS address,
                assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile, assoc.user_id AS associate_user_id
         FROM emi_schedules e
         JOIN bookings b ON e.booking_id = b.booking_id
@@ -487,7 +488,8 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
                COALESCE(p.plot_category::text, 'Residential') AS plot_category,
                COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) AS calc_price,
                COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
-               u.full_name, u.mobile_no, u.email, u.father_name, u.address,
+               u.full_name, u.mobile_no, u.email, u.father_name,
+               COALESCE((SELECT address_line1 FROM user_addresses WHERE user_id = u.user_id LIMIT 1), '') AS address,
                assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile, assoc.user_id AS associate_user_id
         FROM bookings b
         LEFT JOIN plots p ON b.plot_id = p.plot_id
@@ -625,7 +627,8 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
                  COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
                  COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) AS calc_price,
                  COALESCE(s.site_name, 'MMR City') AS site_name,
-                 u.father_name, u.address,
+                 u.father_name,
+                 COALESCE((SELECT address_line1 FROM user_addresses WHERE user_id = u.user_id LIMIT 1), '') AS address,
                  assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile, assoc.user_id AS associate_user_id
           FROM bookings b
           LEFT JOIN plots p ON b.plot_id = p.plot_id
