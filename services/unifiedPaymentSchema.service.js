@@ -220,14 +220,19 @@ export async function ensureUnifiedPaymentSchema() {
       console.log("[UnifiedPaymentSchema] receipts column payment_ledger_id check:", e.message);
     }
 
-    // Add payment_ledger_id to payment_vouchers
+    // Add payment_ledger_id, emi_id, booking_id to payment_vouchers and relax legacy constraints
     try {
       await sql`
         ALTER TABLE payment_vouchers 
-        ADD COLUMN IF NOT EXISTS payment_ledger_id BIGINT;
+        ADD COLUMN IF NOT EXISTS payment_ledger_id BIGINT,
+        ADD COLUMN IF NOT EXISTS emi_id BIGINT,
+        ADD COLUMN IF NOT EXISTS booking_id BIGINT;
       `;
+      await sql`ALTER TABLE payment_vouchers ALTER COLUMN voucher_type DROP NOT NULL;`.catch(() => {});
+      await sql`ALTER TABLE payment_vouchers ALTER COLUMN reference_id DROP NOT NULL;`.catch(() => {});
+      await sql`ALTER TABLE payment_vouchers ALTER COLUMN amount DROP NOT NULL;`.catch(() => {});
     } catch (e) {
-      console.log("[UnifiedPaymentSchema] payment_vouchers column payment_ledger_id check:", e.message);
+      console.log("[UnifiedPaymentSchema] payment_vouchers column check:", e.message);
     }
 
     console.log("[UnifiedPaymentSchema] Schema verification completed successfully.");

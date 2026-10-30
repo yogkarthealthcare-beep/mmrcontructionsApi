@@ -180,21 +180,44 @@ async function executePaymentAllocation(paymentId, adminId = null) {
           `;
 
           // Check if voucher exists; create if not
-          const [voucher] = await db`
-            SELECT * FROM payment_vouchers WHERE emi_id = ${emi.emi_id} LIMIT 1
-          `;
-          let voucherId = voucher?.voucher_id;
-          if (!voucher) {
-            const vSerial = await generateVoucherSerial();
-            const [newVoucher] = await db`
-              INSERT INTO payment_vouchers (
-                booking_id, emi_id, user_id, voucher_serial, payment_ledger_id
-              ) VALUES (
-                ${bookingId}, ${emi.emi_id}, ${booking.user_id}, ${vSerial}, ${paymentId}
-              )
-              RETURNING voucher_id
-            `;
-            voucherId = newVoucher.voucher_id;
+          let voucherId = null;
+          try {
+            const [voucher] = await db`
+              SELECT * FROM payment_vouchers 
+              WHERE (reference_id = ${emi.emi_id} AND voucher_type = 'EMI')
+                 OR (emi_id IS NOT NULL AND emi_id = ${emi.emi_id})
+              LIMIT 1
+            `.catch(async () => {
+              return await db`
+                SELECT * FROM payment_vouchers 
+                WHERE reference_id = ${emi.emi_id} AND voucher_type = 'EMI'
+                LIMIT 1
+              `.catch(() => []);
+            });
+            voucherId = voucher?.voucher_id;
+            if (!voucherId) {
+              const vSerial = await generateVoucherSerial();
+              const [newVoucher] = await db`
+                INSERT INTO payment_vouchers (
+                  voucher_serial, voucher_type, reference_id, emi_id, booking_id, user_id, amount, payment_ledger_id, generated_by_admin_id
+                ) VALUES (
+                  ${vSerial}, 'EMI', ${emi.emi_id}, ${emi.emi_id}, ${bookingId}, ${booking.user_id}, ${allocationAmount}, ${paymentId}, ${adminId || null}
+                )
+                RETURNING voucher_id
+              `.catch(async () => {
+                return await db`
+                  INSERT INTO payment_vouchers (
+                    voucher_serial, voucher_type, reference_id, user_id, amount, generated_by_admin_id
+                  ) VALUES (
+                    ${vSerial}, 'EMI', ${emi.emi_id}, ${booking.user_id}, ${allocationAmount}, ${adminId || null}
+                  )
+                  RETURNING voucher_id
+                `.catch(() => []);
+              });
+              voucherId = newVoucher?.voucher_id || null;
+            }
+          } catch (vErr) {
+            console.error("[Voucher check/creation warning]", vErr?.message);
           }
 
           // Trigger MLM commission for this EMI
@@ -681,10 +704,10 @@ router.get("/api/plots/:plotId/payment-dossier", userAuth, async (req, res) => {
     const vouchers = await sql`
       SELECT pv.*, e.installment_no, e.due_date, e.emi_amount, e.paid_amount
       FROM payment_vouchers pv
-      LEFT JOIN emi_schedules e ON e.emi_id = pv.emi_id
-      WHERE pv.booking_id = ${bookingId}
+      LEFT JOIN emi_schedules e ON e.emi_id = pv.reference_id
+      WHERE pv.reference_id IN (SELECT emi_id FROM emi_schedules WHERE booking_id = ${bookingId})
       ORDER BY pv.created_at DESC
-    `;
+    `.catch(() => []);
 
     // 6. Missing Payment Complaints
     const complaints = await sql`
@@ -816,11 +839,17 @@ router.post("/api/admin/payments/:id/approve", adminAuth, async (req, res) => {
     const paymentId = req.params.id;
     const adminId = req.admin?.admin_id || req.admin?.id || 1;
 
-    // Self-healing schema check to prevent enum casting errors
+    // Self-healing schema check to prevent enum casting and missing column errors
     try {
       await sql`ALTER TYPE emi_status_enum ADD VALUE IF NOT EXISTS 'PartiallyPaid'`.catch(() => {});
       await sql`ALTER TYPE emi_status_enum ADD VALUE IF NOT EXISTS 'ProofSubmitted'`.catch(() => {});
       await sql`ALTER TABLE emi_schedules ALTER COLUMN emi_status TYPE VARCHAR(50) USING emi_status::text`.catch(() => {});
+      await sql`ALTER TABLE payment_vouchers ADD COLUMN IF NOT EXISTS emi_id BIGINT`.catch(() => {});
+      await sql`ALTER TABLE payment_vouchers ADD COLUMN IF NOT EXISTS booking_id BIGINT`.catch(() => {});
+      await sql`ALTER TABLE payment_vouchers ADD COLUMN IF NOT EXISTS payment_ledger_id BIGINT`.catch(() => {});
+      await sql`ALTER TABLE payment_vouchers ALTER COLUMN voucher_type DROP NOT NULL`.catch(() => {});
+      await sql`ALTER TABLE payment_vouchers ALTER COLUMN reference_id DROP NOT NULL`.catch(() => {});
+      await sql`ALTER TABLE payment_vouchers ALTER COLUMN amount DROP NOT NULL`.catch(() => {});
     } catch (schemaErr) {}
 
     const [payment] = await sql`

@@ -11369,6 +11369,12 @@ async function ensurePlotAllocationSchema() {
     await sql`ALTER TYPE emi_status_enum ADD VALUE IF NOT EXISTS 'PartiallyPaid'`.catch(() => { });
     await sql`ALTER TYPE emi_status_enum ADD VALUE IF NOT EXISTS 'ProofSubmitted'`.catch(() => { });
     await sql`ALTER TABLE emi_schedules ALTER COLUMN emi_status TYPE VARCHAR(50) USING emi_status::text`.catch(() => { });
+    await sql`ALTER TABLE payment_vouchers ADD COLUMN IF NOT EXISTS emi_id BIGINT`.catch(() => { });
+    await sql`ALTER TABLE payment_vouchers ADD COLUMN IF NOT EXISTS booking_id BIGINT`.catch(() => { });
+    await sql`ALTER TABLE payment_vouchers ADD COLUMN IF NOT EXISTS payment_ledger_id BIGINT`.catch(() => { });
+    await sql`ALTER TABLE payment_vouchers ALTER COLUMN voucher_type DROP NOT NULL`.catch(() => { });
+    await sql`ALTER TABLE payment_vouchers ALTER COLUMN reference_id DROP NOT NULL`.catch(() => { });
+    await sql`ALTER TABLE payment_vouchers ALTER COLUMN amount DROP NOT NULL`.catch(() => { });
 
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS site_id INTEGER`;
