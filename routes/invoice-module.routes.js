@@ -284,12 +284,12 @@ async function canAccessInvoice(reqUser = {}, invoice = {}) {
   if (bookingId) {
     try {
       const [bk] = await sql`
-        SELECT user_id, associate_id, sold_by_user_id, referred_by_user_id, booked_by_user_id
+        SELECT user_id, associate_user_id, sold_by_user_id, referred_by_user_id, booked_by_user_id
         FROM bookings WHERE booking_id = ${bookingId} LIMIT 1
       `;
       if (bk) {
         if (bk.user_id === currentUserId ||
-            bk.associate_id === currentUserId ||
+            bk.associate_user_id === currentUserId ||
             bk.sold_by_user_id === currentUserId ||
             bk.referred_by_user_id === currentUserId ||
             bk.booked_by_user_id === currentUserId) {
@@ -407,7 +407,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
         LEFT JOIN plots p ON b.plot_id = p.plot_id
         LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
         JOIN users u ON e.user_id = u.user_id
-        LEFT JOIN users assoc ON b.associate_id = assoc.user_id
+        LEFT JOIN users assoc ON COALESCE(b.associate_user_id, b.sold_by_user_id) = assoc.user_id
         WHERE e.emi_id = ${cleanId}
         LIMIT 1
       `;
@@ -494,7 +494,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
         LEFT JOIN sites s ON p.site_id = s.site_id
         LEFT JOIN sites s2 ON b.site_id = s2.site_id
         JOIN users u ON b.user_id = u.user_id
-        LEFT JOIN users assoc ON b.associate_id = assoc.user_id
+        LEFT JOIN users assoc ON COALESCE(b.associate_user_id, b.sold_by_user_id) = assoc.user_id
         WHERE b.booking_id = ${cleanId}
         LIMIT 1
       `;
@@ -631,7 +631,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
           LEFT JOIN plots p ON b.plot_id = p.plot_id
           LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
           JOIN users u ON b.user_id = u.user_id
-          LEFT JOIN users assoc ON b.associate_id = assoc.user_id
+          LEFT JOIN users assoc ON COALESCE(b.associate_user_id, b.sold_by_user_id) = assoc.user_id
           WHERE b.booking_id = ${targetBookingId}
           LIMIT 1
         `;
