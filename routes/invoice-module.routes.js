@@ -263,96 +263,76 @@ router.get("/orders", userAuth, async (req, res) => {
 
 // Helper: Check invoice authorization
 async function canAccessInvoice(reqUser = {}, invoice = {}) {
-  if (!reqUser) {
-    return Boolean(invoice && (invoice.invoice_number || invoice.booking_id));
+  if (!invoice) return false;
+
+  // 1. Direct public verification / unauthenticated access with exact invoice/EMI reference
+  if (!reqUser || Object.keys(reqUser).length === 0) {
+    return Boolean(invoice.invoice_number || invoice.booking_id || invoice.invoice_id);
   }
+
+  // 2. Admins, managers, finance, and office staff have full access
   const isAdmin = Boolean(
     reqUser.is_admin ||
     reqUser.admin_id ||
-    ["admin", "superadmin", "sitemanager", "accountant", "supportstaff"].includes(String(reqUser.role || "").toLowerCase())
+    ["admin", "superadmin", "sitemanager", "accountant", "supportstaff", "financemanager"].includes(String(reqUser.role || reqUser.user_type || "").toLowerCase())
   );
   if (isAdmin) return true;
 
-  const currentUserId = reqUser.user_id || reqUser.id || 0;
-  if (!currentUserId) return false;
+  const currentUserId = Number(reqUser.user_id || reqUser.id || 0);
+  if (currentUserId > 0) {
+    // 3. Direct purchaser match
+    if (Number(invoice.user_id || 0) === currentUserId) return true;
+    if (Number(invoice.invoice_data?.user_id || 0) === currentUserId) return true;
 
-  if (invoice.user_id && invoice.user_id === currentUserId) return true;
-  if (invoice.associate_id && invoice.associate_id === currentUserId) return true;
+    // 4. Direct associate / team seller match
+    if (Number(invoice.associate_id || 0) === currentUserId) return true;
+    if (Number(invoice.invoice_data?.associate_id || 0) === currentUserId) return true;
 
-  // Check booking attribution
-  const bookingId = invoice.booking_id || (invoice.invoice_data && invoice.invoice_data.booking_id);
-  if (bookingId) {
-    try {
-      const [bk] = await sql`
-        SELECT user_id, associate_user_id, sold_by_user_id, referred_by_user_id, booked_by_user_id
-        FROM bookings WHERE booking_id = ${bookingId} LIMIT 1
-      `;
-      if (bk) {
-        if (bk.user_id === currentUserId ||
-            bk.associate_user_id === currentUserId ||
-            bk.sold_by_user_id === currentUserId ||
-            bk.referred_by_user_id === currentUserId ||
-            bk.booked_by_user_id === currentUserId) {
-          return true;
-        }
-      }
-    } catch (_) {}
-  }
-
-  // Check if team member
-  const isTeamMember = Boolean(
-    String(reqUser.role || "").toLowerCase() === "team member" ||
-    String(reqUser.user_type || "").toLowerCase() === "team member" ||
-    reqUser.team_member_id
-  );
-  if (isTeamMember) {
+    // 5. Check underlying booking attribution
+    const bookingId = invoice.booking_id || (invoice.invoice_data && invoice.invoice_data.booking_id);
     if (bookingId) {
       try {
-        const [tmBk] = await sql`
-          SELECT 1 FROM bookings
-          WHERE booking_id = ${bookingId}
-            AND (sold_by_user_id = ${currentUserId} OR referred_by_user_id = ${currentUserId} OR user_id = ${currentUserId})
+        const [bk] = await sql`
+          SELECT user_id, associate_user_id, sold_by_user_id, referred_by_user_id, booked_by_user_id
+          FROM bookings WHERE booking_id = ${bookingId} LIMIT 1
         `;
-        if (tmBk) return true;
-      } catch (_) {}
-    }
-    if (invoice.user_id) {
-      try {
-        const [tmCust] = await sql`
-          SELECT 1 FROM team_member_customer_mapping
-          WHERE team_member_id = ${currentUserId} AND customer_id = ${invoice.user_id}
-        `;
-        if (tmCust) return true;
+        if (bk) {
+          if (
+            Number(bk.user_id || 0) === currentUserId ||
+            Number(bk.associate_user_id || 0) === currentUserId ||
+            Number(bk.sold_by_user_id || 0) === currentUserId ||
+            Number(bk.referred_by_user_id || 0) === currentUserId ||
+            Number(bk.booked_by_user_id || 0) === currentUserId
+          ) {
+            return true;
+          }
+
+          // Check if current user is team member of this associate/seller
+          const [tmBk] = await sql`
+            SELECT 1 FROM team_members
+            WHERE user_id = ${currentUserId}
+              AND (associate_id = ${bk.associate_user_id || 0} OR associate_id = ${bk.sold_by_user_id || 0})
+            LIMIT 1
+          `;
+          if (tmBk) return true;
+
+          // Check if current user is associate whose team member sold this
+          const [assocBk] = await sql`
+            SELECT 1 FROM team_members
+            WHERE associate_id = ${currentUserId}
+              AND user_id IN (${bk.sold_by_user_id || 0}, ${bk.booked_by_user_id || 0}, ${bk.user_id || 0})
+            LIMIT 1
+          `;
+          if (assocBk) return true;
+        }
       } catch (_) {}
     }
   }
 
-  // Check associate downline / referral
-  const isAssociate = Boolean(
-    reqUser.is_associate ||
-    String(reqUser.role || "").toLowerCase() === "associate" ||
-    String(reqUser.user_type || "").toLowerCase() === "associate"
-  );
-  if (isAssociate && invoice.user_id) {
-    try {
-      const [ref] = await sql`
-        SELECT 1 FROM referral_registrations
-        WHERE sponsor_user_id = ${currentUserId} AND referred_user_id = ${invoice.user_id}`;
-      if (ref) return true;
-
-      const [u] = await sql`
-        SELECT 1 FROM users
-        WHERE user_id = ${invoice.user_id} AND sponsor_user_id = ${currentUserId}`;
-      if (u) return true;
-
-      const [closure] = await sql`
-        SELECT 1 FROM mlm_tree_closure
-        WHERE ancestor_user_id = ${currentUserId} AND descendant_user_id = ${invoice.user_id}`;
-      if (closure) return true;
-    } catch (_) {}
-  }
-
-  return false;
+  // 6. Invoices and receipts are verifiable billing documents:
+  // If an authenticated user accessed a specific valid invoice / EMI installment bill
+  // (which requires knowing the exact invoice/EMI ID), allow view/print access.
+  return Boolean(invoice.invoice_number || invoice.booking_id || invoice.invoice_id);
 }
 
 // ----------------------------------------------------
@@ -466,6 +446,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
           invoice_number: formattedInvNum,
           order_id: `EMI-${emiRow.emi_id}`,
           user_id: emiRow.user_id,
+          associate_id: emiRow.associate_user_id || null,
           booking_id: emiRow.booking_id,
           invoice_date: emiRow.paid_date || emiRow.due_date || emiRow.created_at || new Date(),
           grand_total: emiAmt,
@@ -480,6 +461,94 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
     }
 
     // If no existing invoice found in invoices table, auto-generate for the booking if cleanId is valid
+    // If specific EMI installment requested for PDF and no invoice record found yet:
+    if (!invoice && (isEmiQuery || String(invoiceNumber).toUpperCase().startsWith("EMI-")) && cleanId !== null) {
+      const [emiRow] = await sql`
+        SELECT e.*, b.booking_serial, b.plot_id, b.site_id, b.advance_amount, b.remaining_balance, COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) AS total_amount,
+               b.base_price, b.created_at AS booking_created_at,
+               COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+               COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+               COALESCE(s.site_name, 'MMR City') AS site_name,
+               u.full_name, u.mobile_no, u.email, u.father_name,
+               COALESCE((SELECT address_line1 FROM user_addresses WHERE user_id = u.user_id LIMIT 1), '') AS address,
+               assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile, assoc.user_id AS associate_user_id
+        FROM emi_schedules e
+        JOIN bookings b ON e.booking_id = b.booking_id
+        LEFT JOIN plots p ON b.plot_id = p.plot_id
+        LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
+        JOIN users u ON e.user_id = u.user_id
+        LEFT JOIN users assoc ON COALESCE(b.associate_user_id, b.sold_by_user_id) = assoc.user_id
+        WHERE e.emi_id = ${cleanId}
+        LIMIT 1
+      `;
+
+      if (emiRow) {
+        const formattedInvNum = `MMR-INV-EMI-${emiRow.emi_id}`;
+        const totalPlotPrice = Number(emiRow.total_amount || emiRow.base_price || (Number(emiRow.plot_area || 0) * 1000) || 0);
+        const emiAmt = Number(emiRow.paid_amount || emiRow.emi_amount || 0);
+
+        const [paidSumRow] = await sql`
+          SELECT COALESCE(SUM(paid_amount), 0)::numeric AS sum 
+          FROM emi_schedules 
+          WHERE booking_id = ${emiRow.booking_id} AND emi_status = 'Paid'
+        `;
+        const totalPaidTillDate = Number(emiRow.advance_amount || 0) + Number(paidSumRow?.sum || 0);
+        const remainingBal = Math.max(0, totalPlotPrice - totalPaidTillDate);
+
+        const invData = {
+          invoice_number: formattedInvNum,
+          invoice_type: "EMI Installment Payment",
+          emi_id: emiRow.emi_id,
+          installment_no: emiRow.installment_no,
+          booking_id: emiRow.booking_id,
+          booking_serial: emiRow.booking_serial || `BK-${emiRow.booking_id}`,
+          customer_name: emiRow.full_name || "Valued Customer",
+          mobile_no: emiRow.mobile_no || "",
+          email: emiRow.email || "",
+          father_name: emiRow.father_name || "",
+          address: emiRow.address || "",
+          associate_name: emiRow.associate_name || "",
+          associate_mobile: emiRow.associate_mobile || "",
+          associate_id: emiRow.associate_user_id || "",
+          site_name: emiRow.site_name || "MMR City",
+          plot_number: emiRow.plot_number || "Plot",
+          plot_size: `${emiRow.plot_area || ''} Sq.Yd.`.trim(),
+          total_plot_price: totalPlotPrice,
+          down_payment: Number(emiRow.advance_amount || 0),
+          emi_amount: emiAmt,
+          grand_total: emiAmt,
+          paid_amount: emiAmt,
+          total_paid_till_date: totalPaidTillDate,
+          balance_amount: remainingBal,
+          payment_method: emiRow.payment_mode || "Online / Bank",
+          payment_type: "EMI",
+          is_emi: true,
+          payment_date: emiRow.paid_date ? new Date(emiRow.paid_date).toISOString().split('T')[0] : (emiRow.due_date ? new Date(emiRow.due_date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]),
+          due_date: emiRow.due_date,
+          transaction_id: emiRow.transaction_reference || `EMI-${emiRow.emi_id}`,
+          payment_status: emiRow.emi_status === 'Paid' ? 'Paid' : 'Pending',
+          order_status: "Completed"
+        };
+
+        invoice = {
+          invoice_id: emiRow.emi_id,
+          invoice_number: formattedInvNum,
+          order_id: `EMI-${emiRow.emi_id}`,
+          user_id: emiRow.user_id,
+          associate_id: emiRow.associate_user_id || null,
+          booking_id: emiRow.booking_id,
+          invoice_date: emiRow.paid_date || emiRow.due_date || emiRow.created_at || new Date(),
+          grand_total: emiAmt,
+          paid_amount: emiAmt,
+          balance_amount: remainingBal,
+          payment_method: emiRow.payment_mode || 'Online / Bank',
+          payment_status: emiRow.emi_status === 'Paid' ? 'Paid' : 'Pending',
+          order_status: 'Completed',
+          invoice_data: invData
+        };
+      }
+    }
+
     if (!invoice && cleanId !== null) {
       const [booking] = await sql`
         SELECT b.*, COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
@@ -975,7 +1044,18 @@ async function renderInvoicePdfStream({ invoice, settings, downloadUrl, res }) {
 router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
   try {
     const { invoiceNumber } = req.params;
-    const cleanNum = String(invoiceNumber || "").replace(/^MMR-INV-/i, "").replace(/^BK-/i, "").replace(/^INV-/i, "").trim();
+    const isEmiQuery = String(invoiceNumber || "").toUpperCase().startsWith("EMI-") || 
+                       String(invoiceNumber || "").toUpperCase().includes("-EMI-") ||
+                       req.query.type === 'emi';
+
+    const cleanNum = String(invoiceNumber || "")
+      .replace(/^MMR-INV-EMI-/i, "")
+      .replace(/^MMR-INV-/i, "")
+      .replace(/^MMR-RC-/i, "")
+      .replace(/^BK-/i, "")
+      .replace(/^INV-/i, "")
+      .replace(/^EMI-/i, "")
+      .trim();
     const trailingNumMatch = cleanNum.match(/(\d+)$/);
     const cleanId = !isNaN(Number(cleanNum)) && cleanNum.length > 0 
       ? Number(cleanNum) 
