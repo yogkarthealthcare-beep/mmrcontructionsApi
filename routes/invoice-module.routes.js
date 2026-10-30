@@ -1024,14 +1024,103 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
       SELECT * FROM invoices
       WHERE LOWER(invoice_number) = LOWER(${invoiceNumber})
          OR LOWER(order_id) = LOWER(${invoiceNumber})
-         OR (CASE WHEN ${cleanId !== null} THEN invoice_id = ${cleanId} OR booking_id = ${cleanId} ELSE false END)
+         OR (CASE WHEN ${cleanId !== null && !isEmiQuery} THEN invoice_id = ${cleanId} OR booking_id = ${cleanId} ELSE false END)
          OR (invoice_data->>'booking_id')::text = ${cleanNum}
          OR (invoice_data->>'booking_id')::text = ${String(cleanId)}
+         OR (invoice_data->>'emi_id')::text = ${cleanNum}
          OR (invoice_data->>'invoice_number') ILIKE ${'%' + invoiceNumber + '%'}
          OR invoice_number ILIKE ${'%' + invoiceNumber + '%'}
       ORDER BY invoice_id ASC
       LIMIT 1
     `;
+
+    // If specific EMI installment requested and no invoice record found yet:
+    if (!invoice && (isEmiQuery || String(invoiceNumber).toUpperCase().startsWith("EMI-")) && cleanId !== null) {
+      const [emiRow] = await sql`
+        SELECT e.*, b.booking_serial, b.plot_id, b.site_id, b.advance_amount, b.remaining_balance, COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) AS total_amount,
+               b.base_price, b.created_at AS booking_created_at,
+               COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+               COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+               COALESCE(s.site_name, 'MMR City') AS site_name,
+               u.full_name, u.mobile_no, u.email, u.father_name,
+               COALESCE((SELECT address_line1 FROM user_addresses WHERE user_id = u.user_id LIMIT 1), '') AS address,
+               assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile, assoc.user_id AS associate_user_id
+        FROM emi_schedules e
+        JOIN bookings b ON e.booking_id = b.booking_id
+        LEFT JOIN plots p ON b.plot_id = p.plot_id
+        LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
+        JOIN users u ON e.user_id = u.user_id
+        LEFT JOIN users assoc ON COALESCE(b.associate_user_id, b.sold_by_user_id) = assoc.user_id
+        WHERE e.emi_id = ${cleanId}
+        LIMIT 1
+      `;
+
+      if (emiRow) {
+        const formattedInvNum = `MMR-INV-EMI-${emiRow.emi_id}`;
+        const totalPlotPrice = Number(emiRow.total_amount || emiRow.base_price || (Number(emiRow.plot_area || 0) * 1000) || 0);
+        const emiAmt = Number(emiRow.paid_amount || emiRow.emi_amount || 0);
+
+        const [paidSumRow] = await sql`
+          SELECT COALESCE(SUM(paid_amount), 0)::numeric AS sum 
+          FROM emi_schedules 
+          WHERE booking_id = ${emiRow.booking_id} AND emi_status = 'Paid'
+        `;
+        const totalPaidTillDate = Number(emiRow.advance_amount || 0) + Number(paidSumRow?.sum || 0);
+        const remainingBal = Math.max(0, totalPlotPrice - totalPaidTillDate);
+
+        const invData = {
+          invoice_number: formattedInvNum,
+          invoice_type: "EMI Installment Payment",
+          emi_id: emiRow.emi_id,
+          installment_no: emiRow.installment_no,
+          booking_id: emiRow.booking_id,
+          booking_serial: emiRow.booking_serial || `BK-${emiRow.booking_id}`,
+          customer_name: emiRow.full_name || "Valued Customer",
+          mobile_no: emiRow.mobile_no || "",
+          email: emiRow.email || "",
+          father_name: emiRow.father_name || "",
+          address: emiRow.address || "",
+          associate_name: emiRow.associate_name || "",
+          associate_mobile: emiRow.associate_mobile || "",
+          associate_id: emiRow.associate_user_id || "",
+          site_name: emiRow.site_name || "MMR City",
+          plot_number: emiRow.plot_number || "Plot",
+          plot_size: `${emiRow.plot_area || ''} Sq.Yd.`.trim(),
+          total_plot_price: totalPlotPrice,
+          down_payment: Number(emiRow.advance_amount || 0),
+          emi_amount: emiAmt,
+          grand_total: emiAmt,
+          paid_amount: emiAmt,
+          total_paid_till_date: totalPaidTillDate,
+          balance_amount: remainingBal,
+          payment_method: emiRow.payment_mode || "Online / Bank",
+          payment_type: "EMI",
+          is_emi: true,
+          payment_date: emiRow.paid_date ? new Date(emiRow.paid_date).toISOString().split('T')[0] : (emiRow.due_date ? new Date(emiRow.due_date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]),
+          due_date: emiRow.due_date,
+          transaction_id: emiRow.transaction_reference || `EMI-${emiRow.emi_id}`,
+          payment_status: emiRow.emi_status === 'Paid' ? 'Paid' : 'Pending',
+          order_status: "Completed"
+        };
+
+        invoice = {
+          invoice_id: emiRow.emi_id,
+          invoice_number: formattedInvNum,
+          order_id: `EMI-${emiRow.emi_id}`,
+          user_id: emiRow.user_id,
+          associate_id: emiRow.associate_user_id || null,
+          booking_id: emiRow.booking_id,
+          invoice_date: emiRow.paid_date || emiRow.due_date || emiRow.created_at || new Date(),
+          grand_total: emiAmt,
+          paid_amount: emiAmt,
+          balance_amount: remainingBal,
+          payment_method: emiRow.payment_mode || 'Online / Bank',
+          payment_status: emiRow.emi_status === 'Paid' ? 'Paid' : 'Pending',
+          order_status: 'Completed',
+          invoice_data: invData
+        };
+      }
+    }
 
     if (!invoice && cleanId !== null) {
       const [booking] = await sql`
