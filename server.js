@@ -33,6 +33,7 @@ import adminNetworkTreeRoutes from './routes/admin-network-tree.routes.js';
 import { ensureTeamMembersTable, registerTeamMemberQuick, approveTeamMemberByAssociate, syncExistingTeamMembersFromUsers, generateTeamMemberId } from './services/teamMemberService.js';
 import receiptRoutes, { ensureReceiptsTable } from './routes/receipt.routes.js';
 import siteGalleryRoutes, { ensureSiteGalleryTable } from './routes/site-gallery.routes.js';
+import galleryRoutes, { ensureGalleryItemsTable } from './routes/gallery.routes.js';
 import twoFactorRoutes from './routes/twoFactor.routes.js';
 import twoFactorService, { ensureTwoFactorTables } from './services/twoFactor.service.js';
 import unifiedPaymentRoutes from './routes/unified-payment.routes.js';
@@ -347,6 +348,8 @@ app.use('/api', receiptRoutes);
 ensureReceiptsTable();
 app.use('/api', siteGalleryRoutes);
 ensureSiteGalleryTable();
+app.use('/api', galleryRoutes);
+ensureGalleryItemsTable();
 app.use('/api', twoFactorRoutes);
 ensureTwoFactorTables();
 app.use(unifiedPaymentRoutes);
@@ -10387,7 +10390,7 @@ app.delete("/api/admin/inquiries/clear-all",
       await sql`TRUNCATE TABLE inquiries RESTART IDENTITY CASCADE`;
       try {
         await sql`TRUNCATE TABLE book_plot_leads RESTART IDENTITY CASCADE`;
-      } catch (_) {}
+      } catch (_) { }
       console.log("[Admin Inquiry Clear All] All inquiries and book_plot_leads data cleared by Admin.");
       return ok(res, {}, "All inquiries data has been permanently removed.");
     } catch (e) {
@@ -11422,66 +11425,66 @@ app.get("/api/admin/bookings",
 
       let whereSql = sql`TRUE`;
       if (conds.length > 0) {
-        whereSql = conds.reduce((acc, curr) => sql`${acc} AND ${curr}`);
+        whereSql = conds.reduce((acc, curr) => sql`${ acc } AND ${ curr } `);
       }
 
       const bookings = await sql`
         SELECT b.booking_id,
-               COALESCE(b.booking_serial, CONCAT('MMR-', b.booking_id)) AS booking_serial,
-               COALESCE(b.booking_date, b.created_at) AS booking_date,
-               COALESCE(b.booking_status::text, 'Pending') AS booking_status,
-               COALESCE(b.advance_amount, 0) AS advance_amount,
-               COALESCE(b.payment_type::text, 'FullPayment') AS payment_type,
-               COALESCE(b.payment_method::text, b.payment_type::text, 'Cash') AS payment_method,
-               b.associate_approval_status,
-               b.booked_by_user_id AS booked_by,
-               b.sold_by_user_id AS sold_by,
-               b.associate_user_id AS associate,
-               COALESCE(b.associate_approval_overridden, FALSE) AS associate_approval_overridden,
-               CASE WHEN b.associate_approval_status = 'Pending' THEN b.created_at ELSE NULL END AS pending_since,
-               CASE WHEN b.associate_approval_status = 'Pending' AND b.created_at < NOW() - INTERVAL '48 hours' THEN TRUE ELSE FALSE END AS is_overdue,
-               COALESCE(b.workflow_status::text, 'Booking Initiated') AS workflow_status,
-               COALESCE(b.required_booking_amount, 0) AS required_booking_amount,
-               COALESCE(b.remaining_balance, 0) AS remaining_balance,
-               COALESCE(b.base_price, p.base_price, 0) AS base_price,
-               COALESCE(b.queue_position, 1) AS queue_position,
-               COALESCE(b.refund_due, FALSE) AS refund_due,
-               b.refund_reason,
-               CASE
-                 WHEN b.booking_status::text = 'Confirmed' THEN 'Paid'
+        COALESCE(b.booking_serial, CONCAT('MMR-', b.booking_id)) AS booking_serial,
+          COALESCE(b.booking_date, b.created_at) AS booking_date,
+            COALESCE(b.booking_status:: text, 'Pending') AS booking_status,
+              COALESCE(b.advance_amount, 0) AS advance_amount,
+                COALESCE(b.payment_type:: text, 'FullPayment') AS payment_type,
+                  COALESCE(b.payment_method:: text, b.payment_type:: text, 'Cash') AS payment_method,
+                    b.associate_approval_status,
+                    b.booked_by_user_id AS booked_by,
+                      b.sold_by_user_id AS sold_by,
+                        b.associate_user_id AS associate,
+                          COALESCE(b.associate_approval_overridden, FALSE) AS associate_approval_overridden,
+                            CASE WHEN b.associate_approval_status = 'Pending' THEN b.created_at ELSE NULL END AS pending_since,
+                              CASE WHEN b.associate_approval_status = 'Pending' AND b.created_at < NOW() - INTERVAL '48 hours' THEN TRUE ELSE FALSE END AS is_overdue,
+                                COALESCE(b.workflow_status:: text, 'Booking Initiated') AS workflow_status,
+                                  COALESCE(b.required_booking_amount, 0) AS required_booking_amount,
+                                    COALESCE(b.remaining_balance, 0) AS remaining_balance,
+                                      COALESCE(b.base_price, p.base_price, 0) AS base_price,
+                                        COALESCE(b.queue_position, 1) AS queue_position,
+                                          COALESCE(b.refund_due, FALSE) AS refund_due,
+                                            b.refund_reason,
+                                            CASE
+                 WHEN b.booking_status:: text = 'Confirmed' THEN 'Paid'
                  WHEN COALESCE(b.advance_amount, 0) > 0 THEN 'Partial'
                  ELSE 'Unpaid'
                END AS payment_status,
-               COALESCE(u.full_name, 'Customer') AS customer_name,
-               COALESCE(u.member_id, '') AS member_id,
-               COALESCE(u.mobile_no, '') AS mobile_no,
-               COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
-               COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
-               COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name,
-               COALESCE(s.city, s2.city, '') AS city,
-               ap.appointment_date, ap.start_time, ap.end_time, ap.status AS appointment_status,
-               proof.file_path AS proof_url,
-               u_booked.full_name AS booked_by_name,
-               u_sold.full_name AS sold_by_name,
-               u_assoc.full_name AS associate_name
+        COALESCE(u.full_name, 'Customer') AS customer_name,
+          COALESCE(u.member_id, '') AS member_id,
+            COALESCE(u.mobile_no, '') AS mobile_no,
+              COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+                COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+                  COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name,
+                    COALESCE(s.city, s2.city, '') AS city,
+                      ap.appointment_date, ap.start_time, ap.end_time, ap.status AS appointment_status,
+                        proof.file_path AS proof_url,
+                          u_booked.full_name AS booked_by_name,
+                            u_sold.full_name AS sold_by_name,
+                              u_assoc.full_name AS associate_name
         FROM bookings b
-        LEFT JOIN users u  ON b.user_id  = u.user_id
+        LEFT JOIN users u  ON b.user_id = u.user_id
         LEFT JOIN users u_booked ON b.booked_by_user_id = u_booked.user_id
         LEFT JOIN users u_sold   ON b.sold_by_user_id = u_sold.user_id
         LEFT JOIN users u_assoc  ON b.associate_user_id = u_assoc.user_id
-        LEFT JOIN plots p  ON b.plot_id  = p.plot_id
-        LEFT JOIN sites s  ON p.site_id  = s.site_id
-        LEFT JOIN sites s2 ON b.site_id  = s2.site_id
-        LEFT JOIN LATERAL (
-          SELECT file_path
+        LEFT JOIN plots p  ON b.plot_id = p.plot_id
+        LEFT JOIN sites s  ON p.site_id = s.site_id
+        LEFT JOIN sites s2 ON b.site_id = s2.site_id
+        LEFT JOIN LATERAL(
+                                SELECT file_path
           FROM booking_payment_proofs
           WHERE booking_id = b.booking_id
           LIMIT 1
-        ) proof ON TRUE
+                              ) proof ON TRUE
         LEFT JOIN booking_appointments ap ON ap.booking_id = b.booking_id
-        WHERE ${whereSql}
+        WHERE ${ whereSql }
         ORDER BY b.created_at DESC
-        LIMIT ${safeLimit} OFFSET ${offset}`;
+        LIMIT ${ safeLimit } OFFSET ${ offset } `;
 
       return ok(res, bookings);
     } catch (e) {
@@ -11489,19 +11492,19 @@ app.get("/api/admin/bookings",
       try {
         const fallback = await sql`
           SELECT b.booking_id, b.booking_serial, b.booking_status, b.advance_amount,
-                 b.created_at AS booking_date, u.full_name AS customer_name, u.mobile_no,
-                 COALESCE(p.plot_number, 'Plot') AS plot_number,
-                 COALESCE(s.site_name, 'Project Site') AS site_name,
-                 b.associate_approval_status,
-                 b.booked_by_user_id AS booked_by,
-                 b.sold_by_user_id AS sold_by,
-                 b.associate_user_id AS associate,
-                 CASE WHEN b.associate_approval_status = 'Pending' AND b.created_at < NOW() - INTERVAL '48 hours' THEN TRUE ELSE FALSE END AS is_overdue,
-                 CASE WHEN b.associate_approval_status = 'Pending' THEN b.created_at ELSE NULL END AS pending_since,
-                 COALESCE(b.associate_approval_overridden, FALSE) AS associate_approval_overridden,
-                 u_booked.full_name AS booked_by_name,
-                 u_sold.full_name AS sold_by_name,
-                 u_assoc.full_name AS associate_name
+        b.created_at AS booking_date, u.full_name AS customer_name, u.mobile_no,
+          COALESCE(p.plot_number, 'Plot') AS plot_number,
+            COALESCE(s.site_name, 'Project Site') AS site_name,
+              b.associate_approval_status,
+              b.booked_by_user_id AS booked_by,
+                b.sold_by_user_id AS sold_by,
+                  b.associate_user_id AS associate,
+                    CASE WHEN b.associate_approval_status = 'Pending' AND b.created_at < NOW() - INTERVAL '48 hours' THEN TRUE ELSE FALSE END AS is_overdue,
+                      CASE WHEN b.associate_approval_status = 'Pending' THEN b.created_at ELSE NULL END AS pending_since,
+                        COALESCE(b.associate_approval_overridden, FALSE) AS associate_approval_overridden,
+                          u_booked.full_name AS booked_by_name,
+                            u_sold.full_name AS sold_by_name,
+                              u_assoc.full_name AS associate_name
           FROM bookings b
           LEFT JOIN users u ON b.user_id = u.user_id
           LEFT JOIN users u_booked ON b.booked_by_user_id = u_booked.user_id
@@ -11526,65 +11529,65 @@ app.get("/api/admin/bookings/:id",
       await ensurePlotAllocationSchema().catch(() => { });
       const [booking] = await sql`
         SELECT b.*,
-               json_build_object(
-                 'id', COALESCE(u.user_id, 0),
-                 'full_name', COALESCE(u.full_name, 'Customer'),
-                 'member_id', COALESCE(u.member_id, ''),
-                 'mobile_no', COALESCE(u.mobile_no, ''),
-                 'email', COALESCE(u.email, ''),
-                 'user_type', COALESCE(u.user_type, 'Customer')
-               ) AS customer,
-               json_build_object(
-                 'id', COALESCE(p.plot_id, 0),
-                 'plot_number', COALESCE(b.plot_number, p.plot_number, 'Plot'),
-                 'plot_area', COALESCE(b.plot_area, p.plot_area, 0),
-                 'plot_category', COALESCE(p.plot_category::text, 'Residential'),
-                 'base_price', COALESCE(b.base_price, p.base_price, 0),
-                 'down_payment', COALESCE(p.down_payment, 0),
-                 'monthly_emi', COALESCE(p.monthly_emi, 0),
-                 'emi_tenure_months', COALESCE(p.emi_tenure_months, 60),
-                 'file_charge', COALESCE(p.file_charge, 0),
-                 'plot_status', COALESCE(p.plot_status, 'Booked'),
-                 'site_name', COALESCE(s.site_name, s2.site_name, 'Project Site')
-               ) AS plot,
-               json_build_object(
-                 'id', COALESCE(b.site_id, s.site_id, s2.site_id, 0),
-                 'site_name', COALESCE(s.site_name, s2.site_name, 'Project Site'),
-                 'city', COALESCE(s.city, s2.city, ''),
-                 'address', COALESCE(s.full_address, s2.full_address, '')
-               ) AS site
+        json_build_object(
+          'id', COALESCE(u.user_id, 0),
+          'full_name', COALESCE(u.full_name, 'Customer'),
+          'member_id', COALESCE(u.member_id, ''),
+          'mobile_no', COALESCE(u.mobile_no, ''),
+          'email', COALESCE(u.email, ''),
+          'user_type', COALESCE(u.user_type, 'Customer')
+        ) AS customer,
+          json_build_object(
+            'id', COALESCE(p.plot_id, 0),
+            'plot_number', COALESCE(b.plot_number, p.plot_number, 'Plot'),
+            'plot_area', COALESCE(b.plot_area, p.plot_area, 0),
+            'plot_category', COALESCE(p.plot_category:: text, 'Residential'),
+            'base_price', COALESCE(b.base_price, p.base_price, 0),
+            'down_payment', COALESCE(p.down_payment, 0),
+            'monthly_emi', COALESCE(p.monthly_emi, 0),
+            'emi_tenure_months', COALESCE(p.emi_tenure_months, 60),
+            'file_charge', COALESCE(p.file_charge, 0),
+            'plot_status', COALESCE(p.plot_status, 'Booked'),
+            'site_name', COALESCE(s.site_name, s2.site_name, 'Project Site')
+          ) AS plot,
+            json_build_object(
+              'id', COALESCE(b.site_id, s.site_id, s2.site_id, 0),
+              'site_name', COALESCE(s.site_name, s2.site_name, 'Project Site'),
+              'city', COALESCE(s.city, s2.city, ''),
+              'address', COALESCE(s.full_address, s2.full_address, '')
+            ) AS site
         FROM bookings b
         LEFT JOIN users u ON u.user_id = b.user_id
         LEFT JOIN plots p ON p.plot_id = b.plot_id
         LEFT JOIN sites s ON s.site_id = p.site_id
         LEFT JOIN sites s2 ON s2.site_id = b.site_id
-        WHERE b.booking_id = ${req.params.id}`;
+        WHERE b.booking_id = ${ req.params.id } `;
       if (!booking) return err(res, "Booking not found", 404);
 
       let payment_proofs = [];
       try {
-        payment_proofs = await sql`SELECT * FROM booking_payment_proofs WHERE booking_id = ${req.params.id}`;
+        payment_proofs = await sql`SELECT * FROM booking_payment_proofs WHERE booking_id = ${ req.params.id } `;
       } catch (_) { }
 
       let emi_schedule = [];
       try {
-        emi_schedule = await sql`SELECT emi_id, installment_no, due_date, emi_amount, late_fee_amount, total_due, paid_amount, paid_date, emi_status FROM emi_schedules WHERE booking_id = ${req.params.id} ORDER BY installment_no`;
+        emi_schedule = await sql`SELECT emi_id, installment_no, due_date, emi_amount, late_fee_amount, total_due, paid_amount, paid_date, emi_status FROM emi_schedules WHERE booking_id = ${ req.params.id } ORDER BY installment_no`;
       } catch (_) { }
 
       let history = [];
       try {
-        history = await sql`SELECT event_type, event_note, plot_status_at_time, created_at FROM plot_booking_history WHERE booking_id = ${req.params.id} ORDER BY created_at ASC`;
+        history = await sql`SELECT event_type, event_note, plot_status_at_time, created_at FROM plot_booking_history WHERE booking_id = ${ req.params.id } ORDER BY created_at ASC`;
       } catch (_) { }
 
       let appointment = null;
       try {
-const [ap] = await sql`SELECT * FROM booking_appointments WHERE booking_id = ${req.params.id} LIMIT 1`;
+const [ap] = await sql`SELECT * FROM booking_appointments WHERE booking_id = ${ req.params.id } LIMIT 1`;
 appointment = ap || null;
       } catch (_) { }
 
 let registry = null;
 try {
-  const [reg] = await sql`SELECT * FROM registry_records WHERE booking_id = ${req.params.id} LIMIT 1`;
+  const [reg] = await sql`SELECT * FROM registry_records WHERE booking_id = ${ req.params.id } LIMIT 1`;
   registry = reg || null;
 } catch (_) { }
 
@@ -11593,12 +11596,12 @@ if (booking.plot_id) {
   try {
     other_bookings_on_plot = await sql`
             SELECT b.booking_id, b.booking_serial, b.booking_status, b.advance_amount, b.remaining_balance,
-                   COALESCE(b.queue_position, 1) AS queue_position, COALESCE(b.refund_due, FALSE) AS refund_due,
-                   b.refund_reason, COALESCE(b.booking_date, b.created_at) AS booking_date,
-                   u.user_id, u.full_name AS customer_name, u.mobile_no, u.email
+        COALESCE(b.queue_position, 1) AS queue_position, COALESCE(b.refund_due, FALSE) AS refund_due,
+          b.refund_reason, COALESCE(b.booking_date, b.created_at) AS booking_date,
+            u.user_id, u.full_name AS customer_name, u.mobile_no, u.email
             FROM bookings b
             LEFT JOIN users u ON u.user_id = b.user_id
-            WHERE b.plot_id = ${booking.plot_id} AND b.booking_id != ${booking.booking_id}
+            WHERE b.plot_id = ${ booking.plot_id } AND b.booking_id != ${ booking.booking_id }
             ORDER BY b.queue_position ASC, b.created_at ASC`;
   } catch (_) { }
 }
@@ -11608,15 +11611,15 @@ let sold_by_user = null;
 let associate_user = null;
 try {
   if (booking.booked_by_user_id) {
-    const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${booking.booked_by_user_id}`;
+    const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${ booking.booked_by_user_id } `;
     booked_by_user = u || null;
   }
   if (booking.sold_by_user_id) {
-    const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${booking.sold_by_user_id}`;
+    const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${ booking.sold_by_user_id } `;
     sold_by_user = u || null;
   }
   if (booking.associate_user_id) {
-    const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${booking.associate_user_id}`;
+    const [u] = await sql`SELECT user_id, full_name, member_id, mobile_no, user_type FROM users WHERE user_id = ${ booking.associate_user_id } `;
     associate_user = u || null;
   }
 } catch (_) { }
@@ -11656,14 +11659,14 @@ app.post("/api/admin/bookings/:id/confirm",
         FROM bookings b
         JOIN users u ON u.user_id = b.user_id
         LEFT JOIN sites s ON s.site_id = b.site_id
-        WHERE b.booking_id = ${bid}`;
+        WHERE b.booking_id = ${ bid } `;
       if (!booking) return err(res, "Booking not found", 404);
       if (booking.booking_status === "Confirmed")
         return err(res, "Already confirmed", 400);
       if (booking.associate_approval_status === "Pending")
         return err(res, "Cannot confirm booking: Associate approval is pending. Associate must approve or Admin must override.", 409);
 
-      const [plot] = await sql`SELECT base_price, monthly_emi, emi_tenure_months, plot_number FROM plots WHERE plot_id = ${booking.plot_id}`;
+      const [plot] = await sql`SELECT base_price, monthly_emi, emi_tenure_months, plot_number FROM plots WHERE plot_id = ${ booking.plot_id } `;
       if (booking.payment_type === "EMI") {
         const start = new Date(); start.setMonth(start.getMonth() + 1);
         const tenure = Number(plot.emi_tenure_months || 60);
@@ -11672,19 +11675,19 @@ app.post("/api/admin/bookings/:id/confirm",
           due.setMonth(due.getMonth() + (i - 1));
           try {
             await sql`
-              INSERT INTO emi_schedules (booking_id, user_id, installment_no, due_date, emi_amount)
-              VALUES (${bid}, ${booking.user_id}, ${i}, ${due.toISOString().split("T")[0]}, ${plot.monthly_emi || 0})
-            `;
+              INSERT INTO emi_schedules(booking_id, user_id, installment_no, due_date, emi_amount)
+      VALUES(${ bid }, ${ booking.user_id }, ${ i }, ${ due.toISOString().split("T")[0] }, ${ plot.monthly_emi || 0 })
+        `;
           } catch (emiErr) {
-            console.warn(`[MMR API] Admin confirm EMI schedule notice (installment ${i}):`, emiErr?.message);
+            console.warn(`[MMR API] Admin confirm EMI schedule notice(installment ${ i }): `, emiErr?.message);
           }
         }
       }
 
       await sql`
         UPDATE bookings SET booking_status = 'Confirmed',
-          confirmed_by_admin_id = ${req.admin.admin_id}, confirmed_at = NOW(), updated_at = NOW()
-        WHERE booking_id = ${bid}`;
+        confirmed_by_admin_id = ${ req.admin.admin_id }, confirmed_at = NOW(), updated_at = NOW()
+        WHERE booking_id = ${ bid } `;
 
       // Update plot status via helper
       await setPlotStatus(booking.plot_id, 'Booked', {
@@ -11700,9 +11703,9 @@ app.post("/api/admin/bookings/:id/confirm",
         JOIN users u ON u.user_id = b.user_id
         JOIN plots p ON p.plot_id = b.plot_id
         JOIN sites s ON s.site_id = p.site_id
-        WHERE b.plot_id = ${booking.plot_id}
-          AND b.booking_id != ${bid}
-          AND b.booking_status IN ('Submitted', 'PaymentPending', 'Allocated', 'Pending')
+        WHERE b.plot_id = ${ booking.plot_id }
+          AND b.booking_id != ${ bid }
+          AND b.booking_status IN('Submitted', 'PaymentPending', 'Allocated', 'Pending')
         ORDER BY b.created_at ASC`;
 
       let pos = 1;
@@ -11710,14 +11713,14 @@ app.post("/api/admin/bookings/:id/confirm",
         await sql`
           UPDATE bookings
           SET booking_status = 'Waitlisted',
-              queue_position = ${pos},
-              updated_at = NOW()
-          WHERE booking_id = ${other.booking_id}`;
+        queue_position = ${ pos },
+      updated_at = NOW()
+          WHERE booking_id = ${ other.booking_id } `;
 
         try {
           await sql`
-            INSERT INTO plot_booking_history (plot_id, booking_id, user_id, event_type, event_note, triggered_by_admin, plot_status_at_time, created_at)
-            VALUES (${booking.plot_id}, ${other.booking_id}, ${other.user_id}, 'BookingWaitlisted', 'Plot allotted to another booking. Placed on waitlist.', ${req.admin.admin_id}, 'Booked', NOW())`;
+            INSERT INTO plot_booking_history(plot_id, booking_id, user_id, event_type, event_note, triggered_by_admin, plot_status_at_time, created_at)
+      VALUES(${ booking.plot_id }, ${ other.booking_id }, ${ other.user_id }, 'BookingWaitlisted', 'Plot allotted to another booking. Placed on waitlist.', ${ req.admin.admin_id }, 'Booked', NOW())`;
         } catch (_) { }
 
         dispatchBookingNotification('booking_waitlisted', {
@@ -11734,9 +11737,9 @@ app.post("/api/admin/bookings/:id/confirm",
       }
 
       await sql`
-        INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
-        VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
-                'BookingManagement', 'BookingConfirmed', 'bookings', ${bid})`;
+        INSERT INTO audit_log(actor_type, actor_id, actor_name, module, action, target_table, target_record_id)
+      VALUES('Admin', ${ req.admin.admin_id }, ${ req.admin.full_name },
+        'BookingManagement', 'BookingConfirmed', 'bookings', ${ bid })`;
       await addPlotBookingHistory({
         plotId: booking.plot_id,
         bookingId: bid,
@@ -11761,14 +11764,14 @@ app.post("/api/admin/bookings/:id/confirm",
       const commissionResult = await generateCommissionForPayment(req, {
         bookingId: bid,
         sourceType: booking.payment_type === "FullPayment" ? "FullPayment" : "InitialPayment",
-        sourceId: `booking-${bid}`,
+        sourceId: `booking - ${ bid } `,
         receivedAmount: booking.payment_type === "FullPayment" ? plot.base_price : booking.advance_amount,
         paymentType: booking.payment_type,
       });
       await logAdminAudit(req, "MLM", "GenerateCommissionOnBookingConfirm", "bookings", bid, sql.json(commissionResult));
 
       return ok(res, {}, booking.payment_type === "EMI"
-        ? `Booking confirmed. ${plot.emi_tenure_months} EMIs generated.`
+        ? `Booking confirmed.${ plot.emi_tenure_months } EMIs generated.`
         : "Booking confirmed.");
     } catch (e) {
       return err(res, e.message);
@@ -11790,14 +11793,14 @@ app.post("/api/admin/bookings/:id/cancel",
         JOIN users u ON u.user_id = b.user_id
         LEFT JOIN plots p ON p.plot_id = b.plot_id
         LEFT JOIN sites s ON s.site_id = p.site_id
-        WHERE b.booking_id = ${req.params.id}`;
+        WHERE b.booking_id = ${ req.params.id } `;
       if (!booking) return err(res, "Booking not found", 404);
 
       await sql`
         UPDATE bookings SET booking_status = 'Cancelled',
-          cancellation_reason = ${reason}, cancelled_by_admin_id = ${req.admin.admin_id},
-          cancelled_at = NOW(), updated_at = NOW()
-        WHERE booking_id = ${req.params.id}`;
+        cancellation_reason = ${ reason }, cancelled_by_admin_id = ${ req.admin.admin_id },
+      cancelled_at = NOW(), updated_at = NOW()
+        WHERE booking_id = ${ req.params.id } `;
 
       // Cancel pending commissions and flag approved/paid commissions for review
       await commissionService.cancelBookingCommissions(sql, {
@@ -11850,9 +11853,9 @@ app.patch("/api/admin/bookings/:id/confirm",
   verifyAdminToken,
   role("SuperAdmin", "SiteManager", "FinanceManager"),
   (req, res, next) => {
-    req.url = `/api/admin/bookings/${req.params.id}/confirm`;
-    app.handle(req, res, next);
-  }
+    req.url = `/ api / admin / bookings / ${ req.params.id }/confirm`;
+      app.handle(req, res, next);
+    }
 );
 
 app.patch("/api/admin/bookings/:id/cancel",

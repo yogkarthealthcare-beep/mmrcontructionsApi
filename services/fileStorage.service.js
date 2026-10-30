@@ -196,6 +196,10 @@ export function resolveModuleDirectory(moduleKey = "other", options = {}) {
       const cat = toSeoSlug(subCategory) || "logo";
       return path.join("mobile-app", cat);
     }
+    case "gallery": {
+      const cat = toSeoSlug(subCategory) || "media";
+      return path.join("gallery", cat);
+    }
     default: {
       return path.join("other", cleanEntityId);
     }
@@ -307,10 +311,11 @@ export async function deleteFileFromStorage(fileUrl = "", publicId = "") {
   }
 
   // 2. VPS Storage file handling
-  if (isVpsStorageUrl(fileUrl)) {
+  const cleanUrl = String(fileUrl || "").trim();
+  if (isVpsStorageUrl(cleanUrl) || cleanUrl.startsWith("uploads/") || cleanUrl.startsWith("/uploads/")) {
     try {
       const rootDir = getStorageRoot();
-      const match = fileUrl.match(/\/uploads\/(.+)$/);
+      const match = cleanUrl.match(/\/?uploads\/(.+)$/);
       if (!match) return false;
 
       const relPath = match[1];
@@ -326,6 +331,9 @@ export async function deleteFileFromStorage(fileUrl = "", publicId = "") {
         await fs.unlink(targetFilePath);
         logStorageOperation({ action: "VPSFileUnlinked", fullPath: targetFilePath });
         return true;
+      } else {
+        console.log("[FileStorageService] Target file already removed or does not exist:", targetFilePath);
+        return true; // Graceful treatment of missing file
       }
     } catch (err) {
       console.warn("[FileStorageService] VPS file deletion warning:", err.message);
