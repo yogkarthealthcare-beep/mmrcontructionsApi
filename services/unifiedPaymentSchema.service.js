@@ -187,12 +187,15 @@ export async function ensureUnifiedPaymentSchema() {
     `;
 
     // 7. Non-destructive alterations to existing tables
-    // Add partially_paid_amount to emi_schedules
+    // Add partially_paid_amount and ensure emi_status supports all statuses without enum constraint errors
     try {
       await sql`
         ALTER TABLE emi_schedules 
         ADD COLUMN IF NOT EXISTS partially_paid_amount NUMERIC(14,2) DEFAULT 0.00;
       `;
+      await sql`ALTER TYPE emi_status_enum ADD VALUE IF NOT EXISTS 'PartiallyPaid'`.catch(() => {});
+      await sql`ALTER TYPE emi_status_enum ADD VALUE IF NOT EXISTS 'ProofSubmitted'`.catch(() => {});
+      await sql`ALTER TABLE emi_schedules ALTER COLUMN emi_status TYPE VARCHAR(50) USING emi_status::text`.catch(() => {});
     } catch (e) {
       console.log("[UnifiedPaymentSchema] emi_schedules column partially_paid_amount check:", e.message);
     }

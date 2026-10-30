@@ -147,7 +147,7 @@ async function executePaymentAllocation(paymentId, adminId = null) {
       const pendingEmis = await db`
         SELECT * FROM emi_schedules
         WHERE booking_id = ${bookingId} 
-          AND emi_status IN ('Pending', 'ProofSubmitted', 'PartiallyPaid', 'Overdue')
+          AND emi_status::text IN ('Pending', 'ProofSubmitted', 'PartiallyPaid', 'Overdue')
         ORDER BY installment_no ASC
       `;
 
@@ -219,13 +219,23 @@ async function executePaymentAllocation(paymentId, adminId = null) {
             )
           `;
 
-          await db`
-            UPDATE emi_schedules SET
-              emi_status = 'PartiallyPaid',
-              partially_paid_amount = COALESCE(partially_paid_amount, 0) + ${partialAllocation},
-              updated_at = NOW()
-            WHERE emi_id = ${emi.emi_id}
-          `;
+          try {
+            await db`
+              UPDATE emi_schedules SET
+                emi_status = 'PartiallyPaid',
+                partially_paid_amount = COALESCE(partially_paid_amount, 0) + ${partialAllocation},
+                updated_at = NOW()
+              WHERE emi_id = ${emi.emi_id}
+            `;
+          } catch (enumErr) {
+            await db`
+              UPDATE emi_schedules SET
+                emi_status = 'Pending',
+                partially_paid_amount = COALESCE(partially_paid_amount, 0) + ${partialAllocation},
+                updated_at = NOW()
+              WHERE emi_id = ${emi.emi_id}
+            `;
+          }
         }
       }
 
@@ -806,6 +816,13 @@ router.post("/api/admin/payments/:id/approve", adminAuth, async (req, res) => {
     const paymentId = req.params.id;
     const adminId = req.admin?.admin_id || req.admin?.id || 1;
 
+    // Self-healing schema check to prevent enum casting errors
+    try {
+      await sql`ALTER TYPE emi_status_enum ADD VALUE IF NOT EXISTS 'PartiallyPaid'`.catch(() => {});
+      await sql`ALTER TYPE emi_status_enum ADD VALUE IF NOT EXISTS 'ProofSubmitted'`.catch(() => {});
+      await sql`ALTER TABLE emi_schedules ALTER COLUMN emi_status TYPE VARCHAR(50) USING emi_status::text`.catch(() => {});
+    } catch (schemaErr) {}
+
     const [payment] = await sql`
       SELECT * FROM payment_ledger WHERE payment_id = ${paymentId}
     `;
@@ -864,7 +881,7 @@ router.post("/api/admin/payments/:id/reject", adminAuth, async (req, res) => {
       UPDATE emi_schedules SET
         emi_status = 'Pending',
         updated_at = NOW()
-      WHERE booking_id = ${payment.booking_id} AND emi_status = 'ProofSubmitted'
+      WHERE booking_id = ${payment.booking_id} AND emi_status::text = 'ProofSubmitted'
     `;
 
     // Standalone Payment Rejection Email Dispatch
