@@ -395,7 +395,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
     // If specific EMI installment requested and no invoice record found yet:
     if (!invoice && (isEmiQuery || String(invoiceNumber).toUpperCase().startsWith("EMI-")) && cleanId !== null) {
       const [emiRow] = await sql`
-        SELECT e.*, b.booking_serial, b.plot_id, b.site_id, b.advance_amount, b.total_amount,
+        SELECT e.*, b.booking_serial, b.plot_id, b.site_id, b.advance_amount, b.remaining_balance, COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) AS total_amount,
                b.base_price, b.created_at AS booking_created_at,
                COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
                COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
@@ -485,7 +485,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
                COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
                COALESCE(p.plot_category::text, 'Residential') AS plot_type,
                COALESCE(p.plot_category::text, 'Residential') AS plot_category,
-               COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), NULLIF(b.total_amount, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) AS calc_price,
+               COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) AS calc_price,
                COALESCE(s.site_name, s2.site_name, 'MMR City') AS site_name,
                u.full_name, u.mobile_no, u.email, u.father_name, u.address,
                assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile, assoc.user_id AS associate_user_id
@@ -623,7 +623,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
         const [targetBooking] = await sql`
           SELECT b.*, COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
                  COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
-                 COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), NULLIF(b.total_amount, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) AS calc_price,
+                 COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) AS calc_price,
                  COALESCE(s.site_name, 'MMR City') AS site_name,
                  u.father_name, u.address,
                  assoc.full_name AS associate_name, assoc.mobile_no AS associate_mobile, assoc.user_id AS associate_user_id
