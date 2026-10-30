@@ -11156,7 +11156,7 @@ app.post("/api/admin/users/:id/approve",
         await sql`UPDATE customer_enrollment_submissions SET application_status = 'Approved', updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email_1) = LOWER(${user.email || ''}) OR mobile_1 = ${user.mobile_no || ''}`.catch(() => { });
       }
       await sql`UPDATE associate_enrollment SET status = 'Approved', is_verified = TRUE, updated_at = NOW() WHERE user_id = ${uid} OR LOWER(email) = LOWER(${user.email || ''}) OR contact_no_1 = ${user.mobile_no || ''}`.catch(() => { });
-      await sql`UPDATE team_members SET status = 'active', updated_at = NOW() WHERE user_id = ${uid} OR (mobile_no IS NOT NULL AND ${user.mobile_no || ''} != '' AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(${user.mobile_no || ''}, '\\D', '', 'g'), 10))`.catch(() => { });
+      await sql`UPDATE team_members SET status = CASE WHEN is_final_submitted = TRUE THEN 'active' ELSE status END, updated_at = NOW() WHERE user_id = ${uid} OR (mobile_no IS NOT NULL AND ${user.mobile_no || ''} != '' AND RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(${user.mobile_no || ''}, '\\D', '', 'g'), 10))`.catch(() => { });
 
       // For associate: insert tracker + MLM node
       if (user.user_type === "Associate") {
@@ -14375,7 +14375,12 @@ app.get("/api/admin/team-members",
                    COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
                    COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
                    COALESCE(NULLIF(TRIM(tm.ifsc_code), ''), NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
-                   COALESCE(tm.status, 'approved') AS status,
+                   COALESCE(tm.is_final_submitted, FALSE) AS is_final_submitted,
+                   CASE 
+                     WHEN LOWER(COALESCE(tm.status, '')) IN ('suspended', 'inactive', 'rejected', 'blocked') THEN LOWER(COALESCE(tm.status, ''))
+                     WHEN COALESCE(tm.is_final_submitted, FALSE) = TRUE AND LOWER(COALESCE(tm.status, '')) IN ('approved', 'active') THEN 'approved'
+                     ELSE 'pending'
+                   END AS status,
                    COALESCE(NULLIF(TRIM(tm.photo_url), ''), u.profile_image) AS photo_url,
                    tm.applicant_signature_url, tm.associate_signature_url,
                    COALESCE(tm.created_at, NOW()) AS created_at, COALESCE(tm.updated_at, NOW()) AS updated_at,
@@ -14383,9 +14388,9 @@ app.get("/api/admin/team-members",
                    COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id, 
                    COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile, 
                    COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
-                   COALESCE(u.account_status::text, tm.status::text, 'Active') AS account_status,
+                   COALESCE(u.account_status::text, tm.status::text, 'Pending') AS account_status,
                    COALESCE(u.is_active, true) AS is_user_active,
-                   CASE WHEN LOWER(COALESCE(tm.status, '')) IN ('approved', 'active') THEN TRUE ELSE FALSE END AS is_verified
+                   CASE WHEN COALESCE(tm.is_final_submitted, FALSE) = TRUE AND LOWER(COALESCE(tm.status, '')) IN ('approved', 'active') THEN TRUE ELSE FALSE END AS is_verified
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
             LEFT JOIN users u ON u.user_id = tm.user_id
@@ -14433,7 +14438,12 @@ app.get("/api/admin/team-members",
               COALESCE(NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
               COALESCE(NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
               COALESCE(NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
-              CASE WHEN LOWER(COALESCE(u.account_status::text, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
+              FALSE AS is_final_submitted,
+              CASE 
+                WHEN LOWER(COALESCE(u.account_status::text, 'Pending')) IN ('suspended', 'inactive', 'rejected', 'blocked') THEN LOWER(COALESCE(u.account_status::text, ''))
+                WHEN COALESCE(u.enrollment_status, '0') IN ('Completed', 'Approved') AND LOWER(COALESCE(u.account_status::text, 'Pending')) = 'active' THEN 'approved' 
+                ELSE 'pending' 
+              END AS status,
               u.profile_image AS photo_url,
               NULL::varchar AS applicant_signature_url,
               NULL::varchar AS associate_signature_url,
@@ -14443,7 +14453,7 @@ app.get("/api/admin/team-members",
               COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id,
               COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile,
               COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
-              COALESCE(u.account_status::text, 'Active') AS account_status,
+              COALESCE(u.account_status::text, 'Pending') AS account_status,
               COALESCE(u.is_active, true) AS is_user_active,
               FALSE AS is_verified
             FROM users u
@@ -14518,11 +14528,10 @@ app.get("/api/admin/team-members",
           ) y_sales ON true
           WHERE (
             ${statusFilter} = '' OR ${statusFilter} = 'all'
-            OR (${statusFilter} = 'active' AND (LOWER(tm.status) IN ('active', 'approved') OR LOWER(COALESCE(tm.account_status, '')) = 'active'))
-            OR (${statusFilter} = 'pending' AND (LOWER(tm.status) IN ('pending', 'submitted') OR LOWER(COALESCE(tm.account_status, '')) = 'pending'))
-            OR (${statusFilter} = 'suspended' AND (LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked') OR LOWER(COALESCE(tm.account_status, '')) IN ('suspended', 'inactive', 'rejected', 'blocked')))
+            OR (${statusFilter} = 'active' AND LOWER(tm.status) IN ('active', 'approved'))
+            OR (${statusFilter} = 'pending' AND LOWER(tm.status) IN ('pending', 'submitted'))
+            OR (${statusFilter} = 'suspended' AND LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked'))
             OR LOWER(tm.status) = ${statusFilter}
-            OR LOWER(COALESCE(tm.account_status, '')) = ${statusFilter}
           )
           AND (${assocId} = 0 OR tm.associate_id = ${assocId})
           AND (
@@ -14560,7 +14569,12 @@ app.get("/api/admin/team-members",
                    COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
                    COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
                    COALESCE(NULLIF(TRIM(tm.ifsc_code), ''), NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
-                   COALESCE(tm.status, 'approved') AS status,
+                   COALESCE(tm.is_final_submitted, FALSE) AS is_final_submitted,
+                   CASE 
+                     WHEN LOWER(COALESCE(tm.status, '')) IN ('suspended', 'inactive', 'rejected', 'blocked') THEN LOWER(COALESCE(tm.status, ''))
+                     WHEN COALESCE(tm.is_final_submitted, FALSE) = TRUE AND LOWER(COALESCE(tm.status, '')) IN ('approved', 'active') THEN 'approved'
+                     ELSE 'pending'
+                   END AS status,
                    COALESCE(NULLIF(TRIM(tm.photo_url), ''), u.profile_image) AS photo_url,
                    tm.applicant_signature_url, tm.associate_signature_url,
                    COALESCE(tm.created_at, NOW()) AS created_at, COALESCE(tm.updated_at, NOW()) AS updated_at,
@@ -14568,8 +14582,9 @@ app.get("/api/admin/team-members",
                    COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id, 
                    COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile, 
                    COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
-                   COALESCE(u.account_status::text, tm.status::text, 'Active') AS account_status,
-                   COALESCE(u.is_active, true) AS is_user_active
+                   COALESCE(u.account_status::text, tm.status::text, 'Pending') AS account_status,
+                   COALESCE(u.is_active, true) AS is_user_active,
+                   CASE WHEN COALESCE(tm.is_final_submitted, FALSE) = TRUE AND LOWER(COALESCE(tm.status, '')) IN ('approved', 'active') THEN TRUE ELSE FALSE END AS is_verified
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
             LEFT JOIN users u ON u.user_id = tm.user_id
@@ -14617,7 +14632,12 @@ app.get("/api/admin/team-members",
               COALESCE(NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
               COALESCE(NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
               COALESCE(NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
-              CASE WHEN LOWER(COALESCE(u.account_status::text, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
+              FALSE AS is_final_submitted,
+              CASE 
+                WHEN LOWER(COALESCE(u.account_status::text, 'Pending')) IN ('suspended', 'inactive', 'rejected', 'blocked') THEN LOWER(COALESCE(u.account_status::text, ''))
+                WHEN COALESCE(u.enrollment_status, '0') IN ('Completed', 'Approved') AND LOWER(COALESCE(u.account_status::text, 'Pending')) = 'active' THEN 'approved' 
+                ELSE 'pending' 
+              END AS status,
               u.profile_image AS photo_url,
               NULL::varchar AS applicant_signature_url,
               NULL::varchar AS associate_signature_url,
@@ -14627,8 +14647,9 @@ app.get("/api/admin/team-members",
               COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id,
               COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile,
               COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
-              COALESCE(u.account_status::text, 'Active') AS account_status,
-              COALESCE(u.is_active, true) AS is_user_active
+              COALESCE(u.account_status::text, 'Pending') AS account_status,
+              COALESCE(u.is_active, true) AS is_user_active,
+              FALSE AS is_verified
             FROM users u
             LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
             LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
@@ -14668,11 +14689,10 @@ app.get("/api/admin/team-members",
           FROM all_team_members tm
           WHERE (
             ${statusFilter} = '' OR ${statusFilter} = 'all'
-            OR (${statusFilter} = 'active' AND (LOWER(tm.status) IN ('active', 'approved') OR LOWER(COALESCE(tm.account_status, '')) = 'active'))
-            OR (${statusFilter} = 'pending' AND (LOWER(tm.status) IN ('pending', 'submitted') OR LOWER(COALESCE(tm.account_status, '')) = 'pending'))
-            OR (${statusFilter} = 'suspended' AND (LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked') OR LOWER(COALESCE(tm.account_status, '')) IN ('suspended', 'inactive', 'rejected', 'blocked')))
+            OR (${statusFilter} = 'active' AND LOWER(tm.status) IN ('active', 'approved'))
+            OR (${statusFilter} = 'pending' AND LOWER(tm.status) IN ('pending', 'submitted'))
+            OR (${statusFilter} = 'suspended' AND LOWER(tm.status) IN ('suspended', 'inactive', 'rejected', 'blocked'))
             OR LOWER(tm.status) = ${statusFilter}
-            OR LOWER(COALESCE(tm.account_status, '')) = ${statusFilter}
           )
           AND (${assocId} = 0 OR tm.associate_id = ${assocId})
           AND (
@@ -14703,13 +14723,15 @@ app.get("/api/admin/team-members",
         const [sumRow] = await sql`
           SELECT
             COALESCE(COUNT(*), 0)::int AS total_team_members,
-            COALESCE(COUNT(CASE WHEN LOWER(status) IN ('approved', 'active') THEN 1 END), 0)::int AS active_count,
-            COALESCE(COUNT(CASE WHEN LOWER(status) IN ('pending', 'submitted') THEN 1 END), 0)::int AS pending_count,
+            COALESCE(COUNT(CASE WHEN COALESCE(is_final_submitted, FALSE) = TRUE AND LOWER(status) IN ('approved', 'active') THEN 1 END), 0)::int AS active_count,
+            COALESCE(COUNT(CASE WHEN (COALESCE(is_final_submitted, FALSE) = FALSE AND LOWER(COALESCE(status, '')) NOT IN ('suspended', 'inactive', 'rejected', 'blocked')) OR LOWER(status) IN ('pending', 'submitted') THEN 1 END), 0)::int AS pending_count,
             COALESCE(COUNT(CASE WHEN LOWER(status) IN ('suspended', 'inactive', 'rejected', 'blocked') THEN 1 END), 0)::int AS suspended_count
           FROM (
-            SELECT status FROM team_members
+            SELECT status, is_final_submitted FROM team_members
             UNION ALL
-            SELECT CASE WHEN LOWER(COALESCE(account_status::text, 'Active')) = 'active' THEN 'approved' ELSE 'pending' END AS status
+            SELECT 
+              CASE WHEN COALESCE(enrollment_status, '0') IN ('Completed', 'Approved') AND LOWER(COALESCE(account_status::text, 'Pending')) = 'active' THEN 'approved' ELSE 'pending' END AS status,
+              FALSE AS is_final_submitted
             FROM users u
             WHERE (u.member_id ILIKE 'MMR-TM-%' OR u.member_id ILIKE 'TM-%' OR LOWER(u.user_type::TEXT) = 'teammember' OR LOWER(u.user_type::TEXT) = 'team member')
               AND NOT EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.user_id OR tm.team_member_uid = u.member_id)
@@ -14768,7 +14790,12 @@ app.get("/api/admin/team-members/:id",
                    COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
                    COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
                    COALESCE(NULLIF(TRIM(tm.ifsc_code), ''), NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
-                   COALESCE(tm.status, 'approved') AS status,
+                   COALESCE(tm.is_final_submitted, FALSE) AS is_final_submitted,
+                   CASE 
+                     WHEN LOWER(COALESCE(tm.status, '')) IN ('suspended', 'inactive', 'rejected', 'blocked') THEN LOWER(COALESCE(tm.status, ''))
+                     WHEN COALESCE(tm.is_final_submitted, FALSE) = TRUE AND LOWER(COALESCE(tm.status, '')) IN ('approved', 'active') THEN 'approved'
+                     ELSE 'pending'
+                   END AS status,
                    COALESCE(NULLIF(TRIM(tm.photo_url), ''), u.profile_image) AS photo_url,
                    tm.applicant_signature_url, tm.associate_signature_url,
                    COALESCE(tm.created_at, NOW()) AS created_at, COALESCE(tm.updated_at, NOW()) AS updated_at,
@@ -14776,8 +14803,9 @@ app.get("/api/admin/team-members/:id",
                    COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id, 
                    COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile, 
                    COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
-                   COALESCE(u.account_status::text, tm.status::text, 'Active') AS account_status,
+                   COALESCE(u.account_status::text, tm.status::text, 'Pending') AS account_status,
                    COALESCE(u.is_active, true) AS is_user_active,
+                   CASE WHEN COALESCE(tm.is_final_submitted, FALSE) = TRUE AND LOWER(COALESCE(tm.status, '')) IN ('approved', 'active') THEN TRUE ELSE FALSE END AS is_verified,
                    COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
                    COALESCE(t.total_commission_earned, 0) AS total_commission_earned
             FROM team_members tm
@@ -14824,7 +14852,12 @@ app.get("/api/admin/team-members/:id",
                    COALESCE(NULLIF(TRIM(tm.branch_name), ''), NULLIF(TRIM(b.branch_name), ''), NULLIF(TRIM(aen.branch_name), ''), '') AS branch_name,
                    COALESCE(NULLIF(TRIM(tm.account_no), ''), NULLIF(TRIM(b.account_number), ''), NULLIF(TRIM(aen.account_no), ''), '') AS account_no,
                    COALESCE(NULLIF(TRIM(tm.ifsc_code), ''), NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), ''), '') AS ifsc_code,
-                   COALESCE(tm.status, 'approved') AS status,
+                   COALESCE(tm.is_final_submitted, FALSE) AS is_final_submitted,
+                   CASE 
+                     WHEN LOWER(COALESCE(tm.status, '')) IN ('suspended', 'inactive', 'rejected', 'blocked') THEN LOWER(COALESCE(tm.status, ''))
+                     WHEN COALESCE(tm.is_final_submitted, FALSE) = TRUE AND LOWER(COALESCE(tm.status, '')) IN ('approved', 'active') THEN 'approved'
+                     ELSE 'pending'
+                   END AS status,
                    COALESCE(NULLIF(TRIM(tm.photo_url), ''), u.profile_image) AS photo_url,
                    tm.applicant_signature_url, tm.associate_signature_url,
                    COALESCE(tm.created_at, NOW()) AS created_at, COALESCE(tm.updated_at, NOW()) AS updated_at,
@@ -14832,8 +14865,9 @@ app.get("/api/admin/team-members/:id",
                    COALESCE(assoc.member_id, 'MMR-ASC-0001') AS sponsor_member_id, 
                    COALESCE(assoc.mobile_no, '7071951011') AS sponsor_mobile, 
                    COALESCE(assoc.email, 'mmrconstructions@hotmail.com') AS sponsor_email,
-                   COALESCE(u.account_status::text, tm.status::text, 'Active') AS account_status,
+                   COALESCE(u.account_status::text, tm.status::text, 'Pending') AS account_status,
                    COALESCE(u.is_active, true) AS is_user_active,
+                   CASE WHEN COALESCE(tm.is_final_submitted, FALSE) = TRUE AND LOWER(COALESCE(tm.status, '')) IN ('approved', 'active') THEN TRUE ELSE FALSE END AS is_verified,
                    COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
                    COALESCE(t.total_commission_earned, 0) AS total_commission_earned
             FROM team_members tm

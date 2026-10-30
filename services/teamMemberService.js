@@ -1157,6 +1157,7 @@ export async function finalSubmitTeamMemberRecord(id, associateId, isAdmin = fal
     UPDATE team_members
     SET
       is_final_submitted = TRUE,
+      status = 'approved',
       updated_at = NOW()
     WHERE id = ${existing.id}
     RETURNING *
