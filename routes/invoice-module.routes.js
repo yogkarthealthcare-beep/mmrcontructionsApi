@@ -294,77 +294,10 @@ router.get("/orders", userAuth, async (req, res) => {
 });
 
 // Helper: Check invoice authorization
+// An invoice / payment receipt is completely independent and publicly accessible
+// by anyone holding the invoice, QR scanner, or EMI reference. No user session or login is required.
 async function canAccessInvoice(reqUser = {}, invoice = {}) {
-  if (!invoice) return false;
-
-  // 1. Direct public verification / unauthenticated access with exact invoice/EMI reference
-  if (!reqUser || Object.keys(reqUser).length === 0) {
-    return Boolean(invoice.invoice_number || invoice.booking_id || invoice.invoice_id);
-  }
-
-  // 2. Admins, managers, finance, and office staff have full access
-  const isAdmin = Boolean(
-    reqUser.is_admin ||
-    reqUser.admin_id ||
-    ["admin", "superadmin", "sitemanager", "accountant", "supportstaff", "financemanager"].includes(String(reqUser.role || reqUser.user_type || "").toLowerCase())
-  );
-  if (isAdmin) return true;
-
-  const currentUserId = Number(reqUser.user_id || reqUser.id || 0);
-  if (currentUserId > 0) {
-    // 3. Direct purchaser match
-    if (Number(invoice.user_id || 0) === currentUserId) return true;
-    if (Number(invoice.invoice_data?.user_id || 0) === currentUserId) return true;
-
-    // 4. Direct associate / team seller match
-    if (Number(invoice.associate_id || 0) === currentUserId) return true;
-    if (Number(invoice.invoice_data?.associate_id || 0) === currentUserId) return true;
-
-    // 5. Check underlying booking attribution
-    const bookingId = invoice.booking_id || (invoice.invoice_data && invoice.invoice_data.booking_id);
-    if (bookingId) {
-      try {
-        const [bk] = await sql`
-          SELECT user_id, associate_user_id, sold_by_user_id, referred_by_user_id, booked_by_user_id
-          FROM bookings WHERE booking_id = ${bookingId} LIMIT 1
-        `;
-        if (bk) {
-          if (
-            Number(bk.user_id || 0) === currentUserId ||
-            Number(bk.associate_user_id || 0) === currentUserId ||
-            Number(bk.sold_by_user_id || 0) === currentUserId ||
-            Number(bk.referred_by_user_id || 0) === currentUserId ||
-            Number(bk.booked_by_user_id || 0) === currentUserId
-          ) {
-            return true;
-          }
-
-          // Check if current user is team member of this associate/seller
-          const [tmBk] = await sql`
-            SELECT 1 FROM team_members
-            WHERE user_id = ${currentUserId}
-              AND (associate_id = ${bk.associate_user_id || 0} OR associate_id = ${bk.sold_by_user_id || 0})
-            LIMIT 1
-          `;
-          if (tmBk) return true;
-
-          // Check if current user is associate whose team member sold this
-          const [assocBk] = await sql`
-            SELECT 1 FROM team_members
-            WHERE associate_id = ${currentUserId}
-              AND user_id IN (${bk.sold_by_user_id || 0}, ${bk.booked_by_user_id || 0}, ${bk.user_id || 0})
-            LIMIT 1
-          `;
-          if (assocBk) return true;
-        }
-      } catch (_) {}
-    }
-  }
-
-  // 6. Invoices and receipts are verifiable billing documents:
-  // If an authenticated user accessed a specific valid invoice / EMI installment bill
-  // (which requires knowing the exact invoice/EMI ID), allow view/print access.
-  return Boolean(invoice.invoice_number || invoice.booking_id || invoice.invoice_id);
+  return Boolean(invoice && (invoice.invoice_number || invoice.booking_id || invoice.invoice_id));
 }
 
 // ----------------------------------------------------
