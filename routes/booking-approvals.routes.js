@@ -291,9 +291,20 @@ router.get('/my-bookable-customers', verifyUserToken, async (req, res) => {
         FROM users c
         LEFT JOIN users u ON u.user_id = COALESCE(c.referred_by_user_id, c.sponsor_user_id)
         LEFT JOIN user_kyc_profiles k ON k.user_id = c.user_id
-        WHERE c.user_type = 'Customer'
-          AND c.account_status = 'Active'
-          AND (c.referred_by_user_id = ${callerId} OR c.sponsor_user_id = ${callerId})
+        WHERE LOWER(c.user_type::text) IN ('customer', 'user')
+          AND LOWER(COALESCE(c.account_status, 'active')) NOT IN ('suspended', 'rejected', 'deleted', 'blocked')
+          AND (
+            c.referred_by_user_id = ${callerId} 
+            OR c.sponsor_user_id = ${callerId}
+            OR c.user_id IN (
+              SELECT b.user_id FROM bookings b
+              WHERE b.sold_by_user_id = ${callerId} OR b.associate_user_id = ${callerId} OR b.sponsor_user_id = ${callerId}
+            )
+            OR c.user_id IN (
+              SELECT sub.user_id FROM customer_enrollment_submissions sub
+              WHERE (${freshActor.member_id || ''} <> '' AND sub.associate_id = ${freshActor.member_id || ''}) OR sub.associate_id = ${String(callerId)}
+            )
+          )
           ${searchPattern ? sql`AND (c.full_name ILIKE ${searchPattern} OR c.member_id ILIKE ${searchPattern} OR c.mobile_no ILIKE ${searchPattern})` : sql``}
         ORDER BY c.full_name ASC
         LIMIT ${limitNum} OFFSET ${offset}
@@ -302,9 +313,20 @@ router.get('/my-bookable-customers', verifyUserToken, async (req, res) => {
       countResult = await sql`
         SELECT COUNT(*)::INT AS total
         FROM users c
-        WHERE c.user_type = 'Customer'
-          AND c.account_status = 'Active'
-          AND (c.referred_by_user_id = ${callerId} OR c.sponsor_user_id = ${callerId})
+        WHERE LOWER(c.user_type::text) IN ('customer', 'user')
+          AND LOWER(COALESCE(c.account_status, 'active')) NOT IN ('suspended', 'rejected', 'deleted', 'blocked')
+          AND (
+            c.referred_by_user_id = ${callerId} 
+            OR c.sponsor_user_id = ${callerId}
+            OR c.user_id IN (
+              SELECT b.user_id FROM bookings b
+              WHERE b.sold_by_user_id = ${callerId} OR b.associate_user_id = ${callerId} OR b.sponsor_user_id = ${callerId}
+            )
+            OR c.user_id IN (
+              SELECT sub.user_id FROM customer_enrollment_submissions sub
+              WHERE (${freshActor.member_id || ''} <> '' AND sub.associate_id = ${freshActor.member_id || ''}) OR sub.associate_id = ${String(callerId)}
+            )
+          )
           ${searchPattern ? sql`AND (c.full_name ILIKE ${searchPattern} OR c.member_id ILIKE ${searchPattern} OR c.mobile_no ILIKE ${searchPattern})` : sql``}
       `;
 

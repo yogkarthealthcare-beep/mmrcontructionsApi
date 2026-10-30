@@ -8774,6 +8774,213 @@ app.get("/api/team-member/invite-code", verifyUserToken, requireSalesEntity, (re
   app.handle(req, res, next);
 });
 
+// ---------------------------------------------------------------------
+// Dedicated Team Member Customers & Plot Orders API
+// ---------------------------------------------------------------------
+app.get(["/api/team-member/my-customers", "/api/team-member/customers"], verifyUserToken, async (req, res) => {
+  try {
+    const callerId = Number(req.user.user_id || req.user.userId || req.user.id);
+    if (!callerId) return err(res, "Authentication required", 401);
+
+    // Get team member UID if exists
+    const [tmRow] = await sql`
+      SELECT team_member_uid, associate_id, status FROM team_members 
+      WHERE user_id = ${callerId} 
+      ORDER BY created_at DESC LIMIT 1
+    `.catch(() => []);
+    const tmUid = tmRow?.team_member_uid || '';
+
+    // Optional Search query
+    const { search = '' } = req.query;
+    const searchPattern = search ? `%${String(search).trim()}%` : null;
+
+    // 1. Fetch all customers attributed to this team member
+    const customerRows = await sql`
+      SELECT DISTINCT
+        c.user_id,
+        c.member_id,
+        c.full_name,
+        c.email,
+        c.mobile_no,
+        c.gender,
+        c.city,
+        COALESCE(c.account_status, 'Active') AS account_status,
+        COALESCE(c.registered_at, c.created_at) AS registered_at,
+        c.created_at
+      FROM users c
+      WHERE LOWER(c.user_type::text) IN ('customer', 'user')
+        AND (
+          c.referred_by_user_id = ${callerId}
+          OR c.sponsor_user_id = ${callerId}
+          OR c.user_id IN (
+            SELECT b.user_id FROM bookings b 
+            WHERE b.sold_by_user_id = ${callerId} 
+               OR b.associate_user_id = ${callerId} 
+               OR b.sponsor_user_id = ${callerId}
+          )
+          OR c.user_id IN (
+            SELECT sub.user_id FROM customer_enrollment_submissions sub 
+            WHERE (${tmUid} <> '' AND sub.associate_id = ${tmUid}) 
+               OR sub.associate_id = ${String(callerId)}
+          )
+        )
+        ${searchPattern ? sql`AND (c.full_name ILIKE ${searchPattern} OR c.member_id ILIKE ${searchPattern} OR c.mobile_no ILIKE ${searchPattern})` : sql``}
+      ORDER BY c.created_at DESC
+    `;
+
+    if (!customerRows || customerRows.length === 0) {
+      return ok(res, []);
+    }
+
+    const customerIds = customerRows.map(c => c.user_id);
+
+    // 2. Fetch all bookings for these customers
+    const bookingsRows = await sql`
+      SELECT 
+        b.booking_id,
+        b.booking_serial,
+        b.user_id,
+        COALESCE(b.booking_date, b.created_at) AS booking_date,
+        COALESCE(b.booking_status::text, 'Allocated') AS booking_status,
+        COALESCE(b.workflow_status::text, 'Active') AS workflow_status,
+        COALESCE(b.payment_type::text, 'FullPayment') AS payment_type,
+        COALESCE(b.payment_method::text, 'Online') AS payment_method,
+        COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+        COALESCE(b.plot_area, p.plot_area, 0)::numeric AS plot_area,
+        COALESCE(b.area_unit, 'Gaj') AS area_unit,
+        COALESCE(s.site_name, 'MMR Green Valley') AS site_name,
+        COALESCE(s.city, 'Lucknow') AS site_location,
+        COALESCE(NULLIF(b.base_price, 0), NULLIF(b.requested_price, 0), NULLIF(p.sold_price, 0), NULLIF(p.base_price, 0), (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0)::numeric AS plot_price,
+        COALESCE(b.advance_amount, 0)::numeric AS advance_amount,
+        b.created_at
+      FROM bookings b
+      LEFT JOIN plots p ON b.plot_id = p.plot_id
+      LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
+      WHERE b.user_id IN ${sql(customerIds)}
+        AND b.booking_status::text <> 'Cancelled'
+      ORDER BY b.created_at DESC
+    `;
+
+    const bookingIds = bookingsRows.map(b => b.booking_id);
+
+    // 3. Fetch EMI schedules for these bookings
+    let emiRows = [];
+    if (bookingIds.length > 0) {
+      emiRows = await sql`
+        SELECT 
+          emi_id,
+          booking_id,
+          installment_no,
+          due_date,
+          emi_amount::numeric,
+          paid_amount::numeric,
+          emi_status::text,
+          paid_date,
+          payment_mode
+        FROM emi_schedules
+        WHERE booking_id IN ${sql(bookingIds)}
+        ORDER BY installment_no ASC
+      `;
+    }
+
+    // Map bookings by customer
+    const bookingsByCustomer = {};
+    for (const b of bookingsRows) {
+      const bEmis = emiRows.filter(e => e.booking_id === b.booking_id);
+      const isPartial = b.payment_type === 'Partial' || b.payment_type === 'PartWise';
+      const isEmi = b.payment_type === 'EMI';
+      const plotPrice = Number(b.plot_price || 0);
+      const advancePaid = Number(b.advance_amount || 0);
+      const paidEmis = bEmis.filter(e => e.emi_status === 'Paid');
+      const emiPaidSum = paidEmis.reduce((sum, e) => sum + Number(e.paid_amount || e.emi_amount || 0), 0);
+
+      let confirmedPaid = 0;
+      if (isPartial) {
+        confirmedPaid = Math.min(plotPrice, Math.max(emiPaidSum, advancePaid));
+      } else if (isEmi) {
+        confirmedPaid = Math.min(plotPrice, advancePaid + emiPaidSum);
+      } else {
+        // FullPayment / OneTime
+        confirmedPaid = plotPrice;
+      }
+      const remainingDue = Math.max(0, plotPrice - confirmedPaid);
+      const progressPercent = plotPrice > 0 ? Math.min(100, Math.round((confirmedPaid / plotPrice) * 100)) : 100;
+
+      const formattedBooking = {
+        booking_id: b.booking_id,
+        booking_serial: b.booking_serial || `BK-${b.booking_id}`,
+        booking_date: b.booking_date,
+        booking_status: b.booking_status,
+        workflow_status: b.workflow_status,
+        site_name: b.site_name,
+        site_location: b.site_location,
+        plot_number: b.plot_number,
+        plot_area: Number(b.plot_area || 0),
+        area_unit: b.area_unit || 'Gaj',
+        plot_price: plotPrice,
+        payment_type: b.payment_type,
+        payment_method: b.payment_method,
+        advance_amount: advancePaid,
+        confirmed_paid: confirmedPaid,
+        remaining_due: remainingDue,
+        progress_percent: progressPercent,
+        installments_summary: {
+          total: bEmis.length,
+          paid: paidEmis.length,
+          unpaid: bEmis.filter(e => e.emi_status !== 'Paid' && e.emi_status !== 'ProofSubmitted').length,
+          submitted: bEmis.filter(e => e.emi_status === 'ProofSubmitted').length
+        },
+        installments: bEmis.map(e => ({
+          emi_id: e.emi_id,
+          installment_no: e.installment_no,
+          due_date: e.due_date,
+          emi_amount: Number(e.emi_amount || 0),
+          paid_amount: Number(e.paid_amount || 0),
+          emi_status: e.emi_status,
+          paid_date: e.paid_date,
+          payment_mode: e.payment_mode
+        }))
+      };
+
+      if (!bookingsByCustomer[b.user_id]) {
+        bookingsByCustomer[b.user_id] = [];
+      }
+      bookingsByCustomer[b.user_id].push(formattedBooking);
+    }
+
+    // Assemble final response
+    const result = customerRows.map(c => {
+      const bList = bookingsByCustomer[c.user_id] || [];
+      const totalGaj = bList.reduce((acc, b) => acc + (b.plot_area || 0), 0);
+      const totalValue = bList.reduce((acc, b) => acc + (b.plot_price || 0), 0);
+      const totalPaid = bList.reduce((acc, b) => acc + (b.confirmed_paid || 0), 0);
+      const totalDue = bList.reduce((acc, b) => acc + (b.remaining_due || 0), 0);
+
+      return {
+        user_id: c.user_id,
+        member_id: c.member_id || `CUS-${c.user_id}`,
+        full_name: c.full_name || 'Valued Customer',
+        email: c.email || '—',
+        mobile_no: c.mobile_no || '—',
+        city: c.city || '—',
+        account_status: c.account_status,
+        registered_at: c.registered_at,
+        bookings_count: bList.length,
+        total_gaj: totalGaj,
+        total_value: totalValue,
+        total_paid: totalPaid,
+        total_due: totalDue,
+        bookings: bList
+      };
+    });
+
+    return ok(res, result);
+  } catch (error) {
+    console.error("[Team Member Customers Error]:", error);
+    return err(res, error.message, 500);
+  }
+});
+
 const getDefaultSponsorUserId = async () => {
   const [defaultUser] = await sql`
     SELECT user_id FROM users
