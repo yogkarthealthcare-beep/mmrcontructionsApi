@@ -340,7 +340,6 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
          OR booking_id IN (
            SELECT booking_id FROM bookings
            WHERE LOWER(booking_serial) = LOWER(${invoiceNumber})
-              OR LOWER(order_id) = LOWER(${invoiceNumber})
          )
       ORDER BY (CASE WHEN LOWER(order_id) = LOWER(${invoiceNumber}) OR LOWER(invoice_number) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), invoice_id ASC
       LIMIT 1
@@ -541,10 +540,9 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
         JOIN users u ON b.user_id = u.user_id
         LEFT JOIN users assoc ON COALESCE(b.associate_user_id, b.sold_by_user_id) = assoc.user_id
         WHERE LOWER(b.booking_serial) = LOWER(${invoiceNumber})
-           OR LOWER(b.order_id) = LOWER(${invoiceNumber})
            OR LOWER(b.booking_serial) = LOWER(${cleanNum})
            OR (CASE WHEN ${cleanId !== null && !isEmiQuery} THEN b.booking_id = ${cleanId} ELSE false END)
-        ORDER BY (CASE WHEN LOWER(b.booking_serial) = LOWER(${invoiceNumber}) OR LOWER(b.order_id) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), b.booking_id DESC
+        ORDER BY (CASE WHEN LOWER(b.booking_serial) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), b.booking_id DESC
         LIMIT 1
       `;
 
@@ -1050,7 +1048,6 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
          OR booking_id IN (
            SELECT booking_id FROM bookings
            WHERE LOWER(booking_serial) = LOWER(${invoiceNumber})
-              OR LOWER(order_id) = LOWER(${invoiceNumber})
          )
       ORDER BY (CASE WHEN LOWER(order_id) = LOWER(${invoiceNumber}) OR LOWER(invoice_number) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), invoice_id ASC
       LIMIT 1
@@ -1158,10 +1155,9 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
         LEFT JOIN sites s2 ON b.site_id = s2.site_id
         JOIN users u ON b.user_id = u.user_id
         WHERE LOWER(b.booking_serial) = LOWER(${invoiceNumber})
-           OR LOWER(b.order_id) = LOWER(${invoiceNumber})
            OR LOWER(b.booking_serial) = LOWER(${cleanNum})
            OR (CASE WHEN ${cleanId !== null && !isEmiQuery} THEN b.booking_id = ${cleanId} ELSE false END)
-        ORDER BY (CASE WHEN LOWER(b.booking_serial) = LOWER(${invoiceNumber}) OR LOWER(b.order_id) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), b.booking_id DESC
+        ORDER BY (CASE WHEN LOWER(b.booking_serial) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), b.booking_id DESC
         LIMIT 1
       `;
 
@@ -1310,7 +1306,6 @@ router.get("/public/invoice/download/:invoiceNumber", async (req, res) => {
          OR booking_id IN (
            SELECT booking_id FROM bookings
            WHERE LOWER(booking_serial) = LOWER(${invoiceNumber})
-              OR LOWER(order_id) = LOWER(${invoiceNumber})
          )
       ORDER BY (CASE WHEN LOWER(order_id) = LOWER(${invoiceNumber}) OR LOWER(invoice_number) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), invoice_id ASC
       LIMIT 1
@@ -1329,10 +1324,9 @@ router.get("/public/invoice/download/:invoiceNumber", async (req, res) => {
         LEFT JOIN sites s2 ON b.site_id = s2.site_id
         JOIN users u ON b.user_id = u.user_id
         WHERE LOWER(b.booking_serial) = LOWER(${invoiceNumber})
-           OR LOWER(b.order_id) = LOWER(${invoiceNumber})
            OR LOWER(b.booking_serial) = LOWER(${cleanNum})
            OR (CASE WHEN ${cleanId !== null} THEN b.booking_id = ${cleanId} ELSE false END)
-        ORDER BY (CASE WHEN LOWER(b.booking_serial) = LOWER(${invoiceNumber}) OR LOWER(b.order_id) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), b.booking_id DESC
+        ORDER BY (CASE WHEN LOWER(b.booking_serial) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), b.booking_id DESC
         LIMIT 1
       `;
       if (booking) {
@@ -1443,7 +1437,6 @@ router.get("/verify-invoice/:invoiceNumber", async (req, res) => {
          OR booking_id IN (
            SELECT booking_id FROM bookings
            WHERE LOWER(booking_serial) = LOWER(${invoiceNumber})
-              OR LOWER(order_id) = LOWER(${invoiceNumber})
          )`;
 
     if (!invoice) {
