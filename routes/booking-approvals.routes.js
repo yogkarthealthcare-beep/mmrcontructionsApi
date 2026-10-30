@@ -117,13 +117,57 @@ router.get('/associate/booking-approvals', verifyUserToken, async (req, res) => 
  * 2. POST /api/associate/booking-approvals/:bookingId/approve
  * Associate approves a pending booking
  */
+/**
+ * 2a. POST /api/associate/booking-approvals/:bookingId/decide
+ * Unified decide endpoint used by Associate portal frontend (supports both 'approve' and 'reject')
+ */
+router.post('/associate/booking-approvals/:bookingId/decide', verifyUserToken, async (req, res) => {
+  try {
+    if (resolveEffectivePanel(req.user) === 'team-member') {
+      return err(res, 'Access denied: Associate access required (current session is acting as Team Member).', 403);
+    }
+    const bookingId = Number(req.params.bookingId);
+    const { decision, reason, decision_notes, rejection_reason } = req.body || {};
+    const [actor] = await sql`SELECT user_id, user_type, account_status FROM users WHERE user_id = ${req.user.user_id}`;
+    if (!actor || actor.user_type !== 'Associate' || !['Active', 'Approved'].includes(actor.account_status)) {
+      return err(res, 'Access denied: Only active Associates can review bookings.', 403);
+    }
+    const associateId = actor.user_id;
+
+    const normDecision = String(decision || '').toLowerCase();
+    if (normDecision === 'approve') {
+      const updated = await bookingService.approveBooking({
+        bookingId,
+        actorId: associateId,
+        reason: reason || decision_notes || ''
+      });
+      return ok(res, updated, 'Booking approval granted successfully.');
+    } else if (normDecision === 'reject') {
+      const note = reason || rejection_reason || decision_notes;
+      if (!note || !String(note).trim()) {
+        return err(res, 'A rejection reason is mandatory.', 400);
+      }
+      const updated = await bookingService.rejectBooking({
+        bookingId,
+        actorId: associateId,
+        reason: String(note).trim()
+      });
+      return ok(res, updated, 'Booking has been rejected and cancelled.');
+    } else {
+      return err(res, 'Invalid decision. Must be "approve" or "reject".', 400);
+    }
+  } catch (e) {
+    return err(res, e.message, e.status || 400);
+  }
+});
+
 router.post('/associate/booking-approvals/:bookingId/approve', verifyUserToken, async (req, res) => {
   try {
     if (resolveEffectivePanel(req.user) === 'team-member') {
       return err(res, 'Access denied: Associate access required (current session is acting as Team Member).', 403);
     }
     const bookingId = Number(req.params.bookingId);
-    const { reason } = req.body || {};
+    const { reason, decision_notes } = req.body || {};
     const [actor] = await sql`SELECT user_id, user_type, account_status FROM users WHERE user_id = ${req.user.user_id}`;
     if (!actor || actor.user_type !== 'Associate' || !['Active', 'Approved'].includes(actor.account_status)) {
       return err(res, 'Access denied: Only active Associates can approve bookings.', 403);
@@ -133,7 +177,7 @@ router.post('/associate/booking-approvals/:bookingId/approve', verifyUserToken, 
     const updated = await bookingService.approveBooking({
       bookingId,
       actorId: associateId,
-      reason
+      reason: reason || decision_notes || ''
     });
 
     return ok(res, updated, 'Booking approval granted successfully.');
@@ -152,20 +196,21 @@ router.post('/associate/booking-approvals/:bookingId/reject', verifyUserToken, a
       return err(res, 'Access denied: Associate access required (current session is acting as Team Member).', 403);
     }
     const bookingId = Number(req.params.bookingId);
-    const { reason } = req.body || {};
+    const { reason, rejection_reason, decision_notes } = req.body || {};
     const [actor] = await sql`SELECT user_id, user_type, account_status FROM users WHERE user_id = ${req.user.user_id}`;
     if (!actor || actor.user_type !== 'Associate' || !['Active', 'Approved'].includes(actor.account_status)) {
       return err(res, 'Access denied: Only active Associates can reject bookings.', 403);
     }
     const associateId = actor.user_id;
-    if (!reason || !String(reason).trim()) {
+    const note = reason || rejection_reason || decision_notes;
+    if (!note || !String(note).trim()) {
       return err(res, 'A rejection reason is mandatory.', 400);
     }
 
     const updated = await bookingService.rejectBooking({
       bookingId,
       actorId: associateId,
-      reason: String(reason).trim()
+      reason: String(note).trim()
     });
 
     return ok(res, updated, 'Booking has been rejected and cancelled.');
@@ -178,7 +223,7 @@ router.post('/associate/booking-approvals/:bookingId/reject', verifyUserToken, a
  * 4. POST /api/admin/bookings/:id/override-associate-approval
  * Admin overrides Associate approval requirement
  */
-router.post('/admin/bookings/:id/override-associate-approval', verifyAdminToken, role('SuperAdmin', 'FinanceManager'), async (req, res) => {
+router.post(['/admin/bookings/:id/override-associate-approval', '/admin/bookings/:id/override-approval'], verifyAdminToken, role('SuperAdmin', 'FinanceManager'), async (req, res) => {
   try {
     const bookingId = Number(req.params.id);
     const adminId = req.admin.admin_id;
