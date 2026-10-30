@@ -104,6 +104,14 @@ async function createOrGetInvoice(bookingId) {
     0
   );
 
+  const [existingInv] = await sql`
+    SELECT * FROM invoices 
+    WHERE booking_id = ${bookingId} 
+       OR order_id = ${booking.booking_serial || `ORDER-${bookingId}`}
+    ORDER BY invoice_id DESC 
+    LIMIT 1
+  `.catch(() => []);
+
   if (existingInv) {
     if (Number(existingInv.total_amount || 0) <= 0 && saleVal > 0) {
       const advVal = Number(booking.advance_amount || 0);
