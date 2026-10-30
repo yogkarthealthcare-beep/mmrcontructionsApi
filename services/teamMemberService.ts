@@ -397,6 +397,8 @@ export const teamMemberSchema = z.object({
     .refine(v => !v || /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(v), { message: "Invalid PAN Number format (e.g. ABCDE1234F)" }),
   mobileNo: z.string().regex(/^[0-9]{10,15}$/, "Mobile Number must be 10-15 digits"),
   emailId: z.string().email("Invalid email address").optional().nullable().or(z.literal("")),
+    password: z.string().optional().nullable().or(z.literal("")),
+    password: z.string().optional().nullable().or(z.literal("")),
   fullAddress: z.string().min(5, "Full Address must be at least 5 characters"),
   
   nomineeName: z.string().optional().nullable()
@@ -773,15 +775,31 @@ export async function createTeamMemberRecord(
       `;
     }
 
+    if (existingUser) {
+      const pwdHash = (data.password && String(data.password).trim().length >= 6)
+        ? await bcrypt.hash(String(data.password).trim(), 12)
+        : null;
+      await tx`
+        UPDATE users
+        SET user_type = 'Team Member',
+            member_id = ${uid},
+            sponsor_user_id = COALESCE(sponsor_user_id, ${data.associateId}),
+            password_hash = COALESCE(${pwdHash}, password_hash),
+            updated_at = NOW()
+        WHERE user_id = ${userId}
+      `;
+    }
     if (!existingUser) {
-      const defaultPwd = `Mmr@${cleanMobile.length >= 4 ? cleanMobile.slice(-4) : '2026'}`;
-      const defaultHash = await bcrypt.hash(defaultPwd, 12);
+      const pwdToUse = (data.password && String(data.password).trim().length >= 6)
+        ? String(data.password).trim()
+        : `Mmr@${cleanMobile.length >= 4 ? cleanMobile.slice(-4) : '2026'}`;
+      const pwdHash = await bcrypt.hash(pwdToUse, 12);
       const [newUser] = await tx`
         INSERT INTO users (
           member_id, user_type, full_name, mobile_no, email, password_hash,
           pan_number, aadhar_number, sponsor_user_id, account_status, is_active, registered_at
         ) VALUES (
-          ${uid}, 'Team Member', ${data.fullName.trim()}, ${cleanMobile}, ${cleanEmail}, ${defaultHash},
+          ${uid}, 'Team Member', ${data.fullName.trim()}, ${cleanMobile}, ${cleanEmail}, ${pwdHash},
           ${data.panNo || null}, ${cleanAadhar}, ${data.associateId}, 'Pending', true, NOW()
         )
         ON CONFLICT DO NOTHING
@@ -1187,6 +1205,27 @@ export async function updateTeamMemberRecord(
     WHERE id = ${existing.id}
     RETURNING *
   `;
+
+  if (existing.user_id) {
+    let updatedPwdHash = null;
+    if (data.password && String(data.password).trim().length >= 6) {
+      updatedPwdHash = await bcrypt.hash(String(data.password).trim(), 12);
+    }
+    await sql`
+      UPDATE users
+      SET
+        full_name = COALESCE(${data.fullName || null}, full_name),
+        mobile_no = COALESCE(${data.mobileNo || null}, mobile_no),
+        email = COALESCE(${data.emailId || null}, email),
+        pan_number = COALESCE(${data.panNo || null}, pan_number),
+        aadhar_number = COALESCE(${data.aadharNo || null}, aadhar_number),
+        date_of_birth = COALESCE(${data.dateOfBirth || null}, date_of_birth),
+        gender = COALESCE(${data.gender || null}, gender),
+        password_hash = COALESCE(${updatedPwdHash}, password_hash),
+        updated_at = NOW()
+      WHERE user_id = ${existing.user_id}
+    `.catch(() => {});
+  }
 
   return {
     ...updated,
