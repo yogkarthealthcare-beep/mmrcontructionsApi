@@ -115,6 +115,38 @@ export function resolvePublicBaseUrl(req) {
   return "https://api.mmrconstructions.in";
 }
 
+export function resolveFrontendInvoiceUrl(invoice = {}, invoiceNumber = "") {
+  const frontendBase = (process.env.FRONTEND_URL || "https://mmrconstructions.in").replace(/\/$/, "");
+
+  const cleanNum = String(invoiceNumber || "").trim();
+  const isEmi = Boolean(
+    cleanNum.toUpperCase().startsWith("EMI-") ||
+    cleanNum.toUpperCase().includes("-EMI-") ||
+    String(invoice?.order_id || "").toUpperCase().startsWith("EMI-") ||
+    String(invoice?.invoice_number || "").toUpperCase().includes("-EMI-") ||
+    invoice?.invoice_data?.is_emi ||
+    invoice?.invoice_data?.emi_id
+  );
+
+  let targetId = "";
+  if (isEmi) {
+    if (cleanNum.toUpperCase().startsWith("EMI-")) {
+      targetId = cleanNum;
+    } else {
+      const emiId = invoice?.invoice_data?.emi_id || invoice?.invoice_id || cleanNum.replace(/\D+/g, "");
+      targetId = `EMI-${emiId}`;
+    }
+  } else {
+    if (cleanNum && !cleanNum.toUpperCase().startsWith("MMR-INV-EMI-")) {
+      targetId = cleanNum;
+    } else {
+      targetId = invoice?.invoice_number || invoice?.booking_serial || invoice?.order_id || (invoice?.booking_id ? `BK-${invoice.booking_id}` : cleanNum);
+    }
+  }
+
+  return `${frontendBase}/invoice/${encodeURIComponent(targetId)}`;
+}
+
 function ok(res, data = null, message = "Success", extra = {}) {
   return res.json({ success: true, message, data, ...extra });
 }
@@ -802,15 +834,9 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
     // Fetch Invoice Settings with official credentials & fallbacks
     const settings = await getEffectiveInvoiceSettings();
 
-    // Generate secure QR Code & Download URL for this current invoice
-    const publicBase = resolvePublicBaseUrl(req);
-    const downloadToken = generateInvoiceToken(
-      invoice.invoice_number,
-      invoice.invoice_id || invoice.booking_id,
-      invoice.grand_total
-    );
-    const downloadPdfUrl = `${publicBase}/api/public/invoice/download/${encodeURIComponent(invoice.invoice_number)}?token=${downloadToken}`;
-    const qrDataUrl = await QRCode.toDataURL(downloadPdfUrl, { margin: 1, width: 220, errorCorrectionLevel: 'M' });
+    // Generate QR Code & Verification URL directly to frontend invoice page
+    const publicInvoiceUrl = resolveFrontendInvoiceUrl(invoice, invoiceNumber);
+    const qrDataUrl = await QRCode.toDataURL(publicInvoiceUrl, { margin: 1, width: 220, errorCorrectionLevel: 'M' });
 
     // Generate Barcode Data URL
     let barcodeDataUrl = "";
@@ -850,7 +876,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
       settings: settings || {},
       qr_code: qrDataUrl,
       barcode: barcodeDataUrl,
-      verify_url: downloadPdfUrl,
+      verify_url: publicInvoiceUrl,
     });
   } catch (error) {
     console.error("GET /api/invoice/:invoiceNumber error:", error);
@@ -1005,7 +1031,7 @@ async function renderInvoicePdfStream({ invoice, settings, downloadUrl, res }) {
       doc.image(qrPngBuffer, startX + 125, sigY + 2, { width: 36, height: 36 });
       doc.rect(startX + 165, sigY + 2, 85, 36).fillAndStroke("#f8fafc", "#cbd5e1");
       doc.fontSize(6.5).font("Helvetica-Bold").fillColor("#15803d").text("OFFICIALLY VERIFIED", startX + 165, sigY + 6, { width: 85, align: "center" });
-      doc.fontSize(5).font("Helvetica").fillColor("#475569").text("Scan QR to Download PDF", startX + 165, sigY + 16, { width: 85, align: "center" });
+      doc.fontSize(5).font("Helvetica").fillColor("#475569").text("Scan QR to View Invoice", startX + 165, sigY + 16, { width: 85, align: "center" });
       doc.fontSize(4.5).font("Helvetica").fillColor("#94a3b8").text("Tamper-Proof SHA-256", startX + 165, sigY + 25, { width: 85, align: "center" });
     } else {
       doc.rect(startX + 135, sigY + 5, 110, 30).fillAndStroke("#f8fafc", "#e2e8f0");
@@ -1182,7 +1208,8 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
       invoice.invoice_id || invoice.booking_id,
       invoice.grand_total
     );
-    const downloadUrl = `${publicBase}/api/public/invoice/download/${encodeURIComponent(invoice.invoice_number)}?token=${token}`;
+    const publicInvoiceUrl = resolveFrontendInvoiceUrl(invoice, invoiceNumber);
+    const downloadUrl = publicInvoiceUrl;
 
     // Audit Log Entry
     try {
@@ -1316,7 +1343,8 @@ router.get("/public/invoice/download/:invoiceNumber", async (req, res) => {
 
     const settings = await getEffectiveInvoiceSettings();
     const publicBase = resolvePublicBaseUrl(req);
-    const downloadUrl = `${publicBase}/api/public/invoice/download/${encodeURIComponent(invoice.invoice_number)}?token=${token}`;
+    const publicInvoiceUrl = resolveFrontendInvoiceUrl(invoice, invoiceNumber);
+    const downloadUrl = publicInvoiceUrl;
 
     try {
       await sql`
