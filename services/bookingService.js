@@ -487,8 +487,10 @@ export async function createBooking({
           ON CONFLICT (user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()
         `;
       } catch (_) {}
+    } else if (['Submitted', 'Under Review'].includes(buyer.kyc_status)) {
+      // Documents submitted by customer, allow booking submission to be placed into Processing/Verification queue
     } else {
-      throw createBookingError('Buyer KYC documents must be approved before booking a plot.', 403);
+      throw createBookingError('Buyer KYC documents must be submitted/approved before booking a plot.', 403);
     }
   }
 

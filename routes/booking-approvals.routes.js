@@ -357,8 +357,8 @@ router.get('/my-bookable-customers', verifyUserToken, async (req, res) => {
         LEFT JOIN user_kyc_profiles k ON k.user_id = c.user_id
         WHERE c.user_type = 'Customer'
           AND c.account_status = 'Active'
-          ${teamMemberId ? sql`AND (c.referred_by_user_id = ${teamMemberId} OR c.sponsor_user_id = ${teamMemberId})` : 
-            (filterType === 'DIRECT' ? sql`AND (c.referred_by_user_id = ${callerId} OR c.sponsor_user_id = ${callerId})` :
+          ${teamMemberId ? sql`AND (c.referred_by_user_id = ${teamMemberId} OR c.sponsor_user_id = ${teamMemberId})` :
+          (filterType === 'DIRECT' ? sql`AND (c.referred_by_user_id = ${callerId} OR c.sponsor_user_id = ${callerId})` :
             sql`AND (
               c.referred_by_user_id = ${callerId}
               OR c.sponsor_user_id = ${callerId}
@@ -381,8 +381,8 @@ router.get('/my-bookable-customers', verifyUserToken, async (req, res) => {
         FROM users c
         WHERE c.user_type = 'Customer'
           AND c.account_status = 'Active'
-          ${teamMemberId ? sql`AND (c.referred_by_user_id = ${teamMemberId} OR c.sponsor_user_id = ${teamMemberId})` : 
-            (filterType === 'DIRECT' ? sql`AND (c.referred_by_user_id = ${callerId} OR c.sponsor_user_id = ${callerId})` :
+          ${teamMemberId ? sql`AND (c.referred_by_user_id = ${teamMemberId} OR c.sponsor_user_id = ${teamMemberId})` :
+          (filterType === 'DIRECT' ? sql`AND (c.referred_by_user_id = ${callerId} OR c.sponsor_user_id = ${callerId})` :
             sql`AND (
               c.referred_by_user_id = ${callerId}
               OR c.sponsor_user_id = ${callerId}
@@ -608,7 +608,7 @@ router.post('/admin/bookings/:id/price-approval/approve', verifyAdminToken, role
             emi_amount = EXCLUDED.emi_amount,
             paid_amount = EXCLUDED.paid_amount,
             updated_at = NOW()
-        `.catch(() => {});
+        `.catch(() => { });
 
         let cumRemPaise = 0;
         for (let p = 1; p <= remInstallments; p++) {
@@ -635,7 +635,7 @@ router.post('/admin/bookings/:id/price-approval/approve', verifyAdminToken, role
               emi_amount = EXCLUDED.emi_amount,
               total_due = EXCLUDED.total_due,
               updated_at = NOW()
-          `.catch(() => {});
+          `.catch(() => { });
         }
       }
 
@@ -651,7 +651,7 @@ router.post('/admin/bookings/:id/price-approval/approve', verifyAdminToken, role
           ${tx.json({ approved_price: finalPrice, status: nextBookingStatus })},
           NOW()
         )
-      `.catch(() => {});
+      `.catch(() => { });
 
       return updated;
     });
