@@ -7334,16 +7334,28 @@ app.get("/api/bookings", verifyUserToken, async (req, res) => {
       LEFT JOIN sites s2 ON b.site_id = s2.site_id
       LEFT JOIN LATERAL (
         SELECT (
-          COALESCE((
-            SELECT SUM(e.paid_amount) 
-            FROM emi_schedules e 
-            WHERE e.booking_id = b.booking_id AND e.emi_status = 'Paid'
-          ), 0) +
-          COALESCE((
-            SELECT SUM(pl.gross_amount)
-            FROM payment_ledger pl
-            WHERE pl.booking_id = b.booking_id AND pl.payment_status = 'Approved' AND pl.payment_purpose != 'EMI'
-          ), COALESCE(b.advance_amount, 0))
+          CASE 
+            WHEN b.payment_type::text IN ('Partial', 'PartWise') THEN
+              GREATEST(
+                COALESCE((
+                  SELECT SUM(e.paid_amount) 
+                  FROM emi_schedules e 
+                  WHERE e.booking_id = b.booking_id AND e.emi_status = 'Paid'
+                ), 0),
+                COALESCE(b.advance_amount, 0)
+              )
+            ELSE
+              COALESCE((
+                SELECT SUM(e.paid_amount) 
+                FROM emi_schedules e 
+                WHERE e.booking_id = b.booking_id AND e.emi_status = 'Paid'
+              ), 0) +
+              COALESCE((
+                SELECT SUM(pl.gross_amount)
+                FROM payment_ledger pl
+                WHERE pl.booking_id = b.booking_id AND pl.payment_status = 'Approved' AND pl.payment_purpose != 'EMI'
+              ), COALESCE(b.advance_amount, 0))
+          END
         ) AS total_paid
       ) pay ON TRUE
       WHERE b.user_id = ${req.user.user_id}
@@ -13341,7 +13353,12 @@ app.get("/api/admin/sites/:id/plots",
         LEFT JOIN LATERAL (
           SELECT
             COALESCE(SUM(e.paid_amount) FILTER (WHERE e.emi_status = 'Paid'), 0) AS total_emi_paid,
-            COALESCE(b.advance_amount, 0) + COALESCE(SUM(e.paid_amount) FILTER (WHERE e.emi_status = 'Paid'), 0) AS total_paid,
+            CASE 
+              WHEN b.payment_type::text IN ('Partial', 'PartWise') THEN
+                GREATEST(COALESCE(b.advance_amount, 0), COALESCE(SUM(e.paid_amount) FILTER (WHERE e.emi_status = 'Paid'), 0))
+              ELSE
+                COALESCE(b.advance_amount, 0) + COALESCE(SUM(e.paid_amount) FILTER (WHERE e.emi_status = 'Paid'), 0)
+            END AS total_paid,
             COUNT(*) FILTER (WHERE e.emi_status = 'Pending') AS pending_emi_count,
             COUNT(*) FILTER (WHERE e.emi_status = 'ProofSubmitted') AS proof_submitted_count
           FROM emi_schedules e
