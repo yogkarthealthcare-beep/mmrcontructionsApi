@@ -660,11 +660,7 @@ export async function createTeamMemberRecord(data, photoUrl, applicantSigUrl, as
             }
             userId = existingUser.user_id;
             existingTm = existingMembers.find((m) => Number(m.user_id) === Number(userId));
-            if (existingTm?.is_final_submitted) {
-                const err = new Error("Enrollment is permanently finalized and cannot be modified.");
-                err.statusCode = 403;
-                throw err;
-            }
+            // Finalized check removed to allow updating enrollment form
             if (!existingUser.sponsor_user_id) {
                 await tx `
           UPDATE users
@@ -1084,14 +1080,7 @@ export async function updateTeamMemberRecord(id, data, photoUrl, applicantSigUrl
     if (!existing) {
         throw new Error("Team member not found");
     }
-    if (existing.is_final_submitted && !isAdmin) {
-        const err = new Error("Enrollment is permanently finalized and cannot be modified.");
-        err.statusCode = 403;
-        throw err;
-    }
-    if (existing.status !== "pending" && !isAdmin) {
-        throw new Error("Only pending team member records can be updated");
-    }
+    // Allows associate and admin to update team member enrollment record anytime
     const isFinalSubmit = (data.isFinalSubmit === true || data.isFinalSubmit === 'true' || data.is_final_submitted === true || data.is_final_submitted === 'true');
     if (!applicantSigUrl && data.applicantSignature && data.applicantSignature.startsWith("data:image/")) {
         applicantSigUrl = await saveSignatureDataUrl(data.applicantSignature, existing.associate_id, "applicant");
@@ -1099,12 +1088,20 @@ export async function updateTeamMemberRecord(id, data, photoUrl, applicantSigUrl
     if (!associateSigUrl && data.associateSignature && data.associateSignature.startsWith("data:image/")) {
         associateSigUrl = await saveSignatureDataUrl(data.associateSignature, existing.associate_id, "associate");
     }
+        let normalizedDob = data.dateOfBirth;
+    if (data.dateOfBirth && typeof data.dateOfBirth === 'string') {
+      const ddmmyyyy = data.dateOfBirth.trim().match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+      if (ddmmyyyy) {
+        const [, d, m, y] = ddmmyyyy;
+        normalizedDob = `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+      }
+    }
     const [updated] = await sql `
     UPDATE team_members
     SET
       full_name = COALESCE(${data.fullName || null}, full_name),
       father_husband_name = COALESCE(${data.fatherHusbandName || null}, father_husband_name),
-      date_of_birth = COALESCE(${data.dateOfBirth || null}, date_of_birth),
+      date_of_birth = COALESCE(${normalizedDob || null}, date_of_birth),
       gender = COALESCE(${data.gender || null}, gender),
       aadhar_no = COALESCE(${data.aadharNo || null}, aadhar_no),
       pan_no = COALESCE(${data.panNo || null}, pan_no),
@@ -1127,6 +1124,21 @@ export async function updateTeamMemberRecord(id, data, photoUrl, applicantSigUrl
     WHERE id = ${existing.id}
     RETURNING *
   `;
+    if (existing.user_id) {
+      await sql`
+        UPDATE users
+        SET
+          full_name = COALESCE(${data.fullName || null}, full_name),
+          mobile_no = COALESCE(${data.mobileNo || null}, mobile_no),
+          email = COALESCE(${data.emailId || null}, email),
+          pan_number = COALESCE(${data.panNo || null}, pan_number),
+          aadhar_number = COALESCE(${data.aadharNo || null}, aadhar_number),
+          date_of_birth = COALESCE(${normalizedDob || null}, date_of_birth),
+          gender = COALESCE(${data.gender || null}, gender),
+          updated_at = NOW()
+        WHERE user_id = ${existing.user_id}
+      `.catch(() => {});
+    }
     return {
         ...updated,
         aadhar_no_masked: maskAadhar(updated.aadhar_no),
@@ -1148,11 +1160,7 @@ export async function finalSubmitTeamMemberRecord(id, associateId, isAdmin = fal
         err.statusCode = 403;
         throw err;
     }
-    if (existing.is_final_submitted && !isAdmin) {
-        const err = new Error("Enrollment is permanently finalized and cannot be modified.");
-        err.statusCode = 403;
-        throw err;
-    }
+    // Allows re-submitting and updating final submission
     const [updated] = await sql `
     UPDATE team_members
     SET
