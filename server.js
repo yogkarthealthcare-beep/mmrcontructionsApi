@@ -6355,9 +6355,21 @@ app.get("/api/profile", verifyUserToken, async (req, res) => {
          WHERE user_id = sp.user_id
          ORDER BY created_at DESC LIMIT 1
        ) sp_tm ON TRUE
-      LEFT JOIN user_addresses pa      ON u.user_id = pa.user_id AND pa.address_type = 'Permanent'
-      LEFT JOIN user_bank_details b    ON u.user_id = b.user_id
-      LEFT JOIN user_nominees n        ON u.user_id = n.user_id
+      LEFT JOIN LATERAL (
+        SELECT address_line1, city, state, pin_code FROM user_addresses
+        WHERE user_id = u.user_id AND address_type = 'Permanent'
+        ORDER BY address_id DESC LIMIT 1
+      ) pa ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT bank_name, branch_name, account_holder_name, account_number, ifsc_code FROM user_bank_details
+        WHERE user_id = u.user_id
+        ORDER BY bank_detail_id DESC LIMIT 1
+      ) b ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT nominee_name, relationship FROM user_nominees
+        WHERE user_id = u.user_id
+        ORDER BY nominee_id DESC LIMIT 1
+      ) n ON TRUE
       LEFT JOIN user_kyc_profiles k    ON u.user_id = k.user_id
       LEFT JOIN LATERAL (
         SELECT id, application_no, applicant_name, fh_name, date_of_birth, gender, marital_status,
@@ -10077,7 +10089,11 @@ const getAdminUsersPage = async (query = {}, defaults = {}) => {
              COALESCE(doc.doc_count, 0)::int AS doc_count
       FROM users u
       LEFT JOIN users sp ON u.sponsor_user_id = sp.user_id
-      LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
+      LEFT JOIN LATERAL (
+        SELECT address_line1, city, state, pin_code FROM user_addresses
+        WHERE user_id = u.user_id AND address_type = 'Permanent'
+        ORDER BY address_id DESC LIMIT 1
+      ) pa ON TRUE
       LEFT JOIN (
         SELECT DISTINCT ON (user_id) id, user_id, is_final_submitted, permanent_address, present_address, permanent_city, present_city, permanent_state_pin, present_state_pin
         FROM customer_enrollment_submissions
@@ -14397,9 +14413,23 @@ app.get("/api/admin/team-members",
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
             LEFT JOIN users u ON u.user_id = tm.user_id
-            LEFT JOIN user_addresses pa ON pa.user_id = tm.user_id AND pa.address_type = 'Permanent'
-            LEFT JOIN user_bank_details b ON b.user_id = tm.user_id
-            LEFT JOIN user_nominees n ON n.user_id = tm.user_id
+            LEFT JOIN LATERAL (
+              SELECT address_line1 FROM user_addresses
+              WHERE user_id = tm.user_id AND address_type = 'Permanent'
+              ORDER BY address_id DESC LIMIT 1
+            ) pa ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT bank_name, branch_name, account_number, ifsc_code
+              FROM user_bank_details
+              WHERE user_id = tm.user_id
+              ORDER BY bank_detail_id DESC LIMIT 1
+            ) b ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT nominee_name, relationship
+              FROM user_nominees
+              WHERE user_id = tm.user_id
+              ORDER BY nominee_id DESC LIMIT 1
+            ) n ON TRUE
             LEFT JOIN LATERAL (
               SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                      ae.aadhar_no, ae.pan_no,
@@ -14461,9 +14491,23 @@ app.get("/api/admin/team-members",
               FALSE AS is_verified
             FROM users u
             LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
-            LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
-            LEFT JOIN user_bank_details b ON b.user_id = u.user_id
-            LEFT JOIN user_nominees n ON n.user_id = u.user_id
+            LEFT JOIN LATERAL (
+              SELECT address_line1 FROM user_addresses
+              WHERE user_id = u.user_id AND address_type = 'Permanent'
+              ORDER BY address_id DESC LIMIT 1
+            ) pa ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT bank_name, branch_name, account_number, ifsc_code
+              FROM user_bank_details
+              WHERE user_id = u.user_id
+              ORDER BY bank_detail_id DESC LIMIT 1
+            ) b ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT nominee_name, relationship
+              FROM user_nominees
+              WHERE user_id = u.user_id
+              ORDER BY nominee_id DESC LIMIT 1
+            ) n ON TRUE
             LEFT JOIN LATERAL (
               SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                      ae.aadhar_no, ae.pan_no,
@@ -14591,9 +14635,23 @@ app.get("/api/admin/team-members",
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
             LEFT JOIN users u ON u.user_id = tm.user_id
-            LEFT JOIN user_addresses pa ON pa.user_id = tm.user_id AND pa.address_type = 'Permanent'
-            LEFT JOIN user_bank_details b ON b.user_id = tm.user_id
-            LEFT JOIN user_nominees n ON n.user_id = tm.user_id
+            LEFT JOIN LATERAL (
+              SELECT address_line1 FROM user_addresses
+              WHERE user_id = tm.user_id AND address_type = 'Permanent'
+              ORDER BY address_id DESC LIMIT 1
+            ) pa ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT bank_name, branch_name, account_number, ifsc_code
+              FROM user_bank_details
+              WHERE user_id = tm.user_id
+              ORDER BY bank_detail_id DESC LIMIT 1
+            ) b ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT nominee_name, relationship
+              FROM user_nominees
+              WHERE user_id = tm.user_id
+              ORDER BY nominee_id DESC LIMIT 1
+            ) n ON TRUE
             LEFT JOIN LATERAL (
               SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                      ae.aadhar_no, ae.pan_no,
@@ -14655,9 +14713,23 @@ app.get("/api/admin/team-members",
               FALSE AS is_verified
             FROM users u
             LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
-            LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
-            LEFT JOIN user_bank_details b ON b.user_id = u.user_id
-            LEFT JOIN user_nominees n ON n.user_id = u.user_id
+            LEFT JOIN LATERAL (
+              SELECT address_line1 FROM user_addresses
+              WHERE user_id = u.user_id AND address_type = 'Permanent'
+              ORDER BY address_id DESC LIMIT 1
+            ) pa ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT bank_name, branch_name, account_number, ifsc_code
+              FROM user_bank_details
+              WHERE user_id = u.user_id
+              ORDER BY bank_detail_id DESC LIMIT 1
+            ) b ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT nominee_name, relationship
+              FROM user_nominees
+              WHERE user_id = u.user_id
+              ORDER BY nominee_id DESC LIMIT 1
+            ) n ON TRUE
             LEFT JOIN LATERAL (
               SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                      ae.aadhar_no, ae.pan_no,
@@ -14814,9 +14886,23 @@ app.get("/api/admin/team-members/:id",
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
             LEFT JOIN users u ON u.user_id = tm.user_id
-            LEFT JOIN user_addresses pa ON pa.user_id = tm.user_id AND pa.address_type = 'Permanent'
-            LEFT JOIN user_bank_details b ON b.user_id = tm.user_id
-            LEFT JOIN user_nominees n ON n.user_id = tm.user_id
+            LEFT JOIN LATERAL (
+              SELECT address_line1 FROM user_addresses
+              WHERE user_id = tm.user_id AND address_type = 'Permanent'
+              ORDER BY address_id DESC LIMIT 1
+            ) pa ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT bank_name, branch_name, account_number, ifsc_code
+              FROM user_bank_details
+              WHERE user_id = tm.user_id
+              ORDER BY bank_detail_id DESC LIMIT 1
+            ) b ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT nominee_name, relationship
+              FROM user_nominees
+              WHERE user_id = tm.user_id
+              ORDER BY nominee_id DESC LIMIT 1
+            ) n ON TRUE
             LEFT JOIN LATERAL (
               SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                      ae.aadhar_no, ae.pan_no,
@@ -14876,9 +14962,23 @@ app.get("/api/admin/team-members/:id",
             FROM team_members tm
             LEFT JOIN users assoc ON assoc.user_id = tm.associate_id
             LEFT JOIN users u ON u.user_id = tm.user_id
-            LEFT JOIN user_addresses pa ON pa.user_id = tm.user_id AND pa.address_type = 'Permanent'
-            LEFT JOIN user_bank_details b ON b.user_id = tm.user_id
-            LEFT JOIN user_nominees n ON n.user_id = tm.user_id
+            LEFT JOIN LATERAL (
+              SELECT address_line1 FROM user_addresses
+              WHERE user_id = tm.user_id AND address_type = 'Permanent'
+              ORDER BY address_id DESC LIMIT 1
+            ) pa ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT bank_name, branch_name, account_number, ifsc_code
+              FROM user_bank_details
+              WHERE user_id = tm.user_id
+              ORDER BY bank_detail_id DESC LIMIT 1
+            ) b ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT nominee_name, relationship
+              FROM user_nominees
+              WHERE user_id = tm.user_id
+              ORDER BY nominee_id DESC LIMIT 1
+            ) n ON TRUE
             LEFT JOIN LATERAL (
               SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                      ae.aadhar_no, ae.pan_no,
@@ -14938,9 +15038,23 @@ app.get("/api/admin/team-members/:id",
                      0 AS total_gaj_sold, 0 AS total_commission_earned
               FROM users u
               LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
-              LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
-              LEFT JOIN user_bank_details b ON b.user_id = u.user_id
-              LEFT JOIN user_nominees n ON n.user_id = u.user_id
+              LEFT JOIN LATERAL (
+                SELECT address_line1 FROM user_addresses
+                WHERE user_id = u.user_id AND address_type = 'Permanent'
+                ORDER BY address_id DESC LIMIT 1
+              ) pa ON TRUE
+              LEFT JOIN LATERAL (
+                SELECT bank_name, branch_name, account_number, ifsc_code
+                FROM user_bank_details
+                WHERE user_id = u.user_id
+                ORDER BY bank_detail_id DESC LIMIT 1
+              ) b ON TRUE
+              LEFT JOIN LATERAL (
+                SELECT nominee_name, relationship
+                FROM user_nominees
+                WHERE user_id = u.user_id
+                ORDER BY nominee_id DESC LIMIT 1
+              ) n ON TRUE
               LEFT JOIN LATERAL (
                 SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                        ae.aadhar_no, ae.pan_no,
@@ -14996,9 +15110,23 @@ app.get("/api/admin/team-members/:id",
                      0 AS total_gaj_sold, 0 AS total_commission_earned
               FROM users u
               LEFT JOIN users assoc ON assoc.user_id = u.sponsor_user_id
-              LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
-              LEFT JOIN user_bank_details b ON b.user_id = u.user_id
-              LEFT JOIN user_nominees n ON n.user_id = u.user_id
+              LEFT JOIN LATERAL (
+                SELECT address_line1 FROM user_addresses
+                WHERE user_id = u.user_id AND address_type = 'Permanent'
+                ORDER BY address_id DESC LIMIT 1
+              ) pa ON TRUE
+              LEFT JOIN LATERAL (
+                SELECT bank_name, branch_name, account_number, ifsc_code
+                FROM user_bank_details
+                WHERE user_id = u.user_id
+                ORDER BY bank_detail_id DESC LIMIT 1
+              ) b ON TRUE
+              LEFT JOIN LATERAL (
+                SELECT nominee_name, relationship
+                FROM user_nominees
+                WHERE user_id = u.user_id
+                ORDER BY nominee_id DESC LIMIT 1
+              ) n ON TRUE
               LEFT JOIN LATERAL (
                 SELECT ae.id, ae.full_name, ae.father_name AS father_husband_name, ae.dob, ae.gender,
                        ae.aadhar_no, ae.pan_no,

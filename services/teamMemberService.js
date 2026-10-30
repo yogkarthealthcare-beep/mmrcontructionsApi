@@ -76,6 +76,34 @@ export async function ensureTeamMembersTable() {
         await sql `CREATE INDEX IF NOT EXISTS idx_team_members_status ON team_members (status)`.catch(() => { });
         await sql `CREATE INDEX IF NOT EXISTS idx_team_members_associate_created ON team_members (associate_id, created_at DESC)`.catch(() => { });
         await sql `CREATE UNIQUE INDEX IF NOT EXISTS uq_team_members_assoc_slot ON team_members (associate_id, slot_number)`.catch(() => { });
+        // Deduplicate user_addresses, user_bank_details, user_nominees to prevent duplicate rows in queries
+        await sql`
+          DELETE FROM user_addresses a
+          WHERE address_id < (
+            SELECT MAX(address_id)
+            FROM user_addresses b
+            WHERE b.user_id = a.user_id AND b.address_type = a.address_type
+          )
+        `.catch(e => console.warn("[TM Address Dedup Warning]:", e.message));
+
+        await sql`
+          DELETE FROM user_bank_details a
+          WHERE bank_detail_id < (
+            SELECT MAX(bank_detail_id)
+            FROM user_bank_details b
+            WHERE b.user_id = a.user_id
+          )
+        `.catch(e => console.warn("[TM Bank Dedup Warning]:", e.message));
+
+        await sql`
+          DELETE FROM user_nominees a
+          WHERE nominee_id < (
+            SELECT MAX(nominee_id)
+            FROM user_nominees b
+            WHERE b.user_id = a.user_id
+          )
+        `.catch(e => console.warn("[TM Nominee Dedup Warning]:", e.message));
+
         await sql `
       UPDATE team_members tm
       SET 
@@ -95,9 +123,23 @@ export async function ensureTeamMembersTable() {
         ifsc_code = COALESCE(NULLIF(TRIM(tm.ifsc_code), ''), NULLIF(TRIM(b.ifsc_code), ''), NULLIF(TRIM(aen.ifsc_code), '')),
         photo_url = COALESCE(NULLIF(TRIM(tm.photo_url), ''), u.profile_image)
       FROM users u
-      LEFT JOIN user_addresses pa ON pa.user_id = u.user_id AND pa.address_type = 'Permanent'
-      LEFT JOIN user_bank_details b ON b.user_id = u.user_id
-      LEFT JOIN user_nominees n ON n.user_id = u.user_id
+      LEFT JOIN LATERAL (
+        SELECT address_line1 FROM user_addresses
+        WHERE user_id = u.user_id AND address_type = 'Permanent'
+        ORDER BY address_id DESC LIMIT 1
+      ) pa ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT bank_name, branch_name, account_number, ifsc_code
+        FROM user_bank_details
+        WHERE user_id = u.user_id
+        ORDER BY bank_detail_id DESC LIMIT 1
+      ) b ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT nominee_name, relationship
+        FROM user_nominees
+        WHERE user_id = u.user_id
+        ORDER BY nominee_id DESC LIMIT 1
+      ) n ON TRUE
       LEFT JOIN LATERAL (
         SELECT ae.father_name AS father_husband_name, ae.dob, ae.gender, ae.aadhar_no, ae.pan_no,
                NULLIF(TRIM(aa.local_address), '') AS perm_address,

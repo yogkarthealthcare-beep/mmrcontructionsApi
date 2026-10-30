@@ -480,7 +480,11 @@ async function executePlotOrdersQuery(req, res, scopeFilter = sql`TRUE`, extraMe
       LEFT JOIN plots p ON p.plot_id = b.plot_id
       LEFT JOIN sites s ON s.site_id = p.site_id
       LEFT JOIN users buyer ON buyer.user_id = b.user_id
-      LEFT JOIN user_addresses b_addr ON b_addr.user_id = b.user_id AND b_addr.address_type = 'Permanent'
+      LEFT JOIN LATERAL (
+        SELECT address_line1, city, state, pin_code, country FROM user_addresses
+        WHERE user_id = b.user_id AND address_type = 'Permanent'
+        ORDER BY address_id DESC LIMIT 1
+      ) b_addr ON TRUE
       LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
       LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
       LEFT JOIN users booker ON booker.user_id = b.booked_by_user_id
@@ -606,7 +610,11 @@ async function executePlotOrderDetailQuery(req, res, bookingId, scopeFilter = sq
       LEFT JOIN plots p ON p.plot_id = b.plot_id
       LEFT JOIN sites s ON s.site_id = p.site_id
       LEFT JOIN users buyer ON buyer.user_id = b.user_id
-      LEFT JOIN user_addresses b_addr ON b_addr.user_id = b.user_id AND b_addr.address_type = 'Permanent'
+      LEFT JOIN LATERAL (
+        SELECT address_line1, city, state, pin_code, country FROM user_addresses
+        WHERE user_id = b.user_id AND address_type = 'Permanent'
+        ORDER BY address_id DESC LIMIT 1
+      ) b_addr ON TRUE
       LEFT JOIN user_kyc_profiles k ON k.user_id = b.user_id
       LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
       LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
