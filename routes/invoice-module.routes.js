@@ -10,16 +10,11 @@ import bwipjs from "bwip-js";
 const router = express.Router();
 
 router.get("/public/debug-tm", async (req, res) => {
-  try {
-    const tmRows = await sql`SELECT * FROM team_members WHERE full_name ILIKE '%Amravati%' OR team_member_uid ILIKE '%0006%'`;
-    const userRows = await sql`SELECT user_id, member_id, full_name, mobile_no, user_type, account_status FROM users WHERE full_name ILIKE '%Amravati%' OR member_id ILIKE '%0006%'`;
-    const addrs = await sql`SELECT * FROM user_addresses WHERE user_id IN (SELECT user_id FROM users WHERE full_name ILIKE '%Amravati%')`;
-    const banks = await sql`SELECT * FROM user_bank_details WHERE user_id IN (SELECT user_id FROM users WHERE full_name ILIKE '%Amravati%')`;
-    const noms = await sql`SELECT * FROM user_nominees WHERE user_id IN (SELECT user_id FROM users WHERE full_name ILIKE '%Amravati%')`;
-    return res.json({ tmRows, userRows, addrs, banks, noms });
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
-  }
+  const result = {};
+  try { result.tmRows = await sql`SELECT * FROM team_members`; } catch (e) { result.tmErr = e.message; }
+  try { result.userRows = await sql`SELECT user_id, member_id, full_name, mobile_no, user_type FROM users WHERE full_name ILIKE '%Amravati%'`; } catch (e) { result.userErr = e.message; }
+  try { result.addresses = await sql`SELECT * FROM user_addresses`; } catch (e) { result.addrErr = e.message; }
+  return res.json(result);
 });
 
 const INVOICE_SIGN_SECRET = process.env.JWT_SECRET || process.env.INVOICE_SECRET || "mmr_secure_invoice_sign_key_2026_q89a";
