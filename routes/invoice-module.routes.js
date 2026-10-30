@@ -327,13 +327,22 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
       SELECT * FROM invoices
       WHERE LOWER(invoice_number) = LOWER(${invoiceNumber})
          OR LOWER(order_id) = LOWER(${invoiceNumber})
+         OR LOWER(order_id) = LOWER(${cleanNum})
+         OR LOWER(invoice_number) = LOWER(${'MMR-INV-' + cleanNum})
+         OR (invoice_data->>'booking_serial') ILIKE ${invoiceNumber}
+         OR (invoice_data->>'order_id') ILIKE ${invoiceNumber}
          OR (CASE WHEN ${cleanId !== null && !isEmiQuery} THEN invoice_id = ${cleanId} OR booking_id = ${cleanId} ELSE false END)
          OR (invoice_data->>'booking_id')::text = ${cleanNum}
          OR (invoice_data->>'booking_id')::text = ${String(cleanId)}
          OR (invoice_data->>'emi_id')::text = ${cleanNum}
          OR (invoice_data->>'invoice_number') ILIKE ${'%' + invoiceNumber + '%'}
          OR invoice_number ILIKE ${'%' + invoiceNumber + '%'}
-      ORDER BY invoice_id ASC
+         OR booking_id IN (
+           SELECT booking_id FROM bookings
+           WHERE LOWER(booking_serial) = LOWER(${invoiceNumber})
+              OR LOWER(order_id) = LOWER(${invoiceNumber})
+         )
+      ORDER BY (CASE WHEN LOWER(order_id) = LOWER(${invoiceNumber}) OR LOWER(invoice_number) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), invoice_id ASC
       LIMIT 1
     `;
 
@@ -514,7 +523,7 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
       }
     }
 
-    if (!invoice && cleanId !== null) {
+    if (!invoice) {
       const [booking] = await sql`
         SELECT b.*, COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
                COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
@@ -531,7 +540,11 @@ router.get("/invoice/:invoiceNumber", optionalAuth, async (req, res) => {
         LEFT JOIN sites s2 ON b.site_id = s2.site_id
         JOIN users u ON b.user_id = u.user_id
         LEFT JOIN users assoc ON COALESCE(b.associate_user_id, b.sold_by_user_id) = assoc.user_id
-        WHERE b.booking_id = ${cleanId}
+        WHERE LOWER(b.booking_serial) = LOWER(${invoiceNumber})
+           OR LOWER(b.order_id) = LOWER(${invoiceNumber})
+           OR LOWER(b.booking_serial) = LOWER(${cleanNum})
+           OR (CASE WHEN ${cleanId !== null && !isEmiQuery} THEN b.booking_id = ${cleanId} ELSE false END)
+        ORDER BY (CASE WHEN LOWER(b.booking_serial) = LOWER(${invoiceNumber}) OR LOWER(b.order_id) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), b.booking_id DESC
         LIMIT 1
       `;
 
@@ -1024,13 +1037,22 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
       SELECT * FROM invoices
       WHERE LOWER(invoice_number) = LOWER(${invoiceNumber})
          OR LOWER(order_id) = LOWER(${invoiceNumber})
+         OR LOWER(order_id) = LOWER(${cleanNum})
+         OR LOWER(invoice_number) = LOWER(${'MMR-INV-' + cleanNum})
+         OR (invoice_data->>'booking_serial') ILIKE ${invoiceNumber}
+         OR (invoice_data->>'order_id') ILIKE ${invoiceNumber}
          OR (CASE WHEN ${cleanId !== null && !isEmiQuery} THEN invoice_id = ${cleanId} OR booking_id = ${cleanId} ELSE false END)
          OR (invoice_data->>'booking_id')::text = ${cleanNum}
          OR (invoice_data->>'booking_id')::text = ${String(cleanId)}
          OR (invoice_data->>'emi_id')::text = ${cleanNum}
          OR (invoice_data->>'invoice_number') ILIKE ${'%' + invoiceNumber + '%'}
          OR invoice_number ILIKE ${'%' + invoiceNumber + '%'}
-      ORDER BY invoice_id ASC
+         OR booking_id IN (
+           SELECT booking_id FROM bookings
+           WHERE LOWER(booking_serial) = LOWER(${invoiceNumber})
+              OR LOWER(order_id) = LOWER(${invoiceNumber})
+         )
+      ORDER BY (CASE WHEN LOWER(order_id) = LOWER(${invoiceNumber}) OR LOWER(invoice_number) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), invoice_id ASC
       LIMIT 1
     `;
 
@@ -1122,7 +1144,7 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
       }
     }
 
-    if (!invoice && cleanId !== null) {
+    if (!invoice) {
       const [booking] = await sql`
         SELECT b.*, COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
                COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
@@ -1135,7 +1157,11 @@ router.get("/invoice/:invoiceNumber/pdf", optionalAuth, async (req, res) => {
         LEFT JOIN sites s ON p.site_id = s.site_id
         LEFT JOIN sites s2 ON b.site_id = s2.site_id
         JOIN users u ON b.user_id = u.user_id
-        WHERE b.booking_id = ${cleanId}
+        WHERE LOWER(b.booking_serial) = LOWER(${invoiceNumber})
+           OR LOWER(b.order_id) = LOWER(${invoiceNumber})
+           OR LOWER(b.booking_serial) = LOWER(${cleanNum})
+           OR (CASE WHEN ${cleanId !== null && !isEmiQuery} THEN b.booking_id = ${cleanId} ELSE false END)
+        ORDER BY (CASE WHEN LOWER(b.booking_serial) = LOWER(${invoiceNumber}) OR LOWER(b.order_id) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), b.booking_id DESC
         LIMIT 1
       `;
 
@@ -1273,16 +1299,24 @@ router.get("/public/invoice/download/:invoiceNumber", async (req, res) => {
       SELECT * FROM invoices
       WHERE LOWER(invoice_number) = LOWER(${invoiceNumber})
          OR LOWER(order_id) = LOWER(${invoiceNumber})
+         OR LOWER(order_id) = LOWER(${cleanNum})
+         OR (invoice_data->>'booking_serial') ILIKE ${invoiceNumber}
+         OR (invoice_data->>'order_id') ILIKE ${invoiceNumber}
          OR (CASE WHEN ${cleanId !== null} THEN invoice_id = ${cleanId} OR booking_id = ${cleanId} ELSE false END)
          OR (invoice_data->>'booking_id')::text = ${cleanNum}
          OR (invoice_data->>'booking_id')::text = ${String(cleanId)}
          OR (invoice_data->>'invoice_number') ILIKE ${'%' + invoiceNumber + '%'}
          OR invoice_number ILIKE ${'%' + invoiceNumber + '%'}
-      ORDER BY invoice_id ASC
+         OR booking_id IN (
+           SELECT booking_id FROM bookings
+           WHERE LOWER(booking_serial) = LOWER(${invoiceNumber})
+              OR LOWER(order_id) = LOWER(${invoiceNumber})
+         )
+      ORDER BY (CASE WHEN LOWER(order_id) = LOWER(${invoiceNumber}) OR LOWER(invoice_number) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), invoice_id ASC
       LIMIT 1
     `;
 
-    if (!invoice && cleanId !== null) {
+    if (!invoice) {
       const [booking] = await sql`
         SELECT b.*, COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
                COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
@@ -1294,7 +1328,11 @@ router.get("/public/invoice/download/:invoiceNumber", async (req, res) => {
         LEFT JOIN sites s ON p.site_id = s.site_id
         LEFT JOIN sites s2 ON b.site_id = s2.site_id
         JOIN users u ON b.user_id = u.user_id
-        WHERE b.booking_id = ${cleanId}
+        WHERE LOWER(b.booking_serial) = LOWER(${invoiceNumber})
+           OR LOWER(b.order_id) = LOWER(${invoiceNumber})
+           OR LOWER(b.booking_serial) = LOWER(${cleanNum})
+           OR (CASE WHEN ${cleanId !== null} THEN b.booking_id = ${cleanId} ELSE false END)
+        ORDER BY (CASE WHEN LOWER(b.booking_serial) = LOWER(${invoiceNumber}) OR LOWER(b.order_id) = LOWER(${invoiceNumber}) THEN 0 ELSE 1 END), b.booking_id DESC
         LIMIT 1
       `;
       if (booking) {
@@ -1400,7 +1438,13 @@ router.get("/verify-invoice/:invoiceNumber", async (req, res) => {
       FROM invoices
       WHERE LOWER(invoice_number) = LOWER(${invoiceNumber})
          OR LOWER(order_id) = LOWER(${invoiceNumber})
-         OR booking_id::text = ${invoiceNumber}`;
+         OR (invoice_data->>'booking_serial') ILIKE ${invoiceNumber}
+         OR booking_id::text = ${invoiceNumber}
+         OR booking_id IN (
+           SELECT booking_id FROM bookings
+           WHERE LOWER(booking_serial) = LOWER(${invoiceNumber})
+              OR LOWER(order_id) = LOWER(${invoiceNumber})
+         )`;
 
     if (!invoice) {
       return ok(res, { valid: false }, "Invoice Not Found.");
