@@ -11,13 +11,12 @@ const router = express.Router();
 
 router.get("/public/debug-tm", async (req, res) => {
   try {
-    const tmRows = await sql`SELECT id, team_member_uid, user_id, associate_id, slot_number, full_name, mobile_no, status FROM team_members WHERE full_name ILIKE '%Amravati%' OR team_member_uid ILIKE '%0006%'`;
+    const tmRows = await sql`SELECT * FROM team_members WHERE full_name ILIKE '%Amravati%' OR team_member_uid ILIKE '%0006%'`;
     const userRows = await sql`SELECT user_id, member_id, full_name, mobile_no, user_type, account_status FROM users WHERE full_name ILIKE '%Amravati%' OR member_id ILIKE '%0006%'`;
-    const addrs = await sql`SELECT id, user_id, address_type, address_line1 FROM user_addresses WHERE user_id IN (SELECT user_id FROM users WHERE full_name ILIKE '%Amravati%')`;
-    const banks = await sql`SELECT id, user_id, bank_name, account_number FROM user_bank_details WHERE user_id IN (SELECT user_id FROM users WHERE full_name ILIKE '%Amravati%')`;
-    const noms = await sql`SELECT id, user_id, nominee_name FROM user_nominees WHERE user_id IN (SELECT user_id FROM users WHERE full_name ILIKE '%Amravati%')`;
-    const assocEnr = await sql`SELECT id, user_id, full_name, contact_no_1 FROM associate_enrollment WHERE full_name ILIKE '%Amravati%'`;
-    return res.json({ tmRows, userRows, addrs, banks, noms, assocEnr });
+    const addrs = await sql`SELECT * FROM user_addresses WHERE user_id IN (SELECT user_id FROM users WHERE full_name ILIKE '%Amravati%')`;
+    const banks = await sql`SELECT * FROM user_bank_details WHERE user_id IN (SELECT user_id FROM users WHERE full_name ILIKE '%Amravati%')`;
+    const noms = await sql`SELECT * FROM user_nominees WHERE user_id IN (SELECT user_id FROM users WHERE full_name ILIKE '%Amravati%')`;
+    return res.json({ tmRows, userRows, addrs, banks, noms });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
