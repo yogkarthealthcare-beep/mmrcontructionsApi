@@ -230,12 +230,11 @@ router.get('/team-members/:id/customers-sales', verifyUserToken, async (req, res
 });
 
 /**
- * 3. GET /api/associates/:id/team-sales
- * Team-wide sales overview: team totals, direct sales, and member-wise breakdown
+ * 3. GET /api/associates/:id/team-sales & GET /api/associate/team-sales
+ * Team-wide sales overview: team totals, direct sales, member-wise breakdown, and detailed bookings list
  */
 const handleAssociateTeamSales = async (req, res, forceCsv = false) => {
   try {
-    const targetAssocId = Number(req.params.id);
     const [caller] = await sql`SELECT user_id, user_type, account_status FROM users WHERE user_id = ${req.user.user_id}`;
     if (!caller || !['Active', 'Approved'].includes(caller.account_status)) {
       return err(res, 'Access denied: Active account required.', 403);
@@ -243,6 +242,17 @@ const handleAssociateTeamSales = async (req, res, forceCsv = false) => {
     const callerId = caller.user_id;
     const effectivePanel = resolveEffectivePanel(req.user);
     const callerType = effectivePanel === 'team-member' ? 'Team Member' : caller.user_type;
+
+    let targetAssocId = req.params.id ? Number(req.params.id) : null;
+    if (!targetAssocId) {
+      if (callerType === 'Associate') {
+        targetAssocId = callerId;
+      } else if (callerType === 'Admin' || caller.user_type === 'Admin' || ['SuperAdmin', 'FinanceManager', 'SiteManager'].includes(caller.user_type)) {
+        targetAssocId = req.query.associate_id ? Number(req.query.associate_id) : callerId;
+      } else {
+        targetAssocId = callerId;
+      }
+    }
 
     // Security Guard: Associate can only view their own team; Admin can view all
     if (callerType === 'Associate' && callerId !== targetAssocId) {
@@ -255,13 +265,13 @@ const handleAssociateTeamSales = async (req, res, forceCsv = false) => {
     const [assocUser] = await sql`SELECT user_id, full_name, member_id FROM users WHERE user_id = ${targetAssocId}`;
     if (!assocUser) return err(res, 'Associate not found.', 404);
 
-    // 1. Team Total Overview
+    // 1. Team Total Overview (includes all team sales & team member self-purchases)
     const [teamTotals] = await sql`
       SELECT
-        COUNT(*) FILTER (WHERE is_confirmed_sale = TRUE AND is_self_purchase = FALSE)::INT AS total_plots_sold,
-        COALESCE(SUM(sale_value) FILTER (WHERE is_confirmed_sale = TRUE AND is_self_purchase = FALSE), 0)::NUMERIC AS total_sales_value,
-        COUNT(*) FILTER (WHERE is_confirmed_sale = TRUE AND sold_by_user_id = ${targetAssocId} AND is_self_purchase = FALSE)::INT AS direct_plots_sold,
-        COALESCE(SUM(sale_value) FILTER (WHERE is_confirmed_sale = TRUE AND sold_by_user_id = ${targetAssocId} AND is_self_purchase = FALSE), 0)::NUMERIC AS direct_sales_value,
+        COUNT(*) FILTER (WHERE is_confirmed_sale = TRUE)::INT AS total_plots_sold,
+        COALESCE(SUM(sale_value) FILTER (WHERE is_confirmed_sale = TRUE), 0)::NUMERIC AS total_sales_value,
+        COUNT(*) FILTER (WHERE is_confirmed_sale = TRUE AND sold_by_user_id = ${targetAssocId})::INT AS direct_plots_sold,
+        COALESCE(SUM(sale_value) FILTER (WHERE is_confirmed_sale = TRUE AND sold_by_user_id = ${targetAssocId}), 0)::NUMERIC AS direct_sales_value,
         COUNT(*) FILTER (WHERE is_confirmed_sale = TRUE AND booked_by_user_id = ${targetAssocId})::INT AS booked_by_me_count,
         COUNT(*) FILTER (WHERE associate_approval_status = 'Pending')::INT AS pending_approval_count
       FROM vw_sales_attribution
@@ -282,14 +292,70 @@ const handleAssociateTeamSales = async (req, res, forceCsv = false) => {
       JOIN users u ON u.user_id = tm.user_id
       LEFT JOIN LATERAL (
         SELECT 
-          COUNT(*) FILTER (WHERE is_confirmed_sale = TRUE AND is_self_purchase = FALSE) AS plots_sold,
-          SUM(sale_value) FILTER (WHERE is_confirmed_sale = TRUE AND is_self_purchase = FALSE) AS total_value,
-          COUNT(*) FILTER (WHERE booking_status IN ('Submitted', 'PaymentPending', 'Allocated') AND is_self_purchase = FALSE) AS pending_count
+          COUNT(*) FILTER (WHERE is_confirmed_sale = TRUE) AS plots_sold,
+          SUM(sale_value) FILTER (WHERE is_confirmed_sale = TRUE) AS total_value,
+          COUNT(*) FILTER (WHERE booking_status IN ('Submitted', 'PaymentPending', 'Allocated')) AS pending_count
         FROM vw_sales_attribution
-        WHERE sold_by_user_id = u.user_id
+        WHERE sold_by_user_id = u.user_id OR buyer_user_id = u.user_id
       ) sales ON TRUE
       WHERE tm.associate_id = ${targetAssocId} AND tm.status IN ('approved', 'active')
       ORDER BY tm.slot_number ASC, plots_sold DESC
+    `;
+
+    // 3. Detailed individual bookings list for Team Sales table
+    const search = req.query.search ? String(req.query.search).trim() : '';
+    const searchFilter = search ? sql`
+      AND (
+        b.booking_serial ILIKE ${'%' + search + '%'}
+        OR buyer.full_name ILIKE ${'%' + search + '%'}
+        OR buyer.mobile_no ILIKE ${'%' + search + '%'}
+        OR p.plot_number ILIKE ${'%' + search + '%'}
+        OR s.site_name ILIKE ${'%' + search + '%'}
+        OR seller.full_name ILIKE ${'%' + search + '%'}
+        OR tm_user.full_name ILIKE ${'%' + search + '%'}
+      )
+    ` : sql``;
+
+    const detailedSales = await sql`
+      SELECT 
+        b.booking_id,
+        b.booking_serial,
+        b.booking_date,
+        b.booking_status,
+        b.workflow_status,
+        b.booking_type,
+        CASE WHEN b.booking_type = 'SELF_PURCHASE' THEN 'SELF_PURCHASE' ELSE 'CUSTOMER_SALE' END AS sale_type,
+        COALESCE(b.associate_approval_status, 'Approved') AS associate_approval_status,
+        COALESCE(b.advance_amount, 0)::NUMERIC AS advance_amount,
+        COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0)::NUMERIC AS total_price,
+        COALESCE(b.booking_date, b.created_at) AS created_at,
+        p.plot_number,
+        COALESCE(p.plot_area, 0)::NUMERIC AS plot_size_gaj,
+        COALESCE(s.site_name, 'Main Site') AS site_name,
+        buyer.user_id AS customer_id,
+        buyer.full_name AS customer_name,
+        buyer.mobile_no AS customer_mobile,
+        buyer.member_id AS customer_member_id,
+        COALESCE(seller.user_id, tm_user.user_id, buyer.user_id) AS team_member_id,
+        COALESCE(seller.full_name, tm_user.full_name, buyer.full_name) AS team_member_name,
+        COALESCE(seller.member_id, tm_user.member_id, buyer.member_id) AS team_member_uid,
+        COALESCE(seller.full_name, tm_user.full_name, buyer.full_name) AS sold_by_name,
+        COALESCE(seller.member_id, tm_user.member_id, buyer.member_id) AS sold_by_member_id
+      FROM bookings b
+      LEFT JOIN plots p ON p.plot_id = b.plot_id
+      LEFT JOIN sites s ON s.site_id = COALESCE(p.site_id, b.site_id)
+      LEFT JOIN users buyer ON buyer.user_id = b.user_id
+      LEFT JOIN users seller ON seller.user_id = b.sold_by_user_id
+      LEFT JOIN team_members tm ON (tm.associate_id = ${targetAssocId} AND (tm.user_id = b.sold_by_user_id OR tm.user_id = b.user_id))
+      LEFT JOIN users tm_user ON tm_user.user_id = tm.user_id
+      WHERE (
+        b.associate_user_id = ${targetAssocId}
+        OR b.sold_by_user_id IN (SELECT user_id FROM team_members WHERE associate_id = ${targetAssocId})
+        OR b.user_id IN (SELECT user_id FROM team_members WHERE associate_id = ${targetAssocId})
+      )
+      AND b.booking_status NOT IN ('Draft')
+      ${searchFilter}
+      ORDER BY b.booking_id DESC
     `;
 
     const isCsv = forceCsv || req.query?.format === 'csv' || req.path?.endsWith('/export') || req.headers.accept?.includes('text/csv');
@@ -308,11 +374,40 @@ const handleAssociateTeamSales = async (req, res, forceCsv = false) => {
           m.pending_count
         ].join(',') + '\n';
       }
+      if (detailedSales && detailedSales.length > 0) {
+        csv += '\n--- Detailed Bookings ---\n';
+        csv += 'Booking Serial,Team Member,Customer,Plot Number,Site,Area (Gaj),Advance Paid (INR),Approval Status,Date\n';
+        for (const s of detailedSales) {
+          csv += [
+            escapeCsvCell(s.booking_serial),
+            escapeCsvCell(s.team_member_name),
+            escapeCsvCell(s.customer_name),
+            escapeCsvCell(s.plot_number),
+            escapeCsvCell(s.site_name),
+            s.plot_size_gaj,
+            s.advance_amount,
+            escapeCsvCell(s.associate_approval_status),
+            escapeCsvCell(s.created_at)
+          ].join(',') + '\n';
+        }
+      }
       return res.status(200).send(csv);
     }
 
     return ok(res, {
+      sales: detailedSales,
+      team_totals: {
+        total_plots_sold: Number(teamTotals?.total_plots_sold || 0),
+        total_sales_value: Number(teamTotals?.total_sales_value || 0),
+        direct_plots_sold: Number(teamTotals?.direct_plots_sold || 0),
+        direct_sales_value: Number(teamTotals?.direct_sales_value || 0),
+        booked_by_me_count: Number(teamTotals?.booked_by_me_count || 0),
+        pending_approval_count: Number(teamTotals?.pending_approval_count || 0)
+      },
+      team_members: membersBreakdown
+    }, 'Team sales retrieved successfully.', {
       associate: assocUser,
+      sales: detailedSales,
       team_totals: {
         total_plots_sold: Number(teamTotals?.total_plots_sold || 0),
         total_sales_value: Number(teamTotals?.total_sales_value || 0),
@@ -328,13 +423,13 @@ const handleAssociateTeamSales = async (req, res, forceCsv = false) => {
   }
 };
 
-router.get('/associates/:id/team-sales', verifyUserToken, (req, res) => handleAssociateTeamSales(req, res, false));
+router.get(['/associates/:id/team-sales', '/associate/team-sales', '/associates/team-sales'], verifyUserToken, (req, res) => handleAssociateTeamSales(req, res, false));
 
 /**
- * 4. GET /api/associates/:id/team-sales/export
+ * 4. GET /api/associates/:id/team-sales/export & GET /api/associate/team-sales/export
  * CSV export of associate team sales
  */
-router.get('/associates/:id/team-sales/export', verifyUserToken, (req, res) => handleAssociateTeamSales(req, res, true));
+router.get(['/associates/:id/team-sales/export', '/associate/team-sales/export', '/associates/team-sales/export'], verifyUserToken, (req, res) => handleAssociateTeamSales(req, res, true));
 
 /**
  * Unified Admin Leaderboards Handler
