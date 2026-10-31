@@ -1257,6 +1257,30 @@ router.post("/admin/bookings/payments/:paymentId/verify", adminAuth, async (req,
         await db`UPDATE payment_ledger SET receipt_id = ${receiptId} WHERE payment_id = ${paymentId}`;
       }
 
+      // Sync emi_schedules if this payment belongs to an EMI installment
+      if (payment.payment_purpose === 'EmiPayment' || payment.payment_purpose === 'EMI') {
+        try {
+          await db`
+            UPDATE emi_schedules SET
+              emi_status = 'Paid',
+              paid_amount = ${payment.gross_amount},
+              paid_date = CURRENT_DATE,
+              voucher_file_path = COALESCE(voucher_file_path, ${payment.proof_document_url}),
+              confirmed_by_admin_id = ${req.admin.admin_id},
+              confirmed_at = NOW(),
+              updated_at = NOW()
+            WHERE emi_id = (
+              SELECT emi_id FROM emi_schedules
+              WHERE booking_id = ${booking.booking_id}
+                AND emi_status IN ('ProofSubmitted', 'Pending', 'Overdue')
+              ORDER BY installment_no ASC
+              LIMIT 1
+            )`;
+        } catch (eErr) {
+          console.warn('[VerifyPayment] emi_schedules sync warning:', eErr.message);
+        }
+      }
+
       const [sumRow] = await db`
         SELECT COALESCE(SUM(gross_amount), 0) AS total_approved
         FROM payment_ledger

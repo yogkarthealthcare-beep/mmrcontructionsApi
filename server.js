@@ -12103,6 +12103,17 @@ app.get("/api/admin/bookings/:id",
         WHERE b.booking_id = ${ req.params.id } `;
       if (!booking) return err(res, "Booking not found", 404);
 
+      let payments = [];
+      try {
+        payments = await sql`
+          SELECT payment_id, payment_serial, booking_id, plot_id, site_id, payment_mode,
+                 payment_purpose, gross_amount, payment_date, payment_status, verification_status,
+                 utr_number, proof_document_url, qr_code_key, payer_name, admin_notes, created_at
+          FROM payment_ledger
+          WHERE booking_id = ${ req.params.id }
+          ORDER BY created_at DESC`;
+      } catch (_) { }
+
       let payment_proofs = [];
       try {
         payment_proofs = await sql`SELECT * FROM booking_payment_proofs WHERE booking_id = ${ req.params.id } `;
@@ -12110,7 +12121,7 @@ app.get("/api/admin/bookings/:id",
 
       let emi_schedule = [];
       try {
-        emi_schedule = await sql`SELECT emi_id, installment_no, due_date, emi_amount, late_fee_amount, total_due, paid_amount, paid_date, emi_status FROM emi_schedules WHERE booking_id = ${ req.params.id } ORDER BY installment_no`;
+        emi_schedule = await sql`SELECT emi_id, installment_no, due_date, emi_amount, late_fee_amount, total_due, paid_amount, paid_date, emi_status, voucher_file_path FROM emi_schedules WHERE booking_id = ${ req.params.id } ORDER BY installment_no`;
       } catch (_) { }
 
       let history = [];
@@ -12173,6 +12184,7 @@ return ok(res, {
   associate_user,
   payment_proofs,
   emi_schedule,
+  emis: emi_schedule,
   history,
   appointment,
   payments,
@@ -12465,6 +12477,21 @@ app.post("/api/admin/emi/:id/confirm",
           voucher_file_path = ${'vouchers/' + vSerial + '.pdf'},
           confirmed_by_admin_id = ${req.admin.admin_id}, confirmed_at = NOW(), updated_at = NOW()
         WHERE emi_id = ${emiId}`;
+
+      try {
+        await sql`
+          UPDATE payment_ledger SET
+            payment_status = 'Approved',
+            verification_status = 'Verified',
+            verified_by_admin_id = ${req.admin.admin_id},
+            approved_by_admin_id = ${req.admin.admin_id},
+            updated_at = NOW()
+          WHERE booking_id = ${emi.booking_id}
+            AND payment_purpose = 'EmiPayment'
+            AND (payment_status = 'Submitted' OR verification_status = 'Pending')`;
+      } catch (plErr) {
+        console.warn('payment_ledger sync warning:', plErr.message);
+      }
 
       await sql`
         INSERT INTO payment_vouchers (voucher_serial, voucher_type, reference_id, user_id, amount, generated_by_admin_id)
