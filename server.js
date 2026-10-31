@@ -8717,7 +8717,7 @@ app.get("/api/associate/network", verifyUserToken, requireAssociate, async (req,
           COALESCE(SUM(c.net_amount), 0)::numeric AS total_commission_earned,
           COALESCE(SUM(CASE WHEN c.commission_status = 'Pending' THEN c.net_amount ELSE 0 END), 0)::numeric AS pending_commission
         FROM (
-          SELECT COALESCE(associate_user_id, user_id) AS user_id, net_amount, commission_status
+          SELECT associate_user_id AS user_id, net_amount, commission_status
           FROM commission_transactions
         ) c
         GROUP BY c.user_id
@@ -9644,7 +9644,7 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
         LEFT JOIN users u_by_mob ON (
           tm.mobile_no IS NOT NULL AND (
             u_by_mob.mobile_no = tm.mobile_no 
-            OR RIGHT(regexp_replace(u_by_mob.mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(tm.mobile_no, '\\D', '', 'g'), 10)
+            OR RIGHT(regexp_replace(COALESCE(u_by_mob.mobile_no, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(tm.mobile_no, ''), '[^0-9]', '', 'g'), 10)
           )
         )
         WHERE tm.associate_id = ${associateId}
@@ -9801,7 +9801,7 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
             OR (m.tm_record_id IS NOT NULL AND b.user_id = m.tm_record_id)
             OR (m.tm_mobile_no IS NOT NULL AND b.user_id IN (
               SELECT u_inner.user_id FROM users u_inner 
-              WHERE RIGHT(regexp_replace(u_inner.mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(m.tm_mobile_no, '\\D', '', 'g'), 10)
+              WHERE RIGHT(regexp_replace(COALESCE(u_inner.mobile_no, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(m.tm_mobile_no, '\\D', '', 'g'), 10)
             ))
             OR (m.team_member_uid IS NOT NULL AND b.user_id IN (
               SELECT u_inner.user_id FROM users u_inner WHERE u_inner.member_id = m.team_member_uid
@@ -9821,7 +9821,7 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
           OR (m.tm_record_id IS NOT NULL AND inv.user_id = m.tm_record_id)
           OR (m.tm_mobile_no IS NOT NULL AND inv.user_id IN (
             SELECT u_inner.user_id FROM users u_inner 
-            WHERE RIGHT(regexp_replace(u_inner.mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(m.tm_mobile_no, '\\D', '', 'g'), 10)
+            WHERE RIGHT(regexp_replace(COALESCE(u_inner.mobile_no, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(m.tm_mobile_no, '\\D', '', 'g'), 10)
           ))
         )
       ) it ON TRUE
@@ -9845,8 +9845,8 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
           COALESCE(SUM(CASE WHEN c.commission_status = 'Pending' THEN c.net_amount ELSE 0 END), 0)::numeric AS pending_commission
         FROM commission_transactions c
         WHERE (
-          (m.user_id IS NOT NULL AND (c.associate_user_id = m.user_id OR c.user_id = m.user_id))
-          OR (u.user_id IS NOT NULL AND (c.associate_user_id = u.user_id OR c.user_id = u.user_id))
+          (m.user_id IS NOT NULL AND c.associate_user_id = m.user_id)
+          OR (u.user_id IS NOT NULL AND c.associate_user_id = u.user_id)
         )
       ) comm ON TRUE
       LEFT JOIN LATERAL (
@@ -9887,7 +9887,7 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
             OR (m.tm_record_id IS NOT NULL AND b.user_id = m.tm_record_id)
             OR (m.tm_mobile_no IS NOT NULL AND b.user_id IN (
               SELECT u_inner.user_id FROM users u_inner 
-              WHERE RIGHT(regexp_replace(u_inner.mobile_no, '\\D', '', 'g'), 10) = RIGHT(regexp_replace(m.tm_mobile_no, '\\D', '', 'g'), 10)
+              WHERE RIGHT(regexp_replace(COALESCE(u_inner.mobile_no, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(m.tm_mobile_no, '\\D', '', 'g'), 10)
             ))
             OR (m.team_member_uid IS NOT NULL AND b.user_id IN (
               SELECT u_inner.user_id FROM users u_inner WHERE u_inner.member_id = m.team_member_uid

@@ -1013,7 +1013,7 @@ export async function getTeamMembersByAssociate(associateId, options = {}) {
           COALESCE(SUM(c.net_amount), 0)::numeric AS total_commission_earned,
           COALESCE(SUM(CASE WHEN c.commission_status = 'Pending' THEN c.net_amount ELSE 0 END), 0)::numeric AS pending_commission
         FROM commission_transactions c
-        WHERE (c.associate_user_id = tm.user_id OR c.user_id = tm.user_id)
+        WHERE c.associate_user_id = tm.user_id
       ) comm ON TRUE
       LEFT JOIN LATERAL (
         SELECT COUNT(DISTINCT d.user_id)::int AS direct_count
@@ -1093,7 +1093,7 @@ export async function getTeamMembersByAssociate(associateId, options = {}) {
           COALESCE(SUM(c.net_amount), 0)::numeric AS total_commission_earned,
           COALESCE(SUM(CASE WHEN c.commission_status = 'Pending' THEN c.net_amount ELSE 0 END), 0)::numeric AS pending_commission
         FROM commission_transactions c
-        WHERE (c.associate_user_id = tm.user_id OR c.user_id = tm.user_id)
+        WHERE c.associate_user_id = tm.user_id
       ) comm ON TRUE
       LEFT JOIN LATERAL (
         SELECT COUNT(DISTINCT d.user_id)::int AS direct_count
@@ -1166,7 +1166,7 @@ export async function getTeamMembersByAssociate(associateId, options = {}) {
           COALESCE(SUM(c.net_amount), 0)::numeric AS total_commission_earned,
           COALESCE(SUM(CASE WHEN c.commission_status = 'Pending' THEN c.net_amount ELSE 0 END), 0)::numeric AS pending_commission
         FROM commission_transactions c
-        WHERE (c.associate_user_id = tm.user_id OR c.user_id = tm.user_id)
+        WHERE c.associate_user_id = tm.user_id
       ) comm ON TRUE
       LEFT JOIN LATERAL (
         SELECT COUNT(DISTINCT d.user_id)::int AS direct_count
@@ -1233,7 +1233,7 @@ export async function getTeamMembersByAssociate(associateId, options = {}) {
           COALESCE(SUM(c.net_amount), 0)::numeric AS total_commission_earned,
           COALESCE(SUM(CASE WHEN c.commission_status = 'Pending' THEN c.net_amount ELSE 0 END), 0)::numeric AS pending_commission
         FROM commission_transactions c
-        WHERE (c.associate_user_id = tm.user_id OR c.user_id = tm.user_id)
+        WHERE c.associate_user_id = tm.user_id
       ) comm ON TRUE
       LEFT JOIN LATERAL (
         SELECT COUNT(DISTINCT d.user_id)::int AS direct_count
