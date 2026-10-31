@@ -8502,30 +8502,65 @@ app.get("/api/referral/:inviteCode", async (req, res) => {
 
 app.get("/api/associate/dashboard", verifyUserToken, requireAssociate, async (req, res) => {
   try {
+    const userId = req.user.user_id;
     const [tracker] = await sql`
-      SELECT * FROM associate_sales_tracker WHERE associate_user_id = ${req.user.user_id}`;
+      SELECT * FROM associate_sales_tracker WHERE associate_user_id = ${userId}`;
+
+    const [totalComm] = await sql`
+      SELECT COALESCE(SUM(net_amount), 0)::numeric AS total
+      FROM commission_transactions
+      WHERE (associate_user_id = ${userId} OR user_id = ${userId})
+        AND commission_status IN ('Paid', 'Approved', 'Processed', 'Pending')`;
 
     const pendingComm = await sql`
-      SELECT COALESCE(SUM(net_amount),0) AS pending
+      SELECT COALESCE(SUM(net_amount), 0)::numeric AS pending
       FROM commission_transactions
-      WHERE associate_user_id = ${req.user.user_id} AND commission_status = 'Pending'`;
+      WHERE (associate_user_id = ${userId} OR user_id = ${userId})
+        AND commission_status = 'Pending'`;
+
+    const [wallet] = await sql`
+      SELECT balance FROM wallets WHERE user_id = ${userId} LIMIT 1`;
 
     const [networkCount] = await sql`
-      SELECT COUNT(*) AS count FROM mlm_network WHERE sponsor_user_id = ${req.user.user_id}`;
+      SELECT COUNT(*) AS count FROM mlm_network WHERE sponsor_user_id = ${userId}`;
+
+    const [directSales] = await sql`
+      SELECT
+        COUNT(DISTINCT b.booking_id)::int AS direct_plots_sold,
+        COALESCE(SUM(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0)), 0)::numeric AS direct_sales_value,
+        COALESCE(SUM(COALESCE(p.plot_area, b.plot_area, 0)), 0)::numeric AS direct_sales_gaj,
+        COUNT(DISTINCT b.user_id)::int AS direct_buyers_count
+      FROM bookings b
+      LEFT JOIN plots p ON p.plot_id = b.plot_id
+      WHERE b.sold_by_user_id = ${userId}
+        AND b.booking_status NOT IN ('Cancelled', 'Rejected', 'Draft')`;
+
+    const [directCust] = await sql`
+      SELECT COUNT(*)::int AS count
+      FROM users
+      WHERE (referred_by_user_id = ${userId} OR sponsor_user_id = ${userId})
+        AND user_type = 'Customer'`;
 
     const recentCommissions = await sql`
       SELECT commission_id, commission_type, net_amount, commission_month,
              commission_status, created_at
       FROM commission_transactions
-      WHERE associate_user_id = ${req.user.user_id}
+      WHERE associate_user_id = ${userId}
       ORDER BY created_at DESC LIMIT 5`;
+
+    const totalEarning = Math.max(Number(tracker?.total_commission_earned || 0), Number(totalComm?.total || 0));
 
     return ok(res, {
       tracker,
-      pending_commission: pendingComm[0]?.pending || 0,
-      direct_network_count: networkCount?.count || 0,
+      total_earning: totalEarning,
+      wallet_balance: Number(wallet?.balance || 0),
+      pending_commission: Number(pendingComm[0]?.pending || 0),
+      direct_network_count: Number(networkCount?.count || 0),
+      direct_sales_value: Number(directSales?.direct_sales_value || 0),
+      direct_sales_gaj: Number(directSales?.direct_sales_gaj || tracker?.total_gaj_sold || 0),
+      direct_plots_sold: Number(directSales?.direct_plots_sold || 0),
+      direct_customers_count: Math.max(Number(directCust?.count || 0), Number(directSales?.direct_buyers_count || 0)),
       recent_commissions: recentCommissions,
-      // Milestone flags
       milestone_achieved: (tracker?.total_gaj_sold || 0) >= 2000,
       current_monthly_net: Math.floor((tracker?.total_gaj_sold || 0) / 100) * 600,
     });
