@@ -444,10 +444,10 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
           payment_date, payment_status, verification_status,
           submitted_by_user_id, submitted_by_role, admin_notes
         ) VALUES (
-          ${paymentSerial}, ${targetUserId}, ${targetBookingId}, ${targetPlotId}, ${targetSiteId},
-          'Wallet', ${payment_purpose || 'EmiPayment'}, ${grossAmount}, ${grossAmount},
-          CURRENT_DATE, 'Submitted', 'Pending',
-          ${userId}, 'Customer', ${finalNotes || null}
+          ${paymentSerial}::text, ${targetUserId}::bigint, ${targetBookingId}::bigint, ${targetPlotId ? Number(targetPlotId) : null}::bigint, ${targetSiteId ? Number(targetSiteId) : 0}::integer,
+          'Wallet'::text, ${payment_purpose || 'EmiPayment'}::text, ${grossAmount}::numeric, ${grossAmount}::numeric,
+          CURRENT_DATE, 'Submitted'::text, 'Pending'::text,
+          ${userId}::bigint, 'Customer'::text, ${finalNotes || null}::text
         )
         RETURNING payment_id
       `;
@@ -487,11 +487,11 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
         proof_document_url, payer_name, submitted_by_user_id, submitted_by_role,
         admin_notes
       ) VALUES (
-        ${paymentSerial}, ${targetUserId}, ${targetBookingId}, ${targetPlotId}, ${targetSiteId},
-        ${payment_mode}, ${payment_purpose || 'EmiPayment'}, ${grossAmount}, CURRENT_DATE,
-        'Submitted', 'Pending', ${utr_number || (payment_mode === 'Cash' ? (cash_receipt_no || null) : null)}, ${chequeId},
-        ${proof_document_url || null}, ${payer_name || null}, ${userId}, 'Customer',
-        ${finalNotes || null}
+        ${paymentSerial}::text, ${targetUserId}::bigint, ${targetBookingId}::bigint, ${targetPlotId ? Number(targetPlotId) : null}::bigint, ${targetSiteId ? Number(targetSiteId) : 0}::integer,
+        ${payment_mode}::text, ${payment_purpose || 'EmiPayment'}::text, ${grossAmount}::numeric, CURRENT_DATE,
+        'Submitted'::text, 'Pending'::text, ${utr_number || (payment_mode === 'Cash' ? (cash_receipt_no || null) : null) || null}::text, ${chequeId ? Number(chequeId) : null}::bigint,
+        ${proof_document_url || null}::text, ${payer_name || null}::text, ${userId}::bigint, 'Customer'::text,
+        ${finalNotes || null}::text
       )
       RETURNING *
     `;
