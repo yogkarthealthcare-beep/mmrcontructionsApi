@@ -202,7 +202,7 @@ router.get('/', async (req, res) => {
                SELECT COUNT(*)::int FROM downline_cte
              ) AS downline_count
       FROM tree_cte t
-      LEFT JOIN team_members tm ON tm.user_id = t.user_id
+      LEFT JOIN team_members tm ON (tm.user_id = t.user_id OR tm.team_member_uid = t.member_id)
       LEFT JOIN users sp ON sp.user_id = t.sponsor_user_id
       LEFT JOIN associate_sales_tracker ast ON ast.associate_user_id = t.user_id
       LEFT JOIN LATERAL (
@@ -319,7 +319,7 @@ router.get('/children', async (req, res) => {
                SELECT COUNT(*)::int FROM downline_cte
              ) AS downline_count
       FROM users u
-      LEFT JOIN team_members tm ON tm.user_id = u.user_id
+      LEFT JOIN team_members tm ON (tm.user_id = u.user_id OR tm.team_member_uid = u.member_id)
       LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
       LEFT JOIN associate_sales_tracker ast ON ast.associate_user_id = u.user_id
       LEFT JOIN LATERAL (
@@ -377,7 +377,7 @@ router.get('/search', async (req, res) => {
                  AND c.user_type::text IN ('Associate', 'Team Member')
              ) AS children_count
       FROM users u
-      LEFT JOIN team_members tm ON tm.user_id = u.user_id
+      LEFT JOIN team_members tm ON (tm.user_id = u.user_id OR tm.team_member_uid = u.member_id)
       LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
       LEFT JOIN LATERAL (
         SELECT
