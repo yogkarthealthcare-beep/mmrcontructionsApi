@@ -9725,7 +9725,7 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
         COALESCE(u.mobile_no, m.tm_mobile_no, '—') AS mobile_no,
         COALESCE(u.email, m.tm_email_id, '—') AS email,
         'Team Member' AS user_type,
-        COALESCE(u.account_status, m.tm_status, 'Active') AS account_status,
+        COALESCE(u.account_status::text, m.tm_status, 'Active') AS account_status,
         ${associateId}::int AS sponsor_user_id,
         COALESCE(u.registered_at, m.tm_created_at, NOW()) AS registered_at,
         COALESCE(u.registered_at, m.tm_created_at, NOW()) AS created_at,
@@ -9734,7 +9734,7 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
         COALESCE(m.tm_record_id, u.user_id) AS id,
         COALESCE(m.team_member_uid, u.member_id, 'MMR-TM-' || LPAD(m.tm_record_id::text, 4, '0')) AS team_member_uid,
         m.slot_number,
-        COALESCE(m.tm_status, CASE WHEN u.account_status = 'Active' THEN 'approved' ELSE 'pending' END) AS status,
+        COALESCE(m.tm_status, CASE WHEN u.account_status::text = 'Active' THEN 'approved' ELSE 'pending' END) AS status,
         -- Booking details
         lb.booking_id,
         lb.booking_serial,
