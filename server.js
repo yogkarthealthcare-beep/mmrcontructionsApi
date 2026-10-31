@@ -8641,36 +8641,104 @@ app.get("/api/associate/network", verifyUserToken, requireAssociate, async (req,
     await syncMlmTreeAndReferrals();
     const network = await sql`
       WITH downline AS (
-        SELECT descendant_user_id AS user_id, depth
-        FROM mlm_tree_closure
-        WHERE ancestor_user_id = ${req.user.user_id} AND depth > 0
-        UNION
-        SELECT user_id, 1 AS depth
-        FROM users
-        WHERE sponsor_user_id = ${req.user.user_id}
-        UNION
-        SELECT user_id, 1 AS depth
-        FROM team_members
-        WHERE associate_id = ${req.user.user_id} AND user_id IS NOT NULL AND status <> 'rejected'
+        SELECT user_id, MIN(depth) AS depth
+        FROM (
+          SELECT descendant_user_id AS user_id, depth
+          FROM mlm_tree_closure
+          WHERE ancestor_user_id = ${req.user.user_id} AND depth > 0
+          UNION ALL
+          SELECT user_id, 1 AS depth
+          FROM users
+          WHERE sponsor_user_id = ${req.user.user_id}
+          UNION ALL
+          SELECT user_id, 1 AS depth
+          FROM team_members
+          WHERE associate_id = ${req.user.user_id} AND user_id IS NOT NULL AND status <> 'rejected'
+        ) sub_d
+        GROUP BY user_id
+      ),
+      purchases_summary AS (
+        SELECT
+          b.user_id,
+          COUNT(DISTINCT b.booking_id)::int AS total_purchased_plots,
+          COALESCE(SUM(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0)), 0)::numeric AS total_purchased_amount
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        WHERE b.booking_status NOT IN ('Cancelled', 'Rejected', 'Draft')
+        GROUP BY b.user_id
+      ),
+      sales_summary AS (
+        SELECT
+          b.sold_by_user_id AS user_id,
+          COALESCE(SUM(COALESCE(p.plot_area, b.plot_area, 0)), 0)::numeric AS total_gaj_sold
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        WHERE b.booking_status NOT IN ('Cancelled', 'Rejected', 'Draft')
+        GROUP BY b.sold_by_user_id
+      ),
+      comm_summary AS (
+        SELECT
+          c.user_id,
+          COALESCE(SUM(c.net_amount), 0)::numeric AS total_commission_earned,
+          COALESCE(SUM(CASE WHEN c.commission_status = 'Pending' THEN c.net_amount ELSE 0 END), 0)::numeric AS pending_commission
+        FROM (
+          SELECT COALESCE(associate_user_id, user_id) AS user_id, net_amount, commission_status
+          FROM commission_transactions
+        ) c
+        GROUP BY c.user_id
+      ),
+      direct_team_summary AS (
+        SELECT
+          u_sub.sponsor_user_id AS user_id,
+          COUNT(DISTINCT u_sub.user_id)::int AS direct_count
+        FROM users u_sub
+        WHERE u_sub.sponsor_user_id IS NOT NULL
+        GROUP BY u_sub.sponsor_user_id
+      ),
+      downline_team_summary AS (
+        SELECT
+          tc.ancestor_user_id AS user_id,
+          COUNT(DISTINCT tc.descendant_user_id)::int AS downline_count
+        FROM mlm_tree_closure tc
+        WHERE tc.depth > 0
+        GROUP BY tc.ancestor_user_id
       )
-      SELECT u.user_id, u.member_id, u.full_name, u.mobile_no,
+      SELECT u.user_id,
+             COALESCE(tm.team_member_uid, u.member_id) AS member_id,
+             COALESCE(tm.team_member_uid, u.member_id) AS member_code,
+             u.full_name, u.mobile_no,
              u.email, u.user_type, u.sponsor_user_id, u.account_status, u.registered_at,
              tm.slot_number, tm.team_member_uid,
-             COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
-             COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
-             COALESCE((
-               SELECT SUM(c.net_amount) FROM commission_transactions c
-               WHERE c.associate_user_id = u.user_id AND c.commission_status = 'Pending'
-             ), 0) AS pending_commission,
-             MIN(d.depth) AS level
+             GREATEST(COALESCE(t.total_gaj_sold, 0), COALESCE(ss.total_gaj_sold, 0))::numeric AS total_gaj_sold,
+             GREATEST(COALESCE(t.total_gaj_sold, 0), COALESCE(ss.total_gaj_sold, 0))::numeric AS sales_gaj,
+             GREATEST(COALESCE(t.total_commission_earned, 0), COALESCE(cs.total_commission_earned, 0))::numeric AS total_commission_earned,
+             GREATEST(COALESCE(t.total_commission_earned, 0), COALESCE(cs.total_commission_earned, 0))::numeric AS commission_earned,
+             COALESCE(cs.pending_commission, 0)::numeric AS pending_commission,
+             COALESCE(ps.total_purchased_plots, 0)::int AS total_purchased_plots,
+             COALESCE(ps.total_purchased_plots, 0)::int AS purchased_plots_count,
+             COALESCE(ps.total_purchased_amount, 0)::numeric AS total_purchased_amount,
+             COALESCE(ps.total_purchased_amount, 0)::numeric AS purchased_amount,
+             COALESCE(dts.direct_count, 0)::int AS direct_count,
+             COALESCE(dts.direct_count, 0)::int AS direct_referrals,
+             GREATEST(COALESCE(dnts.downline_count, 0), COALESCE(dts.direct_count, 0))::int AS team_count,
+             GREATEST(COALESCE(dnts.downline_count, 0), COALESCE(dts.direct_count, 0))::int AS downline_count,
+             COALESCE(sp.full_name, assoc_user.full_name, 'Associate Leader') AS sponsor_name,
+             COALESCE(sp.member_id, assoc_user.member_id, 'MMR-ASC') AS sponsor_member_id,
+             d.depth AS level
       FROM downline d
       JOIN users u ON d.user_id = u.user_id
       LEFT JOIN team_members tm ON (tm.user_id = u.user_id OR tm.team_member_uid = u.member_id) AND tm.associate_id = ${req.user.user_id}
       LEFT JOIN associate_sales_tracker t ON u.user_id = t.associate_user_id
+      LEFT JOIN purchases_summary ps ON (u.user_id = ps.user_id OR (tm.id IS NOT NULL AND tm.id = ps.user_id))
+      LEFT JOIN sales_summary ss ON u.user_id = ss.user_id
+      LEFT JOIN comm_summary cs ON u.user_id = cs.user_id
+      LEFT JOIN direct_team_summary dts ON u.user_id = dts.user_id
+      LEFT JOIN downline_team_summary dnts ON u.user_id = dnts.user_id
+      LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
+      LEFT JOIN users assoc_user ON assoc_user.user_id = ${req.user.user_id}
       WHERE u.user_id <> ${req.user.user_id}
         AND u.user_type IN ('Associate', 'Team Member')
-      GROUP BY u.user_id, u.member_id, u.full_name, u.mobile_no, u.email, u.user_type, u.sponsor_user_id, u.account_status, u.registered_at, tm.slot_number, tm.team_member_uid, t.total_gaj_sold, t.total_commission_earned
-      ORDER BY COALESCE(tm.slot_number, 999), MIN(d.depth), u.registered_at DESC`;
+      ORDER BY COALESCE(tm.slot_number, 999), d.depth, u.registered_at DESC`;
 
     return ok(res, network);
   } catch (e) {
@@ -9136,10 +9204,24 @@ app.get("/api/associate/network/tree", verifyUserToken, requireAssociate, async 
       SELECT u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id,
              u.account_status AS status, COALESCE(r.rank_name, 'Associate Leader') AS rank,
              COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
-             COALESCE(t.total_commission_earned, 0) AS commission_earned
+             COALESCE(t.total_gaj_sold, 0) AS sales_gaj,
+             COALESCE(t.total_commission_earned, 0) AS commission_earned,
+             COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
+             COALESCE(pur.total_purchased_plots, 0)::int AS total_purchased_plots,
+             COALESCE(pur.total_purchased_plots, 0)::int AS purchased_plots_count,
+             COALESCE(pur.total_purchased_amount, 0)::numeric AS total_purchased_amount,
+             COALESCE(pur.total_purchased_amount, 0)::numeric AS purchased_amount
       FROM users u
       LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
       LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(DISTINCT b.booking_id)::int AS total_purchased_plots,
+          COALESCE(SUM(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0)), 0)::numeric AS total_purchased_amount
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        WHERE b.user_id = u.user_id AND b.booking_status NOT IN ('Cancelled', 'Rejected', 'Draft')
+      ) pur ON TRUE
       WHERE u.user_id = ${req.user.user_id}
       LIMIT 1`;
 
@@ -9167,16 +9249,30 @@ app.get("/api/associate/network/tree", verifyUserToken, requireAssociate, async 
                ELSE COALESCE(r.rank_name, 'Associate')
              END AS rank,
              COALESCE(t.total_gaj_sold, 0) AS total_gaj_sold,
+             COALESCE(t.total_gaj_sold, 0) AS sales_gaj,
              COALESCE(t.total_commission_earned, 0) AS commission_earned,
+             COALESCE(t.total_commission_earned, 0) AS total_commission_earned,
+             COALESCE(pur.total_purchased_plots, 0)::int AS total_purchased_plots,
+             COALESCE(pur.total_purchased_plots, 0)::int AS purchased_plots_count,
+             COALESCE(pur.total_purchased_amount, 0)::numeric AS total_purchased_amount,
+             COALESCE(pur.total_purchased_amount, 0)::numeric AS purchased_amount,
              MIN(d.depth) AS depth
       FROM downline d
       JOIN users u ON u.user_id = d.user_id
       LEFT JOIN team_members tm ON (tm.user_id = u.user_id OR tm.team_member_uid = u.member_id) AND tm.associate_id = ${req.user.user_id}
       LEFT JOIN associate_sales_tracker t ON t.associate_user_id = u.user_id
       LEFT JOIN associate_ranks r ON r.rank_id = t.current_rank_id
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(DISTINCT b.booking_id)::int AS total_purchased_plots,
+          COALESCE(SUM(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0)), 0)::numeric AS total_purchased_amount
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        WHERE (b.user_id = u.user_id OR (tm.id IS NOT NULL AND b.user_id = tm.id)) AND b.booking_status NOT IN ('Cancelled', 'Rejected', 'Draft')
+      ) pur ON TRUE
       WHERE u.user_id <> ${req.user.user_id}
         AND u.user_type IN ('Associate', 'Team Member')
-      GROUP BY u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id, u.account_status, tm.slot_number, tm.team_member_uid, r.rank_name, t.total_gaj_sold, t.total_commission_earned
+      GROUP BY u.user_id, u.member_id, u.full_name, u.user_type, u.sponsor_user_id, u.account_status, tm.slot_number, tm.team_member_uid, r.rank_name, t.total_gaj_sold, t.total_commission_earned, pur.total_purchased_plots, pur.total_purchased_amount
       ORDER BY COALESCE(tm.slot_number, 999), MIN(d.depth), u.full_name`;
 
     const rootNode = rootUser ? { ...rootUser, children: [] } : { user_id: req.user.user_id, member_id: `MMR${req.user.user_id}`, full_name: req.user.full_name || 'Associate', children: [] };
@@ -9496,17 +9592,21 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
 
     const members = await sql`
       WITH downline AS (
-        SELECT descendant_user_id AS user_id, depth
-        FROM mlm_tree_closure
-        WHERE ancestor_user_id = ${associateId} AND depth > 0
-        UNION
-        SELECT user_id, 1 AS depth
-        FROM users
-        WHERE sponsor_user_id = ${associateId}
-        UNION
-        SELECT user_id, 1 AS depth
-        FROM team_members
-        WHERE associate_id = ${associateId} AND user_id IS NOT NULL
+        SELECT user_id, MIN(depth) AS depth
+        FROM (
+          SELECT descendant_user_id AS user_id, depth
+          FROM mlm_tree_closure
+          WHERE ancestor_user_id = ${associateId} AND depth > 0
+          UNION ALL
+          SELECT user_id, 1 AS depth
+          FROM users
+          WHERE sponsor_user_id = ${associateId}
+          UNION ALL
+          SELECT user_id, 1 AS depth
+          FROM team_members
+          WHERE associate_id = ${associateId} AND user_id IS NOT NULL
+        ) sub_d
+        GROUP BY user_id
       ),
       latest_bookings AS (
         SELECT DISTINCT ON (b.user_id)
@@ -9550,19 +9650,69 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
         ORDER BY sub.user_id, sub.created_at DESC
       ),
       tm_info AS (
-        SELECT DISTINCT ON (tm.user_id)
+        SELECT DISTINCT ON (COALESCE(tm.user_id, u_match.user_id))
           tm.id AS tm_record_id,
-          tm.user_id,
+          COALESCE(tm.user_id, u_match.user_id) AS user_id,
           tm.team_member_uid,
           tm.slot_number,
           tm.status AS tm_status
         FROM team_members tm
+        LEFT JOIN users u_match ON u_match.member_id = tm.team_member_uid OR u_match.mobile_no = tm.mobile_no
         WHERE tm.associate_id = ${associateId}
-        ORDER BY tm.user_id, tm.created_at DESC
+        ORDER BY COALESCE(tm.user_id, u_match.user_id), tm.created_at DESC
+      ),
+      purchases_summary AS (
+        SELECT
+          b.user_id,
+          COUNT(DISTINCT b.booking_id)::int AS total_purchased_plots,
+          COALESCE(SUM(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0)), 0)::numeric AS total_purchased_amount,
+          COALESCE(SUM(COALESCE(b.advance_amount, 0)), 0)::numeric AS total_advance_paid
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        WHERE b.booking_status NOT IN ('Cancelled', 'Rejected', 'Draft')
+        GROUP BY b.user_id
+      ),
+      sales_summary AS (
+        SELECT
+          b.sold_by_user_id AS user_id,
+          COALESCE(SUM(COALESCE(p.plot_area, b.plot_area, 0)), 0)::numeric AS total_gaj_sold,
+          COUNT(DISTINCT b.booking_id)::int AS total_plots_sold
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        WHERE b.booking_status NOT IN ('Cancelled', 'Rejected', 'Draft')
+        GROUP BY b.sold_by_user_id
+      ),
+      comm_summary AS (
+        SELECT
+          c.user_id,
+          COALESCE(SUM(c.net_amount), 0)::numeric AS total_commission_earned,
+          COALESCE(SUM(CASE WHEN c.commission_status = 'Pending' THEN c.net_amount ELSE 0 END), 0)::numeric AS pending_commission
+        FROM (
+          SELECT COALESCE(associate_user_id, user_id) AS user_id, net_amount, commission_status
+          FROM commission_transactions
+        ) c
+        GROUP BY c.user_id
+      ),
+      direct_team_summary AS (
+        SELECT
+          u_sub.sponsor_user_id AS user_id,
+          COUNT(DISTINCT u_sub.user_id)::int AS direct_count
+        FROM users u_sub
+        WHERE u_sub.sponsor_user_id IS NOT NULL
+        GROUP BY u_sub.sponsor_user_id
+      ),
+      downline_team_summary AS (
+        SELECT
+          tc.ancestor_user_id AS user_id,
+          COUNT(DISTINCT tc.descendant_user_id)::int AS downline_count
+        FROM mlm_tree_closure tc
+        WHERE tc.depth > 0
+        GROUP BY tc.ancestor_user_id
       )
       SELECT
         u.user_id,
         u.member_id,
+        COALESCE(tm.team_member_uid, u.member_id) AS member_code,
         u.full_name,
         u.mobile_no,
         u.email,
@@ -9571,10 +9721,10 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
         u.sponsor_user_id,
         u.registered_at,
         COALESCE(u.registered_at, u.updated_at, NOW()) AS created_at,
-        MIN(d.depth) AS level,
+        d.depth AS level,
         -- Team Member details
         tm.tm_record_id AS id,
-        tm.team_member_uid,
+        COALESCE(tm.team_member_uid, u.member_id) AS team_member_uid,
         tm.slot_number,
         COALESCE(tm.tm_status, CASE WHEN u.account_status = 'Active' THEN 'approved' ELSE 'pending' END) AS status,
         -- Booking details
@@ -9598,23 +9748,46 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
         -- Enrollment info
         ed.enrollment_id,
         ed.application_no,
-        (ed.enrollment_id IS NOT NULL) AS has_enrollment
+        (ed.enrollment_id IS NOT NULL) AS has_enrollment,
+        -- Holdings / Property Purchases Summary
+        GREATEST(COALESCE(ps.total_purchased_plots, 0), CASE WHEN it.invoice_count > 0 THEN it.invoice_count ELSE 0 END, CASE WHEN lb.booking_id IS NOT NULL THEN 1 ELSE 0 END)::int AS total_purchased_plots,
+        GREATEST(COALESCE(ps.total_purchased_plots, 0), CASE WHEN it.invoice_count > 0 THEN it.invoice_count ELSE 0 END, CASE WHEN lb.booking_id IS NOT NULL THEN 1 ELSE 0 END)::int AS purchased_plots_count,
+        GREATEST(COALESCE(ps.total_purchased_amount, 0), COALESCE(it.total_invoiced, 0), COALESCE(it.total_paid, 0), COALESCE(lb.base_price, 0))::numeric AS total_purchased_amount,
+        GREATEST(COALESCE(ps.total_purchased_amount, 0), COALESCE(it.total_invoiced, 0), COALESCE(it.total_paid, 0), COALESCE(lb.base_price, 0))::numeric AS purchased_amount,
+        -- Volume & Sales Given to Company
+        GREATEST(COALESCE(ast.total_gaj_sold, 0), COALESCE(ss.total_gaj_sold, 0))::numeric AS sales_gaj,
+        GREATEST(COALESCE(ast.total_gaj_sold, 0), COALESCE(ss.total_gaj_sold, 0))::numeric AS total_gaj_sold,
+        -- Commission Generated
+        GREATEST(COALESCE(ast.total_commission_earned, 0), COALESCE(cs.total_commission_earned, 0))::numeric AS commission_earned,
+        GREATEST(COALESCE(ast.total_commission_earned, 0), COALESCE(cs.total_commission_earned, 0))::numeric AS total_commission_earned,
+        COALESCE(cs.pending_commission, 0)::numeric AS pending_commission,
+        -- Team Members Added (Direct & Downline)
+        COALESCE(dts.direct_count, 0)::int AS direct_count,
+        COALESCE(dts.direct_count, 0)::int AS direct_referrals,
+        COALESCE(dts.direct_count, 0)::int AS children_count,
+        GREATEST(COALESCE(dnts.downline_count, 0), COALESCE(dts.direct_count, 0))::int AS team_count,
+        GREATEST(COALESCE(dnts.downline_count, 0), COALESCE(dts.direct_count, 0))::int AS downline_count,
+        GREATEST(COALESCE(dnts.downline_count, 0), COALESCE(dts.direct_count, 0))::int AS total_team_count,
+        -- Sponsor Information
+        COALESCE(sp.full_name, assoc_sp.full_name, 'Associate Leader') AS sponsor_name,
+        COALESCE(sp.member_id, assoc_sp.member_id, 'MMR-ASC') AS sponsor_member_id,
+        COALESCE(sp.user_id, assoc_sp.user_id, ${associateId}) AS sponsor_user_id
       FROM downline d
       JOIN users u ON d.user_id = u.user_id
       LEFT JOIN tm_info tm ON u.user_id = tm.user_id
       LEFT JOIN latest_bookings lb ON u.user_id = lb.user_id
       LEFT JOIN invoice_totals it ON u.user_id = it.user_id
       LEFT JOIN enrollment_data ed ON u.user_id = ed.user_id
+      LEFT JOIN purchases_summary ps ON (u.user_id = ps.user_id OR (tm.tm_record_id IS NOT NULL AND tm.tm_record_id = ps.user_id))
+      LEFT JOIN sales_summary ss ON u.user_id = ss.user_id
+      LEFT JOIN comm_summary cs ON u.user_id = cs.user_id
+      LEFT JOIN direct_team_summary dts ON u.user_id = dts.user_id
+      LEFT JOIN downline_team_summary dnts ON u.user_id = dnts.user_id
+      LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
+      LEFT JOIN users assoc_sp ON assoc_sp.user_id = ${associateId}
+      LEFT JOIN associate_sales_tracker ast ON ast.associate_user_id = u.user_id
       WHERE u.user_id <> ${associateId}
-      GROUP BY
-        u.user_id, u.member_id, u.full_name, u.mobile_no, u.email, u.user_type,
-        u.account_status, u.sponsor_user_id, u.registered_at, u.updated_at,
-        tm.tm_record_id, tm.team_member_uid, tm.slot_number, tm.tm_status,
-        lb.booking_id, lb.booking_serial, lb.plot_id, lb.plot_number, lb.plot_area,
-        lb.site_id, lb.site_name, lb.booking_status, lb.payment_type, lb.advance_amount,
-        lb.base_price, lb.booking_date, it.total_invoiced, it.total_paid, it.total_balance,
-        it.invoice_count, ed.enrollment_id, ed.application_no
-      ORDER BY MIN(d.depth) ASC, u.registered_at DESC`;
+      ORDER BY d.depth ASC, u.registered_at DESC`;
 
     return ok(res, members);
   } catch (e) {

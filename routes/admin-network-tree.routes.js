@@ -35,7 +35,11 @@ const formatNode = (row) => ({
   sales_gaj: Number(row.sales_gaj || 0),
   commission_earned: Number(row.commission_earned || 0),
   children_count: Number(row.children_count || 0),
-  downline_count: Number(row.downline_count || 0)
+  downline_count: Number(row.downline_count || 0),
+  total_purchased_plots: Number(row.total_purchased_plots || row.purchased_plots_count || 0),
+  purchased_plots_count: Number(row.total_purchased_plots || row.purchased_plots_count || 0),
+  total_purchased_amount: Number(row.total_purchased_amount || row.purchased_amount || 0),
+  purchased_amount: Number(row.total_purchased_amount || row.purchased_amount || 0)
 });
 
 /**
@@ -160,8 +164,14 @@ router.get('/', async (req, res) => {
              '' AS profile_image_url,
              tm.slot_number,
              sp.member_id AS sponsor_member_id, sp.full_name AS sponsor_name,
+             COALESCE(pur.total_purchased_plots, 0)::int AS total_purchased_plots,
+             COALESCE(pur.total_purchased_amount, 0)::numeric AS total_purchased_amount,
              COALESCE(ast.total_gaj_sold, 0)::numeric AS sales_gaj,
              COALESCE(ast.total_commission_earned, 0)::numeric AS commission_earned,
+             COALESCE(pur.total_purchased_plots, 0)::int AS total_purchased_plots,
+             COALESCE(pur.total_purchased_amount, 0)::numeric AS total_purchased_amount,
+             COALESCE(pur.total_purchased_plots, 0)::int AS total_purchased_plots,
+             COALESCE(pur.total_purchased_amount, 0)::numeric AS total_purchased_amount,
              (
                SELECT COUNT(*)::int FROM users c
                WHERE c.sponsor_user_id = t.user_id
@@ -195,6 +205,15 @@ router.get('/', async (req, res) => {
       LEFT JOIN team_members tm ON tm.user_id = t.user_id
       LEFT JOIN users sp ON sp.user_id = t.sponsor_user_id
       LEFT JOIN associate_sales_tracker ast ON ast.associate_user_id = t.user_id
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(DISTINCT b.booking_id)::int AS total_purchased_plots,
+          COALESCE(SUM(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0)), 0)::numeric AS total_purchased_amount
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        WHERE (b.user_id = t.user_id OR (tm.id IS NOT NULL AND b.user_id = tm.id))
+          AND b.booking_status NOT IN ('Cancelled', 'Rejected', 'Draft')
+      ) pur ON TRUE
       ORDER BY t.level, COALESCE(tm.slot_number, 999), t.registered_at ASC;
     `;
 
@@ -303,6 +322,15 @@ router.get('/children', async (req, res) => {
       LEFT JOIN team_members tm ON tm.user_id = u.user_id
       LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
       LEFT JOIN associate_sales_tracker ast ON ast.associate_user_id = u.user_id
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(DISTINCT b.booking_id)::int AS total_purchased_plots,
+          COALESCE(SUM(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0)), 0)::numeric AS total_purchased_amount
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        WHERE (b.user_id = u.user_id OR (tm.id IS NOT NULL AND b.user_id = tm.id))
+          AND b.booking_status NOT IN ('Cancelled', 'Rejected', 'Draft')
+      ) pur ON TRUE
       WHERE ${whereCondition}
       ORDER BY COALESCE(tm.slot_number, 999), u.registered_at ASC
       LIMIT ${pageSize} OFFSET ${offset};
@@ -351,6 +379,15 @@ router.get('/search', async (req, res) => {
       FROM users u
       LEFT JOIN team_members tm ON tm.user_id = u.user_id
       LEFT JOIN users sp ON sp.user_id = u.sponsor_user_id
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(DISTINCT b.booking_id)::int AS total_purchased_plots,
+          COALESCE(SUM(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0)), 0)::numeric AS total_purchased_amount
+        FROM bookings b
+        LEFT JOIN plots p ON p.plot_id = b.plot_id
+        WHERE (b.user_id = u.user_id OR (tm.id IS NOT NULL AND b.user_id = tm.id))
+          AND b.booking_status NOT IN ('Cancelled', 'Rejected', 'Draft')
+      ) pur ON TRUE
       WHERE (
         u.member_id ILIKE ${term}
         OR u.full_name ILIKE ${term}
