@@ -79,10 +79,9 @@ export async function generateTeamMemberPdf(id: string | number): Promise<Buffer
 
         drawHeader(doc, member.team_member_uid, formDateStr);
         doc.fillColor("#14532d").fontSize(14).font("Helvetica-Bold").text("TEAM MEMBER ENROLLMENT FORM", 40, 105, { align: "center", width: 515 });
-        drawPhotoBoxWithBuffer(doc, "Applicant", 475, 130, photoBuf);
-
-        drawSectionTitle(doc, "1. Sponsor (Associate) Details", 130);
-        let y = 158;
+        drawSectionTitle(doc, "1. Sponsor (Associate) Details", 128);
+        drawPhotoBoxWithBuffer(doc, "Applicant", 480, 150, photoBuf, 75, 90);
+        let y = 152;
         drawField(doc, "Associate Name:", member.associate_name, 40, y, 420, 110);
         y += 24;
         drawField(doc, "Associate ID / User ID:", `ID #${member.associate_id}`, 40, y, 200, 110);
