@@ -1,6 +1,6 @@
 import { ZodError } from "zod";
 import { saveFileToVPS } from "../services/fileStorage.service.js";
-import { teamMemberSchema, getAssociatePrefill, createTeamMemberRecord, getTeamMembersByAssociate, getTeamMemberById, updateTeamMemberRecord, updateTeamMemberStatus, finalSubmitTeamMemberRecord } from "../services/teamMemberService.js";
+import { teamMemberSchema, getAssociatePrefill, createTeamMemberRecord, getTeamMembersByAssociate, getTeamMemberById, updateTeamMemberRecord, updateTeamMemberStatus, finalSubmitTeamMemberRecord, checkUserPasswordStatus } from "../services/teamMemberService.js";
 import { generateTeamMemberPdf } from "../services/teamMemberPdfService.js";
 import { triggerEnrollmentEmailAsync } from "../services/enrollmentEmail.service.js";
 import { triggerTeamMemberStatusEmailAsync } from "../services/phase2NotificationEmail.service.js";
@@ -423,6 +423,24 @@ export async function printTeamMemberController(req, res) {
         return res.status(status).json({
             success: false,
             message: error.message || "Failed to generate Team Member PDF"
+        });
+    }
+}
+/**
+ * GET /api/team-members/user-status
+ */
+export async function checkUserPasswordStatusController(req, res) {
+    try {
+        const result = await checkUserPasswordStatus(req.query);
+        return res.status(200).json({
+            success: true,
+            data: result
+        });
+    } catch (error) {
+        console.error("[TeamMemberController CheckPasswordStatus Error]:", error);
+        return res.status(500).json({
+            success: false,
+            message: error.message || "Failed to check user password status"
         });
     }
 }

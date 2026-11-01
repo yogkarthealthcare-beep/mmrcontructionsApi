@@ -6729,15 +6729,19 @@ app.get("/api/profile/documents", verifyUserToken, async (req, res) => {
       ORDER BY uploaded_at DESC`;
 
     const [userRow] = await sql`
-      SELECT is_verified, enrollment_status, account_status
+      SELECT is_verified, enrollment_status, account_status, member_id
       FROM users WHERE user_id = ${req.user.user_id}`.catch(() => []);
     const [kycRow] = await sql`
       SELECT status FROM user_kyc_profiles WHERE user_id = ${req.user.user_id}`.catch(() => []);
     const [assocRow] = await sql`
-      SELECT status, is_verified FROM associate_enrollment WHERE user_id = ${req.user.user_id} LIMIT 1`.catch(() => []);
+      SELECT status, is_verified FROM associate_enrollment 
+      WHERE user_id = ${req.user.user_id} 
+         OR (${Boolean(userRow?.member_id)} AND id = ${userRow?.member_id || ''})
+      LIMIT 1`.catch(() => []);
 
     const isAccountApproved = Boolean(userRow?.is_verified) ||
       ['completed', 'approved'].includes(String(userRow?.enrollment_status || '').toLowerCase()) ||
+      ['active'].includes(String(userRow?.account_status || '').toLowerCase()) ||
       String(kycRow?.status || '').toLowerCase() === 'approved' ||
       Boolean(assocRow?.is_verified) ||
       ['approved', 'completed'].includes(String(assocRow?.status || '').toLowerCase());
@@ -6756,20 +6760,48 @@ app.get("/api/profile/documents", verifyUserToken, async (req, res) => {
 
     const docs = (rawDocs || []).map((d) => {
       const fullUrl = normalizeDocUrl(d.file_path);
-      const isDocApproved = Boolean(d.is_verified) ||
-        String(d.review_status || '').toLowerCase() === 'approved';
       const isDocRejected = String(d.review_status || '').toLowerCase() === 'rejected';
+      const isDocApproved = !isDocRejected && (
+        Boolean(d.is_verified) ||
+        String(d.review_status || '').toLowerCase() === 'approved' ||
+        isAccountApproved
+      );
       const status = isDocApproved ? 'Approved' : (isDocRejected ? 'Rejected' : 'Under Review');
 
       return {
         ...d,
         is_verified: isDocApproved,
         review_status: status,
+        status: status,
         file_path: fullUrl,
         document_url: fullUrl,
         url: fullUrl,
       };
     });
+
+    // Auto-sync persistent database records when account is verified / approved
+    if (isAccountApproved && rawDocs && rawDocs.length > 0) {
+      sql`
+        UPDATE user_documents
+        SET is_verified = TRUE,
+            review_status = 'Approved',
+            verified_at = COALESCE(verified_at, NOW()),
+            updated_at = NOW()
+        WHERE user_id = ${req.user.user_id}
+          AND is_active = TRUE
+          AND (is_verified IS NOT TRUE OR review_status != 'Approved')
+          AND LOWER(COALESCE(review_status, '')) != 'rejected'
+      `.catch(() => {});
+
+      sql`
+        UPDATE user_kyc_profiles
+        SET status = 'Approved',
+            reviewed_at = COALESCE(reviewed_at, NOW()),
+            updated_at = NOW()
+        WHERE user_id = ${req.user.user_id}
+          AND LOWER(COALESCE(status, '')) != 'rejected'
+      `.catch(() => {});
+    }
 
     return ok(res, docs);
   } catch (e) {
@@ -6800,22 +6832,39 @@ app.post("/api/profile/upload-doc",
         UPDATE user_documents SET is_active = FALSE
         WHERE user_id = ${req.user.user_id} AND document_type = ${document_type}`;
 
+      const [userRow] = await sql`
+        SELECT is_verified, enrollment_status, account_status
+        FROM users WHERE user_id = ${req.user.user_id}`.catch(() => []);
+      const [assocRow] = await sql`
+        SELECT status, is_verified FROM associate_enrollment WHERE user_id = ${req.user.user_id} LIMIT 1`.catch(() => []);
+      const isAlreadyApproved = Boolean(userRow?.is_verified) ||
+        ['active'].includes(String(userRow?.account_status || '').toLowerCase()) ||
+        Boolean(assocRow?.is_verified) ||
+        ['approved', 'completed'].includes(String(assocRow?.status || '').toLowerCase());
+
+      const initialStatus = isAlreadyApproved ? 'Approved' : 'Submitted';
+      const initialVerified = isAlreadyApproved;
+
       const [doc] = await sql`
         INSERT INTO user_documents (
           user_id, document_type, file_path, cloudinary_public_id, file_name, file_size_kb,
-          review_status, is_verified, rejection_note, admin_remarks, reupload_requested
+          review_status, is_verified, rejection_note, admin_remarks, reupload_requested,
+          verified_at
         )
         VALUES (${req.user.user_id}, ${document_type}, ${url},
                 ${null}, ${req.file.originalname}, ${Math.round(req.file.size / 1024)},
-                'Submitted', FALSE, NULL, NULL, FALSE)
+                ${initialStatus}, ${initialVerified}, NULL, NULL, FALSE,
+                ${initialVerified ? sql`NOW()` : null})
         RETURNING document_id`;
 
-      await sql`
-        INSERT INTO user_kyc_profiles (user_id, status, submitted_at)
-        VALUES (${req.user.user_id}, 'Submitted', NOW())
-        ON CONFLICT (user_id) DO UPDATE SET
-          status = 'Submitted', submitted_at = NOW(), admin_remarks = NULL,
-          reviewed_at = NULL, reviewed_by_admin_id = NULL, updated_at = NOW()`;
+      if (!isAlreadyApproved) {
+        await sql`
+          INSERT INTO user_kyc_profiles (user_id, status, submitted_at)
+          VALUES (${req.user.user_id}, 'Submitted', NOW())
+          ON CONFLICT (user_id) DO UPDATE SET
+            status = 'Submitted', submitted_at = NOW(), admin_remarks = NULL,
+            reviewed_at = NULL, reviewed_by_admin_id = NULL, updated_at = NOW()`;
+      }
 
       return ok(res, { document_id: doc.document_id, url }, "Document uploaded", 201);
     } catch (e) {
@@ -11172,6 +11221,25 @@ app.put("/api/admin/customers/:id",
           VALUES (${uid}, 'Permanent', ${address || null}, ${city || null}, ${state || null}, ${pinCode || null})`;
       }
 
+      if (accountStatus === 'Active') {
+        await sql`UPDATE users SET is_verified = TRUE WHERE user_id = ${uid}`.catch(() => {});
+        await sql`
+          UPDATE user_documents
+          SET is_verified = TRUE, review_status = 'Approved', updated_at = NOW()
+          WHERE user_id = ${uid} AND is_active = TRUE AND LOWER(COALESCE(review_status, '')) != 'rejected'
+        `.catch(() => {});
+        await sql`
+          UPDATE user_kyc_profiles
+          SET status = 'Approved', updated_at = NOW()
+          WHERE user_id = ${uid} AND LOWER(COALESCE(status, '')) != 'rejected'
+        `.catch(() => {});
+        await sql`
+          UPDATE associate_enrollment
+          SET status = 'Approved', is_verified = TRUE, updated_at = NOW()
+          WHERE user_id = ${uid} OR id = ${associate?.member_id || ''}
+        `.catch(() => {});
+      }
+
       await sql`
         INSERT INTO audit_log (actor_type, actor_id, actor_name, module, action, target_table, target_record_id, new_value)
         VALUES ('Admin', ${req.admin.admin_id}, ${req.admin.full_name},
@@ -11377,6 +11445,25 @@ app.put("/api/admin/associates/:id",
         await sql`
           INSERT INTO user_addresses (user_id, address_type, address_line1, city, state, pin_code)
           VALUES (${uid}, 'Permanent', ${address || null}, ${city || null}, ${state || null}, ${pinCode || null})`;
+      }
+
+      if (accountStatus === 'Active') {
+        await sql`UPDATE users SET is_verified = TRUE WHERE user_id = ${uid}`.catch(() => {});
+        await sql`
+          UPDATE user_documents
+          SET is_verified = TRUE, review_status = 'Approved', updated_at = NOW()
+          WHERE user_id = ${uid} AND is_active = TRUE AND LOWER(COALESCE(review_status, '')) != 'rejected'
+        `.catch(() => {});
+        await sql`
+          UPDATE user_kyc_profiles
+          SET status = 'Approved', updated_at = NOW()
+          WHERE user_id = ${uid} AND LOWER(COALESCE(status, '')) != 'rejected'
+        `.catch(() => {});
+        await sql`
+          UPDATE associate_enrollment
+          SET status = 'Approved', is_verified = TRUE, updated_at = NOW()
+          WHERE user_id = ${uid} OR id = ${associate?.member_id || ''}
+        `.catch(() => {});
       }
 
       await sql`
@@ -11647,13 +11734,15 @@ app.post("/api/admin/users/:id/approve",
   async (req, res) => {
     try {
       await requireMlmSchema().catch(() => { });
-      const uid = req.params.id;
+      const uidParam = req.params.id;
       const { verify_note } = req.body;
       const [user] = await sql`
         SELECT user_id, user_type, full_name, email, mobile_no, account_status, member_id, invitation_code
         FROM users
-        WHERE user_id = ${uid}`;
+        WHERE (user_id = ${Number(uidParam) || 0}) OR (member_id = ${uidParam})
+        LIMIT 1`;
       if (!user) return err(res, "User not found", 404);
+      const uid = user.user_id;
 
       const memberId = user.member_id || await genMemberID(user.user_type);
       const invCode = user.user_type === "Associate"
@@ -14855,6 +14944,19 @@ const changeAssociateStatus = async (req, res, newStatus) => {
         AND (member_id IS NULL OR member_id NOT ILIKE 'MMR-TM-%')`;
     if (!old) return err(res, "Associate not found", 404);
     await sql`UPDATE users SET account_status = ${newStatus}, updated_at = NOW() WHERE user_id = ${req.params.id}`;
+    if (newStatus === "Active") {
+      await sql`UPDATE users SET is_verified = TRUE WHERE user_id = ${req.params.id}`.catch(() => {});
+      await sql`
+        UPDATE user_documents
+        SET is_verified = TRUE, review_status = 'Approved', updated_at = NOW()
+        WHERE user_id = ${req.params.id} AND is_active = TRUE AND LOWER(COALESCE(review_status, '')) != 'rejected'
+      `.catch(() => {});
+      await sql`
+        UPDATE user_kyc_profiles
+        SET status = 'Approved', updated_at = NOW()
+        WHERE user_id = ${req.params.id} AND LOWER(COALESCE(status, '')) != 'rejected'
+      `.catch(() => {});
+    }
     try {
       await sql`
         INSERT INTO associate_status_history (associate_user_id, old_status, new_status, reason, duration_days, changed_by_admin_id)
@@ -14876,6 +14978,69 @@ app.post("/api/admin/associates/:id/suspend", verifyAdminToken, role("SuperAdmin
 app.post("/api/admin/associates/:id/activate", verifyAdminToken, role("SuperAdmin", "Admin", "FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Active"));
 app.post("/api/admin/associates/:id/blacklist", verifyAdminToken, role("SuperAdmin", "Admin", "FinanceManager"), (req, res) => changeAssociateStatus(req, res, "Blacklisted"));
 app.post("/api/admin/associates/:id/unblacklist", verifyAdminToken, role("SuperAdmin", "Admin"), (req, res) => changeAssociateStatus(req, res, "Active"));
+
+app.post(["/api/admin/users/:id/documents/approve-all", "/api/admin/users/:id/verify-documents"],
+  verifyAdminToken,
+  role("SuperAdmin", "Admin", "SupportStaff", "FinanceManager"),
+  async (req, res) => {
+    try {
+      const uidParam = req.params.id;
+      const [user] = await sql`
+        SELECT user_id, member_id, full_name FROM users
+        WHERE (user_id = ${Number(uidParam) || 0}) OR (member_id = ${uidParam})
+        LIMIT 1`;
+      if (!user) return err(res, "User not found", 404);
+      const uid = user.user_id;
+
+      await sql`
+        UPDATE user_documents
+        SET is_verified = TRUE,
+            review_status = 'Approved',
+            verified_at = NOW(),
+            updated_at = NOW(),
+            verified_by = ${req.admin?.full_name || 'Admin'}
+        WHERE user_id = ${uid} AND is_active = TRUE`;
+
+      await sql`
+        INSERT INTO user_kyc_profiles (user_id, status, reviewed_at, updated_at)
+        VALUES (${uid}, 'Approved', NOW(), NOW())
+        ON CONFLICT (user_id) DO UPDATE SET
+          status = 'Approved', reviewed_at = NOW(), updated_at = NOW()`;
+
+      await sql`
+        UPDATE users
+        SET is_verified = TRUE, updated_at = NOW()
+        WHERE user_id = ${uid}`;
+
+      return ok(res, {}, `All KYC documents for ${user.full_name} (${user.member_id || uid}) approved successfully.`);
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
+
+app.post(["/api/admin/documents/:docId/approve", "/api/admin/documents/:docId/verify"],
+  verifyAdminToken,
+  role("SuperAdmin", "Admin", "SupportStaff", "FinanceManager"),
+  async (req, res) => {
+    try {
+      const docId = Number(req.params.docId);
+      const [doc] = await sql`
+        UPDATE user_documents
+        SET is_verified = TRUE,
+            review_status = 'Approved',
+            verified_at = NOW(),
+            updated_at = NOW(),
+            verified_by = ${req.admin?.full_name || 'Admin'}
+        WHERE document_id = ${docId}
+        RETURNING *`;
+      if (!doc) return err(res, "Document not found", 404);
+      return ok(res, doc, "Document approved successfully");
+    } catch (e) {
+      return err(res, e.message);
+    }
+  }
+);
 
 app.get("/api/admin/commissions",
   verifyAdminToken,

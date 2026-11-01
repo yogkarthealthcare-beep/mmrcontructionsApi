@@ -1,7 +1,7 @@
 import express from "express";
 import multer from "multer";
 import { userAuth } from "../middleware/auth.middleware.js";
-import { getAssociatePrefillController, getAssociateTeamMembersController, getTeamMemberByIdController, createTeamMemberController, updateTeamMemberController, updateTeamMemberStatusController, finalSubmitTeamMemberController, printTeamMemberController } from "../controllers/teamMemberController.js";
+import { getAssociatePrefillController, getAssociateTeamMembersController, getTeamMemberByIdController, createTeamMemberController, updateTeamMemberController, updateTeamMemberStatusController, finalSubmitTeamMemberController, printTeamMemberController, checkUserPasswordStatusController } from "../controllers/teamMemberController.js";
 const router = express.Router();
 const upload = multer({
     storage: multer.memoryStorage(),
@@ -29,6 +29,8 @@ const uploadFields = upload.fields([
 router.get("/associates/:associateId/prefill", userAuth, getAssociatePrefillController);
 // 2. List team members scoped to an associate
 router.get("/associates/:associateId/team-members", userAuth, getAssociateTeamMembersController);
+// 2b. Check user password status
+router.get("/team-members/user-status", userAuth, checkUserPasswordStatusController);
 // 3. Get single team member record
 router.get("/team-members/:id", userAuth, getTeamMemberByIdController);
 // 4. Create new team member

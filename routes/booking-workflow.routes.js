@@ -787,9 +787,15 @@ router.get("/admin/kyc", adminAuth, async (req, res) => {
   }
 });
 
-router.patch("/admin/kyc/:userId", adminAuth, async (req, res) => {
+const handleAdminKycUpdate = async (req, res) => {
   try {
-    const userId = Number(req.params.userId);
+    let userId = Number(req.params.userId);
+    if (!userId || isNaN(userId)) {
+      const [u] = await sql`SELECT user_id FROM users WHERE member_id = ${req.params.userId} LIMIT 1`.catch(() => []);
+      if (u?.user_id) userId = u.user_id;
+    }
+    if (!userId) return fail(res, "User not found for given identifier.", 404);
+
     const status = String(req.body.status || "");
     if (!["Under Review", "Approved", "Rejected", "Submitted"].includes(status)) return fail(res, "Invalid KYC status.", 400);
 
@@ -798,6 +804,10 @@ router.patch("/admin/kyc/:userId", adminAuth, async (req, res) => {
     const adminName = req.admin?.full_name || 'Admin';
     const adminRole = 'Admin';
     const rejectReasonText = status === "Rejected" ? (req.body.remarks || "Rejected by Admin") : null;
+
+    if (status === "Approved") {
+      await sql`UPDATE users SET is_verified = TRUE, updated_at = NOW() WHERE user_id = ${userId}`.catch(() => {});
+    }
 
     const hasAuditCols = await hasCustomerApprovalAuditColumns(sql);
     let profile;
@@ -868,7 +878,10 @@ router.patch("/admin/kyc/:userId", adminAuth, async (req, res) => {
   } catch (error) {
     return fail(res, error.message);
   }
-});
+};
+
+router.patch("/admin/kyc/:userId", adminAuth, handleAdminKycUpdate);
+router.put("/admin/kyc/:userId", adminAuth, handleAdminKycUpdate);
 
 router.get("/admin/booking-workflow/alerts", adminAuth, async (_req, res) => {
   try {

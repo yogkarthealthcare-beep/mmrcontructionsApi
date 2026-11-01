@@ -971,6 +971,8 @@ export async function getTeamMembersByAssociate(associateId, options = {}) {
     `;
         rows = await sql `
       SELECT tm.*,
+             (u.password_hash IS NOT NULL AND LENGTH(u.password_hash) > 0) AS has_password,
+             (u.user_id IS NOT NULL) AS is_self_registered,
              COALESCE(pur.total_purchased_plots, 0)::int AS total_purchased_plots,
              COALESCE(pur.total_purchased_plots, 0)::int AS purchased_plots_count,
              COALESCE(pur.total_purchased_amount, 0)::numeric AS total_purchased_amount,
@@ -1051,6 +1053,8 @@ export async function getTeamMembersByAssociate(associateId, options = {}) {
     `;
         rows = await sql `
       SELECT tm.*,
+             (u.password_hash IS NOT NULL AND LENGTH(u.password_hash) > 0) AS has_password,
+             (u.user_id IS NOT NULL) AS is_self_registered,
              COALESCE(pur.total_purchased_plots, 0)::int AS total_purchased_plots,
              COALESCE(pur.total_purchased_plots, 0)::int AS purchased_plots_count,
              COALESCE(pur.total_purchased_amount, 0)::numeric AS total_purchased_amount,
@@ -1124,6 +1128,8 @@ export async function getTeamMembersByAssociate(associateId, options = {}) {
     `;
         rows = await sql `
       SELECT tm.*,
+             (u.password_hash IS NOT NULL AND LENGTH(u.password_hash) > 0) AS has_password,
+             (u.user_id IS NOT NULL) AS is_self_registered,
              COALESCE(pur.total_purchased_plots, 0)::int AS total_purchased_plots,
              COALESCE(pur.total_purchased_plots, 0)::int AS purchased_plots_count,
              COALESCE(pur.total_purchased_amount, 0)::numeric AS total_purchased_amount,
@@ -1191,6 +1197,8 @@ export async function getTeamMembersByAssociate(associateId, options = {}) {
     `;
         rows = await sql `
       SELECT tm.*,
+             (u.password_hash IS NOT NULL AND LENGTH(u.password_hash) > 0) AS has_password,
+             (u.user_id IS NOT NULL) AS is_self_registered,
              COALESCE(pur.total_purchased_plots, 0)::int AS total_purchased_plots,
              COALESCE(pur.total_purchased_plots, 0)::int AS purchased_plots_count,
              COALESCE(pur.total_purchased_amount, 0)::numeric AS total_purchased_amount,
@@ -1276,16 +1284,34 @@ export async function getTeamMemberById(id, authUserId, isAdmin = false) {
     if (String(id).toLowerCase() === "me") {
         if (!authUserId)
             return null;
-        rows = await sql `SELECT * FROM team_members WHERE user_id = ${Number(authUserId)} LIMIT 1`;
+        rows = await sql `
+          SELECT tm.*,
+                 (u.password_hash IS NOT NULL AND LENGTH(u.password_hash) > 0) AS has_password,
+                 (u.user_id IS NOT NULL) AS is_self_registered
+          FROM team_members tm
+          LEFT JOIN users u ON u.user_id = tm.user_id
+          WHERE tm.user_id = ${Number(authUserId)} LIMIT 1`;
     }
     else {
         const numId = Number(id);
         if (isNaN(numId)) {
             // Match by team_member_uid
-            rows = await sql `SELECT * FROM team_members WHERE team_member_uid = ${String(id)} LIMIT 1`;
+            rows = await sql `
+              SELECT tm.*,
+                     (u.password_hash IS NOT NULL AND LENGTH(u.password_hash) > 0) AS has_password,
+                     (u.user_id IS NOT NULL) AS is_self_registered
+              FROM team_members tm
+              LEFT JOIN users u ON u.user_id = tm.user_id
+              WHERE tm.team_member_uid = ${String(id)} LIMIT 1`;
         }
         else {
-            rows = await sql `SELECT * FROM team_members WHERE id = ${numId} OR team_member_uid = ${String(id)} LIMIT 1`;
+            rows = await sql `
+              SELECT tm.*,
+                     (u.password_hash IS NOT NULL AND LENGTH(u.password_hash) > 0) AS has_password,
+                     (u.user_id IS NOT NULL) AS is_self_registered
+              FROM team_members tm
+              LEFT JOIN users u ON u.user_id = tm.user_id
+              WHERE tm.id = ${numId} OR tm.team_member_uid = ${String(id)} OR tm.user_id = ${numId} LIMIT 1`;
         }
     }
     if (!rows || rows.length === 0)
@@ -1887,4 +1913,38 @@ export async function approveTeamMemberByAssociate(associateId, targetId, signat
         };
     });
     return approvedRecord;
+}
+
+/**
+ * 9. Check if a team member or user already has a login password set
+ */
+export async function checkUserPasswordStatus(query = {}) {
+    const { userId, mobile, email, memberId } = query || {};
+    const cleanMobile = mobile ? String(mobile).replace(/\D/g, '').slice(-10) : null;
+    const cleanEmail = email ? String(email).trim().toLowerCase() : null;
+    const cleanUserId = Number(userId) || null;
+    const cleanMemberId = memberId ? String(memberId).trim().toUpperCase() : null;
+
+    if (!cleanUserId && !cleanMobile && !cleanEmail && !cleanMemberId) {
+        return { has_password: false, exists: false };
+    }
+
+    const [u] = await sql`
+      SELECT user_id, member_id, full_name, mobile_no, email,
+             (password_hash IS NOT NULL AND LENGTH(password_hash) > 0) AS has_password
+      FROM users
+      WHERE (user_id = ${cleanUserId} AND ${Boolean(cleanUserId)})
+         OR (RIGHT(regexp_replace(mobile_no, '\\D', '', 'g'), 10) = ${cleanMobile} AND ${Boolean(cleanMobile)})
+         OR (LOWER(email) = ${cleanEmail} AND ${Boolean(cleanEmail)})
+         OR (UPPER(member_id) = ${cleanMemberId} AND ${Boolean(cleanMemberId)})
+      LIMIT 1
+    `.catch(() => []);
+
+    return {
+        has_password: Boolean(u?.has_password),
+        exists: Boolean(u),
+        user_id: u?.user_id || null,
+        member_id: u?.member_id || null,
+        full_name: u?.full_name || null
+    };
 }

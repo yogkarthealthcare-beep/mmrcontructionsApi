@@ -745,7 +745,20 @@ export async function updateAdminAssociateEnrollment(req, res) {
       LIMIT 1
     `;
         const targetId = existing ? existing.id : (matchedUser?.member_id || (rawId.startsWith('MMR-ASC-') ? rawId : `MMR-ASC-${String(matchedUser?.user_id || 1).padStart(4, '0')}`));
-        const targetUserId = matchedUser ? matchedUser.user_id : (Number(rawId) || null);
+        let targetUserId = matchedUser ? matchedUser.user_id : (existing?.user_id || (Number(rawId) || null));
+        if (!targetUserId && (existing?.email || existing?.contact_no_1 || b.email || b.contact_1 || b.mobile_no || b.contact_primary || rawId)) {
+            const [fallbackUser] = await sql`
+                SELECT user_id, member_id FROM users
+                WHERE member_id = ${rawId}
+                   OR member_id = ${targetId}
+                   OR (email IS NOT NULL AND LOWER(email) = LOWER(${existing?.email || b.email || ''}))
+                   OR (mobile_no IS NOT NULL AND mobile_no = ${existing?.contact_no_1 || b.contact_1 || b.mobile_no || b.contact_primary || ''})
+                LIMIT 1
+            `.catch(() => []);
+            if (fallbackUser?.user_id) {
+                targetUserId = fallbackUser.user_id;
+            }
+        }
         // 3. Process uploaded files if any
         let applicantPhotoUrl = null;
         const applicantFile = files?.["applicantPhoto"]?.[0];
@@ -1090,6 +1103,14 @@ export async function updateAdminAssociateEnrollment(req, res) {
             VALUES (${targetUserId}, 'Approved', NOW(), NOW())
             ON CONFLICT (user_id) DO UPDATE SET
               status = 'Approved', reviewed_at = NOW(), updated_at = NOW()
+          `.catch(() => { });
+                    await tx `
+            UPDATE users SET
+              is_verified = TRUE,
+              account_status = 'Active',
+              enrollment_status = 'Completed',
+              updated_at = NOW()
+            WHERE user_id = ${targetUserId}
           `.catch(() => { });
                 }
             }
