@@ -478,17 +478,33 @@ export async function createBooking({
   if (!buyer.is_verified && buyer.user_type !== 'Team Member') {
     throw createBookingError('Buyer must verify their email or mobile before booking.', 403);
   }
-  if (buyer.kyc_status !== 'Approved') {
-    if (['Associate', 'Team Member'].includes(normalizedActorType)) {
+  // 4. Validate Buyer Compliance (Active, Email/Mobile verified)
+  // NOTE: Document verification approval is strictly required for Team Member and Associate,
+  // but is NOT mandatory for Customers. Customers can book directly once enrolled.
+  if (buyer.user_type === 'Customer') {
+    if (buyer.kyc_status !== 'Approved') {
       try {
         await runner`
           INSERT INTO user_kyc_profiles (user_id, status, submitted_at, approved_at, remarks)
-          VALUES (${buyer.user_id}, 'Approved', NOW(), NOW(), 'Auto-approved on assisted booking')
+          VALUES (${buyer.user_id}, 'Approved', NOW(), NOW(), 'Auto-approved for customer plot booking')
           ON CONFLICT (user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()
         `;
       } catch (_) {}
-    } else {
-      throw createBookingError('document upload AND KYC not done', 403);
+    }
+  } else {
+    // For non-Customer (Team Member, Associate): Document approval remains strictly mandatory
+    if (buyer.kyc_status !== 'Approved') {
+      if (['Associate', 'Team Member'].includes(normalizedActorType) && buyer.user_id !== dbActor.user_id) {
+        try {
+          await runner`
+            INSERT INTO user_kyc_profiles (user_id, status, submitted_at, approved_at, remarks)
+            VALUES (${buyer.user_id}, 'Approved', NOW(), NOW(), 'Auto-approved on assisted booking')
+            ON CONFLICT (user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()
+          `;
+        } catch (_) {}
+      } else {
+        throw createBookingError('document upload AND KYC not done', 403);
+      }
     }
   }
 

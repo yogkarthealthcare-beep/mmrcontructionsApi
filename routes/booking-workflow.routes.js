@@ -67,7 +67,7 @@ async function settings() {
 async function compliance(userId) {
   const [row] = await sql`
     SELECT
-      u.user_id, u.full_name, u.email, u.mobile_no, u.account_status, u.is_active,
+      u.user_id, u.full_name, u.email, u.mobile_no, u.account_status, u.is_active, u.user_type,
       (COALESCE(u.email_verified, FALSE) OR COALESCE(u.is_otp_verified, FALSE)) AS email_verified,
       COALESCE(k.status, 'Not Submitted') AS kyc_status,
       k.admin_remarks AS kyc_remarks,
@@ -76,22 +76,25 @@ async function compliance(userId) {
     LEFT JOIN user_kyc_profiles k ON k.user_id = u.user_id
     WHERE u.user_id = ${userId}`;
   if (!row) return null;
+  const isCustomer = String(row.user_type || '').toLowerCase() === 'customer';
   return {
     ...row,
     account_active: ["Active", "Approved"].includes(String(row.account_status)) && row.is_active !== false,
-    kyc_approved: row.kyc_status === "Approved",
+    kyc_approved: isCustomer ? true : row.kyc_status === "Approved",
     can_book:
       ["Active", "Approved"].includes(String(row.account_status)) &&
       row.is_active !== false &&
       row.email_verified === true &&
-      row.kyc_status === "Approved",
+      (isCustomer ? true : row.kyc_status === "Approved"),
   };
 }
 
 function complianceFailure(result) {
   if (!result?.account_active) return ["Your account must be active before booking a plot.", "ACCOUNT_INACTIVE"];
   if (!result.email_verified) return ["Please verify your email address before booking a plot.", "EMAIL_NOT_VERIFIED"];
-  if (result.kyc_status !== "Approved") {
+  const isCustomer = String(result.user_type || '').toLowerCase() === 'customer';
+  // Document verification is NOT mandatory for Customers:
+  if (!isCustomer && result.kyc_status !== "Approved") {
     return [
       "Your KYC documents are not approved yet. Please upload the required documents and wait for admin approval before booking any plot.",
       "KYC_NOT_APPROVED",

@@ -314,13 +314,26 @@ router.post(
     try {
       const type = String(req.body.type || "").trim().toLowerCase();
       const title = String(req.body.title || "").trim();
-      const showInAdvertisement = req.body.showInAdvertisement === "true" || req.body.showInAdvertisement === true;
-      const isActive = req.body.isActive === undefined ? true : (req.body.isActive === "true" || req.body.isActive === true);
-      const sortOrder = parseInt(req.body.sortOrder) || 0;
-      const startDate = req.body.startDate ? new Date(req.body.startDate) : null;
-      const endDate = req.body.endDate ? new Date(req.body.endDate) : null;
-      const ctaLink = req.body.ctaLink ? String(req.body.ctaLink).trim() : null;
-      const ctaLabel = req.body.ctaLabel ? String(req.body.ctaLabel).trim() : null;
+      const rawShowAd = req.body.showInAdvertisement !== undefined ? req.body.showInAdvertisement : req.body.show_in_advertisement;
+      const showInAdvertisement = rawShowAd === "true" || rawShowAd === true;
+
+      const rawIsActive = req.body.isActive !== undefined ? req.body.isActive : req.body.is_active;
+      const isActive = rawIsActive === undefined ? true : (rawIsActive === "true" || rawIsActive === true);
+
+      const rawSortOrder = req.body.sortOrder !== undefined ? req.body.sortOrder : req.body.sort_order;
+      const sortOrder = parseInt(rawSortOrder) || 0;
+
+      const rawStartDate = req.body.startDate !== undefined ? req.body.startDate : req.body.start_date;
+      const startDate = rawStartDate ? new Date(rawStartDate) : null;
+
+      const rawEndDate = req.body.endDate !== undefined ? req.body.endDate : req.body.end_date;
+      const endDate = rawEndDate ? new Date(rawEndDate) : null;
+
+      const rawCtaLink = req.body.ctaLink !== undefined ? req.body.ctaLink : req.body.cta_link;
+      const ctaLink = rawCtaLink ? String(rawCtaLink).trim() : null;
+
+      const rawCtaLabel = req.body.ctaLabel !== undefined ? req.body.ctaLabel : req.body.cta_label;
+      const ctaLabel = rawCtaLabel ? String(rawCtaLabel).trim() : null;
 
       if (!["image", "youtube", "video"].includes(type)) {
         return fail(res, "Type must be 'image', 'youtube', or 'video'", 400);
@@ -478,28 +491,41 @@ router.put(
 
       const newType = req.body.type ? String(req.body.type).trim().toLowerCase() : existing.type;
       const newTitle = req.body.title !== undefined ? String(req.body.title).trim() : existing.title;
+      const rawShowAd = req.body.showInAdvertisement !== undefined ? req.body.showInAdvertisement : req.body.show_in_advertisement;
       const showInAdvertisement =
-        req.body.showInAdvertisement !== undefined
-          ? req.body.showInAdvertisement === "true" || req.body.showInAdvertisement === true
+        rawShowAd !== undefined
+          ? rawShowAd === "true" || rawShowAd === true
           : existing.show_in_advertisement;
+
+      const rawIsActive = req.body.isActive !== undefined ? req.body.isActive : req.body.is_active;
       const isActive =
-        req.body.isActive !== undefined
-          ? req.body.isActive === "true" || req.body.isActive === true
+        rawIsActive !== undefined
+          ? rawIsActive === "true" || rawIsActive === true
           : existing.is_active;
+
+      const rawSortOrder = req.body.sortOrder !== undefined ? req.body.sortOrder : req.body.sort_order;
       const sortOrder =
-        req.body.sortOrder !== undefined ? parseInt(req.body.sortOrder) || 0 : existing.sort_order;
+        rawSortOrder !== undefined ? parseInt(rawSortOrder) || 0 : existing.sort_order;
+
+      const rawStartDate = req.body.startDate !== undefined ? req.body.startDate : req.body.start_date;
       const startDate =
-        req.body.startDate !== undefined
-          ? req.body.startDate ? new Date(req.body.startDate) : null
+        rawStartDate !== undefined
+          ? rawStartDate ? new Date(rawStartDate) : null
           : existing.start_date;
+
+      const rawEndDate = req.body.endDate !== undefined ? req.body.endDate : req.body.end_date;
       const endDate =
-        req.body.endDate !== undefined
-          ? req.body.endDate ? new Date(req.body.endDate) : null
+        rawEndDate !== undefined
+          ? rawEndDate ? new Date(rawEndDate) : null
           : existing.end_date;
+
+      const rawCtaLink = req.body.ctaLink !== undefined ? req.body.ctaLink : req.body.cta_link;
       const ctaLink =
-        req.body.ctaLink !== undefined ? (req.body.ctaLink ? String(req.body.ctaLink).trim() : null) : existing.cta_link;
+        rawCtaLink !== undefined ? (rawCtaLink ? String(rawCtaLink).trim() : null) : existing.cta_link;
+
+      const rawCtaLabel = req.body.ctaLabel !== undefined ? req.body.ctaLabel : req.body.cta_label;
       const ctaLabel =
-        req.body.ctaLabel !== undefined ? (req.body.ctaLabel ? String(req.body.ctaLabel).trim() : null) : existing.cta_label;
+        rawCtaLabel !== undefined ? (rawCtaLabel ? String(rawCtaLabel).trim() : null) : existing.cta_label;
 
       let updatedUrl = existing.url;
       let updatedStoragePath = existing.storage_path;
@@ -724,28 +750,41 @@ router.patch("/admin/gallery/:id/advertisement", adminAuth, async (req, res) => 
     const [existing] = await sql`SELECT * FROM gallery_items WHERE id = ${id}`;
     if (!existing) return fail(res, "Gallery item not found", 404);
 
+    const rawShowAd = req.body.showInAdvertisement !== undefined ? req.body.showInAdvertisement : req.body.show_in_advertisement;
     const showInAdvertisement =
-      req.body.showInAdvertisement !== undefined
-        ? req.body.showInAdvertisement === "true" || req.body.showInAdvertisement === true
+      rawShowAd !== undefined
+        ? rawShowAd === "true" || rawShowAd === true
         : existing.show_in_advertisement;
+
+    const rawSortOrder = req.body.sortOrder !== undefined ? req.body.sortOrder : req.body.sort_order;
     const sortOrder =
-      req.body.sortOrder !== undefined ? parseInt(req.body.sortOrder) || 0 : existing.sort_order;
+      rawSortOrder !== undefined ? parseInt(rawSortOrder) || 0 : existing.sort_order;
+
+    const rawIsActive = req.body.isActive !== undefined ? req.body.isActive : req.body.is_active;
     const isActive =
-      req.body.isActive !== undefined
-        ? req.body.isActive === "true" || req.body.isActive === true
+      rawIsActive !== undefined
+        ? rawIsActive === "true" || rawIsActive === true
         : existing.is_active;
+
+    const rawStartDate = req.body.startDate !== undefined ? req.body.startDate : req.body.start_date;
     const startDate =
-      req.body.startDate !== undefined
-        ? req.body.startDate ? new Date(req.body.startDate) : null
+      rawStartDate !== undefined
+        ? rawStartDate ? new Date(rawStartDate) : null
         : existing.start_date;
+
+    const rawEndDate = req.body.endDate !== undefined ? req.body.endDate : req.body.end_date;
     const endDate =
-      req.body.endDate !== undefined
-        ? req.body.endDate ? new Date(req.body.endDate) : null
+      rawEndDate !== undefined
+        ? rawEndDate ? new Date(rawEndDate) : null
         : existing.end_date;
+
+    const rawCtaLink = req.body.ctaLink !== undefined ? req.body.ctaLink : req.body.cta_link;
     const ctaLink =
-      req.body.ctaLink !== undefined ? (req.body.ctaLink ? String(req.body.ctaLink).trim() : null) : existing.cta_link;
+      rawCtaLink !== undefined ? (rawCtaLink ? String(rawCtaLink).trim() : null) : existing.cta_link;
+
+    const rawCtaLabel = req.body.ctaLabel !== undefined ? req.body.ctaLabel : req.body.cta_label;
     const ctaLabel =
-      req.body.ctaLabel !== undefined ? (req.body.ctaLabel ? String(req.body.ctaLabel).trim() : null) : existing.cta_label;
+      rawCtaLabel !== undefined ? (rawCtaLabel ? String(rawCtaLabel).trim() : null) : existing.cta_label;
 
     const [updated] = await sql`
       UPDATE gallery_items SET
