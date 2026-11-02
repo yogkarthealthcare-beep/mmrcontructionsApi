@@ -736,6 +736,319 @@ async function computeDistributionForBooking(bookingId) {
 }
 
 /**
+ * 1.5. GET /api/admin/payment-settlements/emi-installments
+ * Lists all customer EMI installments with rich customer, plot, and attribution details,
+ * prioritizing submitted payment proofs awaiting admin verification & release.
+ */
+router.get(
+  ['/admin/payment-settlements/emi-installments', '/api/admin/payment-settlements/emi-installments'],
+  verifyAdminToken,
+  async (req, res) => {
+    try {
+      const {
+        search = '',
+        status = 'ALL',
+        page = 1,
+        limit = 15
+      } = req.query;
+
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, Math.min(100, parseInt(limit, 10) || 15));
+      const offset = (pageNum - 1) * limitNum;
+
+      const q = String(search || '').trim();
+      const searchFilter = q ? sql`
+        AND (
+          b.booking_serial ILIKE ${'%' + q + '%'}
+          OR CAST(b.booking_id AS TEXT) ILIKE ${'%' + q + '%'}
+          OR u.full_name ILIKE ${'%' + q + '%'}
+          OR u.member_id ILIKE ${'%' + q + '%'}
+          OR u.mobile_no ILIKE ${'%' + q + '%'}
+          OR p.plot_number ILIKE ${'%' + q + '%'}
+          OR s.site_name ILIKE ${'%' + q + '%'}
+          OR tm.full_name ILIKE ${'%' + q + '%'}
+          OR tm.member_id ILIKE ${'%' + q + '%'}
+          OR asc_u.full_name ILIKE ${'%' + q + '%'}
+          OR asc_u.member_id ILIKE ${'%' + q + '%'}
+          OR EXISTS (
+            SELECT 1 FROM emi_payment_proofs ep
+            WHERE ep.emi_id = e.emi_id AND (ep.reference_no ILIKE ${'%' + q + '%'} OR ep.payment_mode ILIKE ${'%' + q + '%'})
+          )
+        )
+      ` : sql``;
+
+      let statusFilter = sql``;
+      const st = String(status || 'ALL').toUpperCase();
+      if (st === 'VERIFICATION' || st === 'PROOFSUBMITTED') {
+        statusFilter = sql`AND e.emi_status = 'ProofSubmitted'`;
+      } else if (st === 'PENDING') {
+        statusFilter = sql`AND e.emi_status = 'Pending'`;
+      } else if (st === 'PAID') {
+        statusFilter = sql`AND e.emi_status = 'Paid'`;
+      } else if (st === 'OVERDUE') {
+        statusFilter = sql`AND e.emi_status = 'Overdue'`;
+      }
+
+      // 1. Fetch KPI metrics
+      const [kpiRow] = await sql`
+        SELECT
+          COUNT(e.emi_id)::int AS total_emis,
+          COUNT(e.emi_id) FILTER (WHERE e.emi_status = 'ProofSubmitted')::int AS verification_count,
+          COUNT(e.emi_id) FILTER (WHERE e.emi_status = 'Pending')::int AS pending_count,
+          COUNT(e.emi_id) FILTER (WHERE e.emi_status = 'Paid')::int AS paid_count,
+          COUNT(e.emi_id) FILTER (WHERE e.emi_status = 'Overdue')::int AS overdue_count,
+          COALESCE(SUM(e.paid_amount) FILTER (WHERE e.emi_status = 'Paid'), 0)::numeric AS total_collected_amount
+        FROM emi_schedules e
+        JOIN bookings b ON e.booking_id = b.booking_id
+        LEFT JOIN users u ON b.user_id = u.user_id
+        LEFT JOIN plots p ON b.plot_id = p.plot_id
+        LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
+        LEFT JOIN users tm ON b.sold_by_user_id = tm.user_id
+        LEFT JOIN users asc_u ON b.associate_user_id = asc_u.user_id
+        WHERE TRUE
+        ${searchFilter}
+      `;
+
+      // 2. Count for current filtered view
+      const [totalRow] = await sql`
+        SELECT COUNT(e.emi_id)::int AS count
+        FROM emi_schedules e
+        JOIN bookings b ON e.booking_id = b.booking_id
+        LEFT JOIN users u ON b.user_id = u.user_id
+        LEFT JOIN plots p ON b.plot_id = p.plot_id
+        LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
+        LEFT JOIN users tm ON b.sold_by_user_id = tm.user_id
+        LEFT JOIN users asc_u ON b.associate_user_id = asc_u.user_id
+        WHERE TRUE
+        ${searchFilter}
+        ${statusFilter}
+      `;
+      const totalCount = totalRow?.count || 0;
+
+      // 3. Fetch paginated list
+      const rows = await sql`
+        SELECT 
+          e.emi_id,
+          e.installment_no,
+          e.due_date,
+          e.emi_amount::numeric,
+          e.late_fee_amount::numeric,
+          e.total_due::numeric,
+          e.paid_amount::numeric,
+          e.paid_date,
+          e.emi_status,
+          e.voucher_file_path,
+          e.confirmed_at,
+          e.created_at,
+          -- Booking & Plot
+          b.booking_id,
+          b.booking_serial,
+          b.booking_date,
+          b.advance_amount::numeric,
+          b.base_price::numeric AS total_plot_price,
+          b.payment_type,
+          p.plot_id,
+          p.plot_number,
+          p.plot_area,
+          s.site_id,
+          s.site_name,
+          s.city AS site_city,
+          -- Customer
+          u.user_id AS customer_id,
+          u.full_name AS customer_name,
+          u.member_id AS customer_member_id,
+          u.mobile_no AS customer_mobile,
+          u.email AS customer_email,
+          -- Attribution
+          tm.user_id AS team_member_user_id,
+          tm.full_name AS team_member_name,
+          tm.member_id AS team_member_member_id,
+          tm.mobile_no AS team_member_mobile,
+          asc_u.user_id AS associate_user_id,
+          asc_u.full_name AS associate_name,
+          asc_u.member_id AS associate_member_id,
+          asc_u.mobile_no AS associate_mobile,
+          -- Proof details
+          (
+            SELECT ep.file_path FROM emi_payment_proofs ep
+            WHERE ep.emi_id = e.emi_id ORDER BY ep.proof_id DESC LIMIT 1
+          ) AS proof_file_path,
+          (
+            SELECT ep.reference_no FROM emi_payment_proofs ep
+            WHERE ep.emi_id = e.emi_id ORDER BY ep.proof_id DESC LIMIT 1
+          ) AS proof_reference_no,
+          (
+            SELECT ep.payment_mode FROM emi_payment_proofs ep
+            WHERE ep.emi_id = e.emi_id ORDER BY ep.proof_id DESC LIMIT 1
+          ) AS proof_payment_mode,
+          (
+            SELECT ep.uploaded_at FROM emi_payment_proofs ep
+            WHERE ep.emi_id = e.emi_id ORDER BY ep.proof_id DESC LIMIT 1
+          ) AS proof_uploaded_at
+        FROM emi_schedules e
+        JOIN bookings b ON e.booking_id = b.booking_id
+        LEFT JOIN users u ON b.user_id = u.user_id
+        LEFT JOIN plots p ON b.plot_id = p.plot_id
+        LEFT JOIN sites s ON COALESCE(b.site_id, p.site_id) = s.site_id
+        LEFT JOIN users tm ON b.sold_by_user_id = tm.user_id
+        LEFT JOIN users asc_u ON b.associate_user_id = asc_u.user_id
+        WHERE TRUE
+        ${searchFilter}
+        ${statusFilter}
+        ORDER BY 
+          CASE 
+            WHEN e.emi_status = 'ProofSubmitted' THEN 1
+            WHEN e.emi_status = 'Overdue' THEN 2
+            WHEN e.emi_status = 'Pending' THEN 3
+            WHEN e.emi_status = 'Paid' THEN 4
+            ELSE 5 
+          END,
+          e.due_date ASC
+        LIMIT ${limitNum} OFFSET ${offset}
+      `;
+
+      return ok(res, {
+        installments: rows,
+        metrics: kpiRow || {
+          total_emis: 0,
+          verification_count: 0,
+          pending_count: 0,
+          paid_count: 0,
+          overdue_count: 0,
+          total_collected_amount: 0
+        },
+        pagination: {
+          total: totalCount,
+          page: pageNum,
+          limit: limitNum,
+          pages: Math.ceil(totalCount / limitNum) || 1
+        }
+      });
+    } catch (e) {
+      console.error('[PaymentSettlement] EMI Installments error:', e);
+      return err(res, e.message || 'Failed to list EMI installments', 400);
+    }
+  }
+);
+
+/**
+ * 1.6. POST /api/admin/payment-settlements/emi-installments/:id/release
+ * Approves and releases an EMI installment payment, verifies payment_ledger,
+ * generates an official payment voucher, and executes commission distribution.
+ */
+router.post(
+  ['/admin/payment-settlements/emi-installments/:id/release', '/api/admin/payment-settlements/emi-installments/:id/release'],
+  verifyAdminToken,
+  role('SuperAdmin', 'Admin', 'FinanceManager'),
+  async (req, res) => {
+    try {
+      const emiId = Number(req.params.id);
+      if (!emiId || emiId <= 0) return err(res, 'Invalid EMI installment ID', 400);
+
+      const adminId = req.admin?.admin_id || 1;
+      const adminName = req.admin?.full_name || req.admin?.username || 'Admin';
+
+      const result = await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(${emiId})`;
+
+        const [emi] = await tx`
+          SELECT e.*, b.plot_id, b.site_id, b.booking_serial, u.full_name AS customer_name
+          FROM emi_schedules e
+          JOIN bookings b ON e.booking_id = b.booking_id
+          LEFT JOIN users u ON b.user_id = u.user_id
+          WHERE e.emi_id = ${emiId} FOR UPDATE
+        `;
+
+        if (!emi) throw new Error('EMI installment not found');
+        if (emi.emi_status === 'Paid') {
+          return {
+            already_paid: true,
+            message: `Installment #${emi.installment_no} is already marked as Paid.`
+          };
+        }
+
+        const paidAmount = Number(req.body?.paid_amount || emi.total_due || emi.emi_amount || 0);
+        const lateFee = new Date() > new Date(emi.due_date)
+          ? Math.round(Number(emi.emi_amount || 0) * 0.05 * 100) / 100
+          : 0;
+
+        // Voucher serial sequence
+        const [seq] = await tx`
+          SELECT COALESCE(MAX(CAST(REPLACE(voucher_serial, 'U-', '') AS INT)), 0) + 1 AS n
+          FROM payment_vouchers WHERE voucher_serial LIKE 'U-%'
+        `;
+        const vSerial = `U-${seq.n}`;
+        const voucherPath = `vouchers/${vSerial}.pdf`;
+
+        // 1. Update EMI schedule
+        await tx`
+          UPDATE emi_schedules SET
+            emi_status = 'Paid',
+            paid_amount = ${paidAmount},
+            paid_date = CURRENT_DATE,
+            late_fee_amount = ${lateFee},
+            voucher_file_path = ${voucherPath},
+            confirmed_by_admin_id = ${adminId},
+            confirmed_at = NOW(),
+            updated_at = NOW()
+          WHERE emi_id = ${emiId}
+        `;
+
+        // 2. Synchronize payment_ledger
+        await tx`
+          UPDATE payment_ledger SET
+            payment_status = 'Approved',
+            verification_status = 'Verified',
+            verified_by_admin_id = ${adminId},
+            approved_by_admin_id = ${adminId},
+            updated_at = NOW()
+          WHERE booking_id = ${emi.booking_id}
+            AND payment_purpose = 'EmiPayment'
+            AND (payment_status = 'Submitted' OR verification_status = 'Pending')
+        `.catch(() => {});
+
+        // 3. Create payment voucher
+        await tx`
+          INSERT INTO payment_vouchers (voucher_serial, voucher_type, reference_id, user_id, amount, generated_by_admin_id)
+          VALUES (${vSerial}, 'EMI', ${emiId}, ${emi.user_id}, ${paidAmount + lateFee}, ${adminId})
+        `.catch(() => {});
+
+        // 4. Distribute commission via MLM Engine
+        let commissionResult = null;
+        try {
+          commissionResult = await commissionService.generateCommissionForPayment({
+            bookingId: emi.booking_id,
+            sourceType: 'EmiPayment',
+            sourceId: `emi-${emiId}`,
+            receivedAmount: paidAmount,
+            paymentType: 'EMI'
+          });
+        } catch (commErr) {
+          console.warn('[PaymentSettlement] EMI Commission generation notice:', commErr.message);
+        }
+
+        return {
+          emi_id: emiId,
+          installment_no: emi.installment_no,
+          paid_amount: paidAmount,
+          voucher_serial: vSerial,
+          commission_result: commissionResult
+        };
+      });
+
+      return ok(
+        res,
+        result,
+        `Installment #${result.installment_no} approved and settlement released successfully!`
+      );
+    } catch (e) {
+      console.error('[PaymentSettlement] EMI Release error:', e);
+      return err(res, e.message || 'Failed to release EMI settlement', 400);
+    }
+  }
+);
+
+/**
  * 2. GET /api/admin/payment-settlements/:id/preview
  * Returns full recipient-wise breakdown before final release confirmation.
  */
