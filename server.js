@@ -6895,7 +6895,9 @@ app.get("/api/public/sites/availability-summary", publicApiLimiter, async (req, 
     const summary = await sql`
       SELECT 
         s.site_id,
-        s.site_name,
+        TRIM(s.site_name) AS site_name,
+        s.city,
+        s.state,
         COALESCE(s.full_address, s.city, s.state, '') AS location,
         s.map_image_url,
         COUNT(p.plot_id)::int AS total,
