@@ -50,8 +50,8 @@ router.get(
                COALESCE(u.mobile_no, '') AS customer_mobile,
                COALESCE(u.email, '') AS customer_email,
                COALESCE(p.plot_number, b.plot_number, 'Plot') AS plot_number,
-               COALESCE(p.monthly_emi, b.monthly_emi, 0)::numeric AS plot_monthly_emi,
-               COALESCE(p.emi_tenure_months, b.emi_tenure_months, 60)::int AS plot_emi_tenure,
+               COALESCE(p.monthly_emi, 0)::numeric AS plot_monthly_emi,
+               COALESCE(p.emi_tenure_months, 60)::int AS plot_emi_tenure,
                COALESCE(s.site_name, s2.site_name, 'Project Site') AS site_name
         FROM bookings b
         LEFT JOIN users u ON u.user_id = b.user_id
