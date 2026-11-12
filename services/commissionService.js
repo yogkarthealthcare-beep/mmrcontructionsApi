@@ -136,30 +136,52 @@ export function buildCanonicalEventKey({ bookingId, sourceType, sourceId, eventK
  * Ensure canonical schema additions exist in database (idempotent helper)
  */
 export async function ensureCommissionSchemaExtensions(db = sql) {
+  // Check information_schema first before ALTER TABLE so active transactions never acquire AccessExclusiveLock unnecessarily
   await db`
-    ALTER TABLE bookings
-    ADD COLUMN IF NOT EXISTS plot_area NUMERIC(12,2) DEFAULT 0
-  `.catch(() => {});
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'bookings' AND column_name = 'plot_area'
+      ) THEN
+        ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(12,2) DEFAULT 0;
+      END IF;
 
-  await db`
-    ALTER TABLE commission_source_events
-    ADD COLUMN IF NOT EXISTS event_key TEXT,
-    ADD COLUMN IF NOT EXISTS undistributed_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS settings_snapshot JSONB
-  `.catch(() => {});
+      IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'commission_source_events')
+         AND NOT EXISTS (
+           SELECT 1 FROM information_schema.columns
+           WHERE table_name = 'commission_source_events' AND column_name = 'settings_snapshot'
+         ) THEN
+        ALTER TABLE commission_source_events
+          ADD COLUMN IF NOT EXISTS event_key TEXT,
+          ADD COLUMN IF NOT EXISTS undistributed_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS settings_snapshot JSONB;
+      END IF;
 
-  await db`
-    ALTER TABLE commission_transactions
-    ADD COLUMN IF NOT EXISTS event_key TEXT,
-    ADD COLUMN IF NOT EXISTS needs_review BOOLEAN NOT NULL DEFAULT FALSE,
-    ADD COLUMN IF NOT EXISTS review_reason TEXT,
-    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW(),
-    ADD COLUMN IF NOT EXISTS approved_by_admin_id INT,
-    ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS payment_reference TEXT,
-    ADD COLUMN IF NOT EXISTS notes TEXT
-  `.catch(() => {});
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'commission_transactions' AND column_name = 'notes'
+      ) OR NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'commission_transactions' AND column_name = 'needs_review'
+      ) THEN
+        ALTER TABLE commission_transactions
+          ADD COLUMN IF NOT EXISTS event_key TEXT,
+          ADD COLUMN IF NOT EXISTS needs_review BOOLEAN NOT NULL DEFAULT FALSE,
+          ADD COLUMN IF NOT EXISTS review_reason TEXT,
+          ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW(),
+          ADD COLUMN IF NOT EXISTS approved_by_admin_id INT,
+          ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS payment_reference TEXT,
+          ADD COLUMN IF NOT EXISTS notes TEXT;
+      END IF;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE NOTICE '[Commission] Schema column extension notice: %', SQLERRM;
+    END $$;
+  `.catch((e) => {
+    console.warn('[Commission] Schema extension check notice:', e.message);
+  });
 
   // Convert legacy enum-backed columns to VARCHAR(50) so all commission types/statuses (e.g. 'Reversed', 'Rejected', 'Processed', 'DIRECT_SALE', 'UPLINE_DISTRIBUTION') work without enum errors
   await db`
