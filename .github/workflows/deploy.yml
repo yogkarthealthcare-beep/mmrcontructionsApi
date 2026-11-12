@@ -134,6 +134,10 @@ jobs:
               echo "⚡ Dependencies unchanged. Skipping npm install."
             fi
 
+            echo "🔄 Stopping running mmr-api before schema checks to release any stale DB locks..."
+            pm2 stop mmr-api || true
+            sleep 1
+
             echo "🔍 Running idempotent admin table & superadmin user check..."
             node scripts/verify_or_create_admin_tables.js || echo "⚠️ Non-critical admin table script output"
 
