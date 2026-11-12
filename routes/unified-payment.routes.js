@@ -324,14 +324,82 @@ async function executePaymentAllocation(paymentId, adminId = null) {
   });
 }
 
+function extractCustomerIdentity(req) {
+  const userId = Number(req.user.user_id || req.user.userId || req.user.id || 0) || 0;
+  const userMemberId = req.user.member_id ? String(req.user.member_id).trim() : null;
+  const userEmail = req.user.email ? String(req.user.email).trim().toLowerCase() : null;
+  const userMobileRaw = req.user.mobile_no ? String(req.user.mobile_no).replace(/\D/g, '').slice(-10) : null;
+  const userMobile = userMobileRaw || null;
+  const isAdmin = Boolean(req.user.is_admin || req.admin || req.user.role === 'Admin' || req.user.role === 'SuperAdmin');
+  return { userId, userMemberId, userEmail, userMobile, isAdmin };
+}
+
+/**
+ * Look up a plot booking accessible to the authenticated user or admin with explicit parameter casts
+ * so PostgreSQL never fails type inference on nullable IS NOT NULL checks.
+ */
+async function findAccessibleBooking(db, identity, {
+  bookingId = 0,
+  plotId = 0,
+  searchStr = '',
+  matchPlotNumber = false,
+} = {}) {
+  const bId = Number(bookingId) || 0;
+  const pId = Number(plotId) || 0;
+  const str = String(searchStr || '').trim();
+  const strPattern = str ? `%${str}%` : '';
+
+  const [booking] = await db`
+    SELECT b.*,
+           COALESCE(p.site_id, b.site_id, 0) AS resolved_site_id,
+           COALESCE(b.plot_number, p.plot_number, 'Plot') AS resolved_plot_number,
+           COALESCE(b.plot_id, p.plot_id, 0) AS resolved_plot_id,
+           COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
+           COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
+           COALESCE(p.area_unit, 'sq.ft') AS area_unit,
+           COALESCE(p.rate_per_sqft, 0) AS rate_per_sqft,
+           COALESCE(b.base_price, p.base_price, 0) AS base_price,
+           COALESCE(p.plot_status, 'Booked') AS plot_status,
+           COALESCE(p.plc_charges, 0) AS plc_charges,
+           COALESCE(s.site_name, s2.site_name, 'MMR Project') AS site_name,
+           COALESCE(s.location, s2.full_address, 'Uttar Pradesh, India') AS site_location
+    FROM bookings b
+    LEFT JOIN plots p ON p.plot_id = b.plot_id
+    LEFT JOIN sites s ON s.site_id = p.site_id
+    LEFT JOIN sites s2 ON s2.site_id = b.site_id
+    WHERE (
+      (${bId}::bigint > 0 AND b.booking_id = ${bId}::bigint)
+      OR (${pId}::bigint > 0 AND (b.plot_id = ${pId}::bigint OR p.plot_id = ${pId}::bigint))
+      OR (
+        ${str.length}::int > 0 AND (
+          b.booking_serial = ${str}::text
+          OR b.booking_serial ILIKE ${strPattern}::text
+          OR (${matchPlotNumber}::boolean = TRUE AND b.plot_number ILIKE ${strPattern}::text)
+        )
+      )
+    )
+    AND (
+      ${identity.isAdmin}::boolean = TRUE
+      OR b.user_id = ${identity.userId}::bigint
+      OR b.user_id IN (
+        SELECT u.user_id FROM users u
+        WHERE u.user_id = ${identity.userId}::bigint
+           OR (${identity.userMemberId}::text IS NOT NULL AND u.member_id = ${identity.userMemberId}::text)
+           OR (${identity.userEmail}::text IS NOT NULL AND LOWER(u.email) = ${identity.userEmail}::text)
+           OR (${identity.userMobile}::text IS NOT NULL AND RIGHT(regexp_replace(COALESCE(u.mobile_no, ''), '\\D', '', 'g'), 10) = ${identity.userMobile}::text)
+      )
+    )
+    ORDER BY b.booking_id DESC
+    LIMIT 1
+  `;
+  return booking || null;
+}
+
 // ─── 1. CUSTOMER: INITIATE PAYMENT (Online / Offline / Wallet) ───
 router.post("/api/payments/initiate", userAuth, async (req, res) => {
   try {
-    const userId = req.user.user_id || req.user.userId || req.user.id;
-    const userMemberId = req.user.member_id || null;
-    const userEmail = req.user.email ? String(req.user.email).trim().toLowerCase() : null;
-    const userMobile = req.user.mobile_no ? String(req.user.mobile_no).replace(/\D/g, '').slice(-10) : null;
-    const isAdmin = Boolean(req.user.is_admin || req.admin || req.user.role === 'Admin' || req.user.role === 'SuperAdmin');
+    const identity = extractCustomerIdentity(req);
+    const { userId } = identity;
 
     const {
       booking_id,
@@ -361,32 +429,11 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
     const serialStr = String(booking_serial || (isNaN(Number(booking_id)) ? booking_id : '') || '').trim();
 
     // Verify booking ownership with flexible lookup & LEFT JOIN
-    const [booking] = await sql`
-      SELECT b.*, 
-             COALESCE(p.site_id, b.site_id, 0) AS resolved_site_id,
-             COALESCE(b.plot_number, p.plot_number, 'Plot') AS resolved_plot_number,
-             COALESCE(b.plot_id, p.plot_id, 0) AS resolved_plot_id
-      FROM bookings b
-      LEFT JOIN plots p ON p.plot_id = b.plot_id
-      WHERE (
-        (${bookingIdNum} > 0 AND b.booking_id = ${bookingIdNum})
-        OR (${serialStr.length} > 0 AND (b.booking_serial = ${serialStr} OR b.booking_serial ILIKE ${'%' + serialStr + '%'}))
-        OR (${plotIdNum} > 0 AND (b.plot_id = ${plotIdNum} OR p.plot_id = ${plotIdNum}))
-      )
-      AND (
-        ${isAdmin} = TRUE
-        OR b.user_id = ${userId}
-        OR b.user_id IN (
-          SELECT u.user_id FROM users u 
-          WHERE u.user_id = ${userId}
-             OR (${userMemberId} IS NOT NULL AND u.member_id = ${userMemberId})
-             OR (${userEmail} IS NOT NULL AND LOWER(u.email) = ${userEmail})
-             OR (${userMobile} IS NOT NULL AND RIGHT(regexp_replace(COALESCE(u.mobile_no, ''), '\\D', '', 'g'), 10) = ${userMobile})
-        )
-      )
-      ORDER BY b.booking_id DESC
-      LIMIT 1
-    `;
+    const booking = await findAccessibleBooking(sql, identity, {
+      bookingId: bookingIdNum,
+      plotId: plotIdNum,
+      searchStr: serialStr,
+    });
     if (!booking) return fail(res, "Booking not found or not owned by you", 404);
 
     const targetBookingId = booking.booking_id;
@@ -516,11 +563,8 @@ router.post("/api/payments/initiate", userAuth, async (req, res) => {
 // ─── 2. CUSTOMER: REPORT MISSING PAYMENT ────────────────────────
 router.post("/api/payments/report-missing", userAuth, async (req, res) => {
   try {
-    const userId = req.user.user_id || req.user.userId || req.user.id;
-    const userMemberId = req.user.member_id || null;
-    const userEmail = req.user.email ? String(req.user.email).trim().toLowerCase() : null;
-    const userMobile = req.user.mobile_no ? String(req.user.mobile_no).replace(/\D/g, '').slice(-10) : null;
-    const isAdmin = Boolean(req.user.is_admin || req.admin || req.user.role === 'Admin' || req.user.role === 'SuperAdmin');
+    const identity = extractCustomerIdentity(req);
+    const { userId } = identity;
 
     const {
       booking_id,
@@ -542,29 +586,10 @@ router.post("/api/payments/report-missing", userAuth, async (req, res) => {
     const bookingIdNum = Number(booking_id) || 0;
     const serialStr = String(booking_id || '').trim();
 
-    const [booking] = await sql`
-      SELECT b.*, 
-             COALESCE(b.plot_id, p.plot_id, 0) AS resolved_plot_id
-      FROM bookings b
-      LEFT JOIN plots p ON p.plot_id = b.plot_id
-      WHERE (
-        (${bookingIdNum} > 0 AND b.booking_id = ${bookingIdNum})
-        OR (${serialStr.length} > 0 AND (b.booking_serial = ${serialStr} OR b.booking_serial ILIKE ${'%' + serialStr + '%'}))
-      )
-      AND (
-        ${isAdmin} = TRUE
-        OR b.user_id = ${userId}
-        OR b.user_id IN (
-          SELECT u.user_id FROM users u 
-          WHERE u.user_id = ${userId}
-             OR (${userMemberId} IS NOT NULL AND u.member_id = ${userMemberId})
-             OR (${userEmail} IS NOT NULL AND LOWER(u.email) = ${userEmail})
-             OR (${userMobile} IS NOT NULL AND RIGHT(regexp_replace(COALESCE(u.mobile_no, ''), '\\D', '', 'g'), 10) = ${userMobile})
-        )
-      )
-      ORDER BY b.booking_id DESC
-      LIMIT 1
-    `;
+    const booking = await findAccessibleBooking(sql, identity, {
+      bookingId: bookingIdNum,
+      searchStr: serialStr,
+    });
     if (!booking) return fail(res, "Booking not found", 404);
 
     const complaintSerial = await generateComplaintSerial();
@@ -597,48 +622,18 @@ router.post("/api/payments/report-missing", userAuth, async (req, res) => {
 // ─── 3. CUSTOMER: PLOT PAYMENT DOSSIER (8 Dedicated Tabs) ────────
 router.get("/api/plots/:plotId/payment-dossier", userAuth, async (req, res) => {
   try {
-    const userId = req.user.user_id || req.user.userId || req.user.id;
-    const userMemberId = req.user.member_id || null;
-    const userEmail = req.user.email ? String(req.user.email).trim().toLowerCase() : null;
-    const userMobile = req.user.mobile_no ? String(req.user.mobile_no).replace(/\D/g, '').slice(-10) : null;
-    const isAdmin = Boolean(req.user.is_admin || req.admin || req.user.role === 'Admin' || req.user.role === 'SuperAdmin');
+    const identity = extractCustomerIdentity(req);
     const plotParam = req.params.plotId;
     const plotIdNum = Number(plotParam) || 0;
     const plotParamStr = String(plotParam || '').trim();
 
     // Fetch booking for this plot & user
-    const [booking] = await sql`
-      SELECT b.*, 
-             COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
-             COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
-             COALESCE(p.area_unit, 'sq.ft') AS area_unit,
-             COALESCE(p.rate_per_sqft, 0) AS rate_per_sqft,
-             COALESCE(b.base_price, p.base_price, 0) AS base_price,
-             COALESCE(p.plot_status, 'Booked') AS plot_status,
-             COALESCE(p.plc_charges, 0) AS plc_charges,
-             COALESCE(s.site_name, s2.site_name, 'MMR Project') AS site_name,
-             COALESCE(s.location, s2.full_address, 'Uttar Pradesh, India') AS site_location
-      FROM bookings b
-      LEFT JOIN plots p ON p.plot_id = b.plot_id
-      LEFT JOIN sites s ON s.site_id = p.site_id
-      LEFT JOIN sites s2 ON s2.site_id = b.site_id
-      WHERE (
-        (${plotIdNum} > 0 AND (b.plot_id = ${plotIdNum} OR p.plot_id = ${plotIdNum} OR b.booking_id = ${plotIdNum}))
-        OR (${plotParamStr.length} > 0 AND (b.booking_serial = ${plotParamStr} OR b.booking_serial ILIKE ${'%' + plotParamStr + '%'} OR b.plot_number ILIKE ${'%' + plotParamStr + '%'}))
-      )
-      AND (
-        ${isAdmin} = TRUE
-        OR b.user_id = ${userId}
-        OR b.user_id IN (
-          SELECT u.user_id FROM users u 
-          WHERE u.user_id = ${userId}
-             OR (${userMemberId} IS NOT NULL AND u.member_id = ${userMemberId})
-             OR (${userEmail} IS NOT NULL AND LOWER(u.email) = ${userEmail})
-             OR (${userMobile} IS NOT NULL AND RIGHT(regexp_replace(COALESCE(u.mobile_no, ''), '\\D', '', 'g'), 10) = ${userMobile})
-        )
-      )
-      ORDER BY b.booking_id DESC LIMIT 1
-    `;
+    const booking = await findAccessibleBooking(sql, identity, {
+      bookingId: plotIdNum,
+      plotId: plotIdNum,
+      searchStr: plotParamStr,
+      matchPlotNumber: true,
+    });
 
     if (!booking) return fail(res, "No active plot booking found for your account", 404);
 
