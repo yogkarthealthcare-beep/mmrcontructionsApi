@@ -2662,17 +2662,41 @@ const verifyUserToken = async (req, res, next) => {
   try {
     const jwtSecret = process.env.JWT_SECRET;
     const decoded = jwt.verify(token, jwtSecret);
+    const isInvestorToken =
+      String(decoded.role || "").toLowerCase() === "investor" ||
+      String(decoded.user_type || "").toLowerCase() === "investor";
+
+    // Investor IDs live in investor_users and can overlap with users.user_id — never resolve an Investor JWT against users.
+    if (isInvestorToken) {
+      const [investor] = await sql`
+        SELECT id AS user_id,
+               COALESCE(NULLIF(TRIM(member_id), ''), ('MMR-INV-' || LPAD(id::text, 5, '0'))) AS member_id,
+               'Investor' AS user_type,
+               status AS account_status,
+               true AS is_active
+        FROM investor_users
+        WHERE id = ${decoded.user_id || decoded.id} AND deleted_at IS NULL`;
+      if (!investor) return err(res, "User account not found", 401);
+      if (["inactive", "rejected", "suspended"].includes(String(investor.account_status || "").toLowerCase())) {
+        return err(res, "User account is not active", 403);
+      }
+      req.user = { ...decoded, ...investor, is_investor: true };
+      return next();
+    }
+
     const [user] = await sql`
       SELECT user_id, member_id, user_type, account_status, is_active
       FROM users
       WHERE user_id = ${decoded.user_id || decoded.id}`;
     if (!user) {
       const [investor] = await sql`
-        SELECT id as user_id, id as member_id, 'Investor' as user_type, status as account_status, true as is_active
+        SELECT id as user_id,
+               COALESCE(NULLIF(TRIM(member_id), ''), ('MMR-INV-' || LPAD(id::text, 5, '0'))) as member_id,
+               'Investor' as user_type, status as account_status, true as is_active
         FROM investor_users
         WHERE id = ${decoded.user_id || decoded.id} AND deleted_at IS NULL`;
       if (!investor) return err(res, "User account not found", 401);
-      req.user = { ...decoded, ...investor };
+      req.user = { ...decoded, ...investor, is_investor: true };
       return next();
     }
     if (!["Active", "Approved"].includes(String(user.account_status)) || user.is_active === false)
@@ -6195,6 +6219,45 @@ app.post(["/api/auth/consume-impersonate-ticket", "/api/impersonate/consume-tick
 
 app.get("/api/profile", verifyUserToken, async (req, res) => {
   try {
+    if (req.user?.is_investor || String(req.user?.user_type || "").toLowerCase() === "investor") {
+      const [inv] = await sql`
+        SELECT iu.id,
+               iu.id AS user_id,
+               COALESCE(NULLIF(TRIM(iu.member_id), ''), ('MMR-INV-' || LPAD(iu.id::text, 5, '0'))) AS member_id,
+               'Investor' AS user_type,
+               iu.full_name,
+               iu.date_of_birth,
+               iu.gender,
+               iu.father_husband_name,
+               iu.father_husband_name AS father_name,
+               iu.mobile_number,
+               iu.mobile_number AS mobile_no,
+               iu.alternate_mobile,
+               iu.email,
+               iu.pan_number,
+               iu.aadhaar_number,
+               iu.aadhaar_number AS aadhar_number,
+               iu.address,
+               iu.address AS address_line1,
+               iu.city,
+               iu.state,
+               iu.country,
+               iu.pincode,
+               iu.pincode AS pin_code,
+               iu.bank_name,
+               iu.account_number,
+               iu.ifsc_code,
+               iu.nominee_name,
+               iu.profile_picture_url,
+               iu.status AS account_status,
+               iu.enrollment_status
+        FROM investor_users iu
+        WHERE iu.id = ${req.user.user_id} AND iu.deleted_at IS NULL
+        LIMIT 1`;
+      if (!inv) return err(res, "Investor not found", 404);
+      return ok(res, inv);
+    }
+
     const [user] = await sql`
       SELECT u.user_id,
              COALESCE(

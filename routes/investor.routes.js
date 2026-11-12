@@ -862,7 +862,11 @@ router.get("/investor/dashboard", authInvestor, async (req, res) => {
 router.get("/investor/profile", authInvestor, async (req, res) => {
   try {
     const [user] = await sql`
-      SELECT iu.id, iu.full_name, iu.mobile_number, iu.email, iu.address, iu.city, iu.state, iu.country, iu.pincode,
+      SELECT iu.id,
+             COALESCE(NULLIF(TRIM(iu.member_id), ''), ('MMR-INV-' || LPAD(iu.id::text, 5, '0'))) AS member_id,
+             iu.full_name, iu.mobile_number, iu.alternate_mobile, iu.email,
+             iu.father_husband_name, iu.date_of_birth, iu.gender,
+             iu.address, iu.city, iu.state, iu.country, iu.pincode,
              iu.pan_number, iu.aadhaar_number, iu.bank_name, iu.account_number, iu.ifsc_code, iu.nominee_name,
              iu.available_balance, iu.total_investment, iu.total_deposits, iu.total_withdrawals,
              iu.status,
