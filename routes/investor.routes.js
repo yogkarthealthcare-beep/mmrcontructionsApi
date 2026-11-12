@@ -655,11 +655,12 @@ router.post(["/investor/login", "/investor/auth/login"], async (req, res) => {
       return err(res, "Invalid credentials.", 401);
     }
 
-    if (!user.is_verified || user.status === "pending_verification") {
-      return err(res, "Please verify your email before login.", 403);
-    }
-    if (user.status === "inactive" || user.status === "rejected") {
+    const acctStatusLower = String(user.status || "").trim().toLowerCase();
+    if (["inactive", "rejected", "suspended", "disabled", "blacklisted"].includes(acctStatusLower)) {
       return err(res, `Account is currently ${user.status}. Please contact support.`, 403);
+    }
+    if (!user.is_verified || acctStatusLower === "pending_verification") {
+      return err(res, "Please verify your email before login.", 403);
     }
 
     const payload = {
@@ -1556,9 +1557,9 @@ router.get("/admin/investors-portal", authAdmin, async (req, res) => {
     const offset = (pageNum - 1) * limitNum;
 
     let query = sql`
-      SELECT iu.id, iu.full_name, iu.mobile_number, iu.email, iu.city, iu.state, iu.pan_number, iu.bank_name, iu.account_number, iu.ifsc_code,
-             iu.available_balance, iu.total_investment, iu.total_deposits, iu.total_withdrawals, iu.status,
-             CASE WHEN ie.id IS NOT NULL AND ie.is_final_submitted = TRUE AND LOWER(COALESCE(ie.app_status, '')) = 'approved' THEN TRUE ELSE FALSE END AS is_verified,
+      SELECT iu.id, iu.member_id, iu.full_name, iu.mobile_number, iu.email, iu.city, iu.state, iu.pan_number, iu.bank_name, iu.account_number, iu.ifsc_code,
+             iu.available_balance, iu.total_investment, iu.total_deposits, iu.total_withdrawals, iu.status, iu.is_verified,
+             CASE WHEN ie.id IS NOT NULL AND ie.is_final_submitted = TRUE AND LOWER(COALESCE(ie.app_status, '')) = 'approved' THEN TRUE ELSE FALSE END AS enrollment_verified,
              CASE 
                WHEN ie.id IS NOT NULL AND ie.is_final_submitted = TRUE AND LOWER(COALESCE(ie.app_status, '')) = 'approved' THEN 'Completed' 
                WHEN ie.id IS NOT NULL THEN 'Submitted' 
@@ -1576,10 +1577,21 @@ router.get("/admin/investors-portal", authAdmin, async (req, res) => {
 
     if (search) {
       const s = `%${search.trim()}%`;
-      query = sql`${query} AND (iu.full_name ILIKE ${s} OR iu.email ILIKE ${s} OR iu.mobile_number ILIKE ${s} OR iu.pan_number ILIKE ${s} OR iu.sponsor_invite_code ILIKE ${s})`;
+      query = sql`${query} AND (iu.full_name ILIKE ${s} OR iu.email ILIKE ${s} OR iu.mobile_number ILIKE ${s} OR iu.pan_number ILIKE ${s} OR iu.sponsor_invite_code ILIKE ${s} OR COALESCE(iu.member_id, '') ILIKE ${s})`;
     }
     if (status && status !== "all") {
-      query = sql`${query} AND iu.status = ${status}`;
+      const st = String(status).trim().toLowerCase();
+      if (st === "active" || st === "approved") {
+        query = sql`${query} AND LOWER(COALESCE(iu.status, '')) IN ('active', 'approved')`;
+      } else if (st === "pending") {
+        query = sql`${query} AND LOWER(COALESCE(iu.status, '')) IN ('pending', 'pending_verification')`;
+      } else if (st === "suspended") {
+        query = sql`${query} AND LOWER(COALESCE(iu.status, '')) IN ('suspended', 'inactive', 'rejected', 'disabled', 'blacklisted')`;
+      } else if (st === "rejected") {
+        query = sql`${query} AND LOWER(COALESCE(iu.status, '')) IN ('rejected', 'inactive', 'suspended', 'disabled')`;
+      } else {
+        query = sql`${query} AND LOWER(COALESCE(iu.status, '')) = ${st}`;
+      }
     }
 
     const [{ count }] = await sql`SELECT COUNT(*) FROM (${query}) AS count_query`;
@@ -1598,37 +1610,50 @@ router.get("/admin/investors-portal", authAdmin, async (req, res) => {
   }
 });
 
+async function updateInvestorAccountStatus(id, { status, is_verified, reject_reason, admin_remarks } = {}) {
+  const cleanStatus = status ? String(status).trim().toLowerCase() : null;
+  const isActivating = cleanStatus === "active" || cleanStatus === "approved";
+  const isDeactivating = ["inactive", "rejected", "suspended", "disabled", "blacklisted"].includes(cleanStatus || "");
+  const nextVerified = typeof is_verified === "boolean"
+    ? is_verified
+    : (isActivating ? true : null);
+
+  const [updated] = await sql`
+    UPDATE investor_users
+    SET status = COALESCE(${cleanStatus}, status),
+        is_verified = COALESCE(${nextVerified}, is_verified),
+        updated_at = NOW()
+    WHERE id = ${id} AND deleted_at IS NULL
+    RETURNING id, member_id, full_name, email, status, is_verified
+  `;
+
+  if (!updated) return null;
+
+  if (isDeactivating) {
+    await sql`UPDATE investors SET is_active = FALSE, updated_at = NOW() WHERE user_id = ${id}`;
+  } else if (isActivating) {
+    await sql`UPDATE investors SET is_active = TRUE, updated_at = NOW() WHERE user_id = ${id}`;
+  }
+
+  if (["approved", "active", "rejected"].includes(cleanStatus || "")) {
+    triggerInvestorStatusEmailAsync(id, {
+      investorName: updated.full_name,
+      email: updated.email,
+      reason: reject_reason || admin_remarks || null
+    }, isActivating ? "approved" : "rejected");
+  }
+
+  return updated;
+}
+
 // PUT /api/admin/investors-portal/:id/status
 router.put("/admin/investors-portal/:id/status", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, is_verified } = req.body;
+    const { status, is_verified, reject_reason, admin_remarks } = req.body || {};
 
-    const [updated] = await sql`
-      UPDATE investor_users
-      SET status = COALESCE(${status}, status),
-          is_verified = COALESCE(${is_verified}, is_verified),
-          updated_at = NOW()
-      WHERE id = ${id}
-      RETURNING id, full_name, email, status, is_verified
-    `;
-
+    const updated = await updateInvestorAccountStatus(id, { status, is_verified, reject_reason, admin_remarks });
     if (!updated) return err(res, "Investor account not found.", 404);
-
-    // If investor profile exists in investors table, sync active status if deactivating
-    if (status === 'inactive' || status === 'rejected') {
-      await sql`UPDATE investors SET is_active = FALSE, updated_at = NOW() WHERE user_id = ${id}`;
-    } else if (status === 'active' || status === 'approved') {
-      await sql`UPDATE investors SET is_active = TRUE, updated_at = NOW() WHERE user_id = ${id}`;
-    }
-
-    if (['approved', 'active', 'rejected'].includes(String(status).toLowerCase())) {
-      triggerInvestorStatusEmailAsync(id, {
-        investorName: updated.full_name,
-        email: updated.email,
-        reason: req.body?.reject_reason || req.body?.admin_remarks || null
-      }, (status === 'approved' || status === 'active') ? 'approved' : 'rejected');
-    }
 
     return ok(res, updated, `Investor account updated to ${updated.status}.`);
   } catch (e) {
@@ -2918,22 +2943,17 @@ router.put("/admin/investor-enrollment/:id", authAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/investor-users/:id/status (Admin - Approve/Reject Investor)
+// PUT /api/admin/investor-users/:id/status (Admin - Activate/Suspend/Approve/Reject Investor)
 router.put("/admin/investor-users/:id/status", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, is_verified } = req.body;
-    
+    const { status, is_verified, reject_reason, admin_remarks } = req.body || {};
+
     if (!status) return err(res, "Status is required.");
-    
-    const [updated] = await sql`
-      UPDATE investor_users
-      SET status = ${status}, is_verified = ${is_verified === true}, updated_at = NOW()
-      WHERE id = ${id}
-      RETURNING *
-    `;
-    
+
+    const updated = await updateInvestorAccountStatus(id, { status, is_verified, reject_reason, admin_remarks });
     if (!updated) return err(res, "Investor user not found.", 404);
+
     return ok(res, updated, "Investor status updated successfully.");
   } catch (e) {
     return err(res, "Failed to update investor status.");
