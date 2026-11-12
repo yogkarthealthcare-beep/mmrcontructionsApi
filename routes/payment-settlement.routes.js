@@ -34,6 +34,7 @@ async function ensureSettlementSchema() {
     settlementSchemaPromise = (async () => {
       try {
         await sql.unsafe(`
+          ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_area NUMERIC(12,2) DEFAULT 0;
           ALTER TABLE bookings ADD COLUMN IF NOT EXISTS settlement_status VARCHAR(30) DEFAULT 'Pending';
           ALTER TABLE bookings ADD COLUMN IF NOT EXISTS settlement_released_at TIMESTAMPTZ;
           ALTER TABLE bookings ADD COLUMN IF NOT EXISTS settlement_released_by INT;
@@ -54,6 +55,19 @@ async function ensureSettlementSchema() {
           ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ;
           ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS payment_reference TEXT;
           ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS notes TEXT;
+
+          DO $$
+          BEGIN
+            IF EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_name = 'commission_transactions'
+                AND column_name = 'commission_type'
+                AND data_type = 'USER-DEFINED'
+            ) THEN
+              ALTER TABLE commission_transactions
+                ALTER COLUMN commission_type TYPE VARCHAR(50) USING commission_type::text;
+            END IF;
+          END $$;
 
           CREATE TABLE IF NOT EXISTS plot_order_settlements (
             settlement_id SERIAL PRIMARY KEY,
@@ -170,10 +184,11 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
         WHERE tm_buyer.user_id = b.user_id
           AND LOWER(tm_buyer.status) IN ('approved', 'active')
       )
-      AND b.user_id != COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id, 0)
+      AND b.user_id != COALESCE(b.sold_by_user_id, NULLIF(b.booked_by_user_id, b.user_id), buyer.referred_by_user_id, buyer.sponsor_user_id, 0)
+      AND b.user_id != COALESCE(b.associate_user_id, 0)
 
       -- 2. Sale MUST be through an active Team Member under an Associate
-      AND COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id) IS NOT NULL
+      AND COALESCE(b.sold_by_user_id, NULLIF(b.booked_by_user_id, b.user_id), buyer.referred_by_user_id, buyer.sponsor_user_id) IS NOT NULL
       AND (CAST(seller.user_type AS TEXT) = 'Team Member' OR tm_record.id IS NOT NULL)
       AND COALESCE(tm_record.associate_id, b.associate_user_id, seller.sponsor_user_id) IS NOT NULL
     `;
@@ -189,13 +204,13 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
         LEFT JOIN plots p ON p.plot_id = b.plot_id
         LEFT JOIN sites s ON s.site_id = p.site_id
         LEFT JOIN users buyer ON buyer.user_id = b.user_id
-        LEFT JOIN users seller ON seller.user_id = COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id)
+        LEFT JOIN users seller ON seller.user_id = COALESCE(b.sold_by_user_id, NULLIF(b.booked_by_user_id, b.user_id), buyer.referred_by_user_id, buyer.sponsor_user_id)
         LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
         LEFT JOIN users sponsor ON sponsor.user_id = buyer.sponsor_user_id
         LEFT JOIN LATERAL (
           SELECT id, team_member_uid, associate_id, status
           FROM team_members
-          WHERE user_id = COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id)
+          WHERE user_id = COALESCE(b.sold_by_user_id, NULLIF(b.booked_by_user_id, b.user_id), buyer.referred_by_user_id, buyer.sponsor_user_id)
             AND LOWER(status) IN ('approved', 'active')
           ORDER BY created_at DESC
           LIMIT 1
@@ -299,7 +314,7 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
         -- Plot Details
         p.plot_id,
         p.plot_number,
-        COALESCE(p.plot_area, 0) AS plot_area,
+        COALESCE(NULLIF(b.plot_area, 0), p.plot_area, 0) AS plot_area,
         'Gaj' AS area_unit,
         COALESCE(p.plot_status, 'Vacant') AS plot_status,
 
@@ -317,7 +332,7 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
       LEFT JOIN plots p ON p.plot_id = b.plot_id
       LEFT JOIN sites s ON s.site_id = p.site_id
       LEFT JOIN users buyer ON buyer.user_id = b.user_id
-      LEFT JOIN users seller ON seller.user_id = COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id)
+      LEFT JOIN users seller ON seller.user_id = COALESCE(b.sold_by_user_id, NULLIF(b.booked_by_user_id, b.user_id), buyer.referred_by_user_id, buyer.sponsor_user_id)
       LEFT JOIN users assoc ON assoc.user_id = b.associate_user_id
       LEFT JOIN users sponsor ON sponsor.user_id = buyer.sponsor_user_id
       LEFT JOIN LATERAL (
@@ -330,7 +345,7 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
       LEFT JOIN LATERAL (
         SELECT id, team_member_uid, associate_id, status
         FROM team_members
-        WHERE user_id = COALESCE(b.sold_by_user_id, b.booked_by_user_id, buyer.referred_by_user_id, buyer.sponsor_user_id)
+        WHERE user_id = COALESCE(b.sold_by_user_id, NULLIF(b.booked_by_user_id, b.user_id), buyer.referred_by_user_id, buyer.sponsor_user_id)
           AND LOWER(status) IN ('approved', 'active')
         ORDER BY created_at DESC
         LIMIT 1
@@ -379,9 +394,11 @@ router.get(['/admin/payment-settlements', '/api/admin/payment-settlements'], ver
 async function computeDistributionForBooking(bookingId) {
   const bId = Number(bookingId);
   const [booking] = await sql`
-    SELECT b.*, p.plot_id, p.plot_number, p.plot_area, p.base_price AS plot_base_price,
+    SELECT b.*,
+           COALESCE(NULLIF(b.plot_area, 0), p.plot_area, 0)::numeric AS effective_plot_area,
+           p.plot_id, p.plot_number, p.plot_area AS plot_table_area, p.base_price AS plot_base_price,
            s.site_name,
-           buyer.full_name AS buyer_name, buyer.member_id AS buyer_member_id, buyer.user_id AS buyer_user_id, buyer.sponsor_user_id, buyer.referred_by_user_id,
+           buyer.full_name AS buyer_name, buyer.member_id AS buyer_member_id, buyer.user_id AS buyer_user_id, buyer.user_type AS buyer_user_type, buyer.sponsor_user_id, buyer.referred_by_user_id,
            seller.full_name AS seller_name, seller.member_id AS seller_member_id, seller.user_type AS seller_user_type, seller.account_status AS seller_account_status,
            assoc.full_name AS associate_name, assoc.member_id AS associate_member_id, assoc.user_type AS associate_user_type, assoc.account_status AS associate_account_status,
            sponsor.member_id AS sponsor_member_id, sponsor.full_name AS sponsor_name
@@ -401,17 +418,24 @@ async function computeDistributionForBooking(bookingId) {
   }
 
   const engine = await commissionService.getCommissionEngineSnapshot(sql);
-  const totalPoolRate = Number(engine.total_commission_percentage ?? 10);
-  const sellerPoolShare = Number(engine.seller_percentage ?? 50);
-  const teamPoolShare = Number(engine.team_pool_percentage ?? (100 - sellerPoolShare));
+  const sellerRatePerGaj = commissionService.SELLER_RATE_PER_GAZ || 500;
+  const uplineRatePerGaj = commissionService.UPLINE_RATE_PER_GAZ || 50;
+  const maxUplineParticipants = commissionService.MAX_UPLINE_PARTICIPANTS || 10;
+  const maxTeamMemberUplineSlots = commissionService.MAX_TEAM_MEMBER_UPLINE_SLOTS || 9;
 
+  const plotSizeGaj = Number(booking.effective_plot_area || booking.plot_area || booking.plot_table_area || 0);
   const amountReceived = Number(booking.advance_amount || 0);
   const totalPlotPrice = Number(booking.base_price || booking.sold_price || booking.plot_base_price || (amountReceived + Number(booking.remaining_balance || 0)));
 
-  // Fallback attribution if sold_by_user_id is NULL: check customer's referred_by_user_id or sponsor_user_id
+  // Fallback attribution if sold_by_user_id is NULL: skip self-booker ID when buyer is the customer
+  const distinctBookedById =
+    booking.booked_by_user_id && Number(booking.booked_by_user_id) !== Number(booking.user_id)
+      ? Number(booking.booked_by_user_id)
+      : 0;
+
   const effectiveSellerUserId = Number(
     booking.sold_by_user_id ||
-    booking.booked_by_user_id ||
+    distinctBookedById ||
     booking.referred_by_user_id ||
     booking.sponsor_user_id ||
     0
@@ -433,7 +457,7 @@ async function computeDistributionForBooking(bookingId) {
     if (fetched) sellerUser = fetched;
   }
 
-  // Check if buyer is an enrolled team member in team_members table
+  // Strict Self-Purchase Validation: non-Customer, Team Member, or buyer == seller/associate
   const [buyerTmRow] = await sql`
     SELECT id FROM team_members WHERE user_id = ${booking.user_id} AND LOWER(status) IN ('approved', 'active') LIMIT 1
   `;
@@ -442,28 +466,33 @@ async function computeDistributionForBooking(bookingId) {
     !['Team Member', 'Associate', 'Admin', 'SuperAdmin'].includes(booking.buyer_user_type)
   ) && !buyerTmRow && booking.user_id !== effectiveSellerUserId;
 
-  const isSelfPurchase = !isBuyerCustomer || Boolean(
+  const isSelfPurchase = Boolean(
+    !isBuyerCustomer ||
     booking.booking_type === 'SELF_PURCHASE' ||
-    (effectiveSellerUserId && booking.user_id === effectiveSellerUserId)
+    (effectiveSellerUserId && booking.user_id === effectiveSellerUserId) ||
+    (booking.associate_user_id && booking.user_id === booking.associate_user_id)
   );
   const isCompanyDirect = !effectiveSellerUserId;
 
   // Check if booking is cancelled or rejected
   const isBookingCancelled = ['Cancelled', 'Rejected'].includes(booking.booking_status);
 
-  // If already released, fetch historical distribution from plot_order_settlements or commission_transactions
+  // If already released, fetch historical distribution from plot_order_settlements
   if (booking.settlement_status === 'Released') {
     const [settlementRecord] = await sql`
       SELECT * FROM plot_order_settlements WHERE booking_id = ${bId} ORDER BY settlement_id DESC LIMIT 1
     `.catch(() => []);
 
-    const wasReleasedWithZeroCommission = Boolean(settlementRecord && Number(settlementRecord.total_distributed || 0) === 0 && !isCompanyDirect);
+    const wasReleasedWithZeroCommission = Boolean(settlementRecord && Number(settlementRecord.total_distributed || 0) === 0 && !isCompanyDirect && !isSelfPurchase);
 
-    // Only lock to historical if it actually distributed OR was a genuine company direct sale
+    // Only lock to historical if it actually distributed OR was a genuine company direct/self-purchase sale
     if (settlementRecord && settlementRecord.recipient_breakdown && !wasReleasedWithZeroCommission) {
       return {
         booking,
         engine,
+        plotSizeGaj,
+        sellerRatePerGaj,
+        uplineRatePerGaj,
         amountReceived,
         totalPlotPrice,
         isSelfPurchase,
@@ -474,7 +503,7 @@ async function computeDistributionForBooking(bookingId) {
         settlementReference: settlementRecord.settlement_reference,
         settlementStatus: 'Released',
         releasedAt: settlementRecord.created_at || booking.settlement_released_at,
-        poolRate: Number(settlementRecord.pool_amount ? ((settlementRecord.pool_amount / amountReceived) * 100).toFixed(2) : totalPoolRate),
+        poolRate: 0,
         poolAmount: Number(settlementRecord.pool_amount || 0),
         totalDistributionAmount: Number(settlementRecord.total_distributed || 0),
         companyShare: Number(settlementRecord.company_share || 0),
@@ -496,11 +525,14 @@ async function computeDistributionForBooking(bookingId) {
   `;
   const isTeamMemberSeller = Boolean(tmSellerRow) || sellerUser?.user_type === 'Team Member';
 
-  // Base rule 1: If company direct, not eligible for payment settlement
+  // Base rule 1: If company direct, not eligible for payment settlement (0% commission)
   if (isCompanyDirect) {
     return {
       booking,
       engine,
+      plotSizeGaj,
+      sellerRatePerGaj,
+      uplineRatePerGaj,
       amountReceived,
       totalPlotPrice,
       isSelfPurchase: false,
@@ -508,22 +540,25 @@ async function computeDistributionForBooking(bookingId) {
       isTeamMemberSeller: false,
       isBookingCancelled,
       eligibleForRelease: false,
-      ineligibleReason: isBookingCancelled ? 'Booking is cancelled/rejected' : 'Company Direct orders are not eligible for payment settlement.',
+      ineligibleReason: isBookingCancelled ? 'Booking is cancelled/rejected' : 'Company Direct orders are not eligible for payment settlement (0% commission).',
       settlementStatus: booking.settlement_status || 'Pending',
-      poolRate: totalPoolRate,
+      poolRate: 0,
       poolAmount: 0,
       totalDistributionAmount: 0,
       companyShare: amountReceived,
       recipients: [],
-      notes: 'Company Direct Sale: Settlement disabled.'
+      notes: 'Company Direct Sale: 0% commission — Settlement disabled.'
     };
   }
 
-  // Base rule 2: If self purchase by Associate or Team Member, not eligible for payment settlement
+  // Base rule 2: If self purchase by Associate or Team Member, strictly 0% commission
   if (isSelfPurchase) {
     return {
       booking,
       engine,
+      plotSizeGaj,
+      sellerRatePerGaj,
+      uplineRatePerGaj,
       amountReceived,
       totalPlotPrice,
       isSelfPurchase: true,
@@ -531,16 +566,16 @@ async function computeDistributionForBooking(bookingId) {
       isTeamMemberSeller,
       isBookingCancelled,
       eligibleForRelease: false,
-      ineligibleReason: isBookingCancelled 
-        ? 'Booking is cancelled/rejected' 
-        : 'Direct self-purchases by Associates or Team Members are not eligible for payment settlement.',
+      ineligibleReason: isBookingCancelled
+        ? 'Booking is cancelled/rejected'
+        : 'Direct self-purchases by Associates or Team Members yield 0% commission and are blocked from settlement.',
       settlementStatus: booking.settlement_status || 'Pending',
-      poolRate: totalPoolRate,
+      poolRate: 0,
       poolAmount: 0,
       totalDistributionAmount: 0,
       companyShare: amountReceived,
       recipients: [],
-      notes: 'Direct Self-Purchase: Commission settlement disabled.'
+      notes: 'Self-Purchase Blocked: 0% commission.'
     };
   }
 
@@ -549,6 +584,9 @@ async function computeDistributionForBooking(bookingId) {
     return {
       booking,
       engine,
+      plotSizeGaj,
+      sellerRatePerGaj,
+      uplineRatePerGaj,
       amountReceived,
       totalPlotPrice,
       isSelfPurchase: false,
@@ -558,7 +596,7 @@ async function computeDistributionForBooking(bookingId) {
       eligibleForRelease: false,
       ineligibleReason: 'Only plot orders sold through an active Team Member under an Associate Leader are eligible for payment settlement.',
       settlementStatus: booking.settlement_status || 'Pending',
-      poolRate: totalPoolRate,
+      poolRate: 0,
       poolAmount: 0,
       totalDistributionAmount: 0,
       companyShare: amountReceived,
@@ -580,16 +618,17 @@ async function computeDistributionForBooking(bookingId) {
     }
   }
 
-  // Active enrolled team members under the associate leader
+  // Active enrolled team members under the parent associate leader (deterministic slot order)
   const teamRows = leaderUserId
     ? await sql`
-        SELECT DISTINCT tm.user_id, tm.team_member_uid, tm.full_name, tm.mobile_no,
+        SELECT DISTINCT tm.user_id, tm.team_member_uid, tm.full_name, tm.mobile_no, tm.slot_number, tm.id,
                COALESCE(u.account_status, 'Active') AS account_status, u.member_id
         FROM team_members tm
         LEFT JOIN users u ON tm.user_id = u.user_id
         WHERE tm.associate_id = ${leaderUserId}
           AND LOWER(tm.status) IN ('approved', 'active')
           AND tm.user_id IS NOT NULL
+        ORDER BY tm.slot_number ASC NULLS LAST, tm.id ASC
       `
     : [];
 
@@ -599,7 +638,7 @@ async function computeDistributionForBooking(bookingId) {
     return isMemberActive && m.account_status !== 'Blacklisted';
   });
 
-  // Prepare participants
+  // Prepare 10-member upline participants: 1 Parent Associate + up to 9 Active Team Members
   const remainingParticipants = [];
   let associateLeaderRecipient = null;
 
@@ -625,7 +664,7 @@ async function computeDistributionForBooking(bookingId) {
       }
     }
 
-    for (const tm of eligibleTeamMembers) {
+    for (const tm of eligibleTeamMembers.slice(0, maxTeamMemberUplineSlots)) {
       remainingParticipants.push({
         user_id: Number(tm.user_id),
         name: tm.full_name,
@@ -636,8 +675,7 @@ async function computeDistributionForBooking(bookingId) {
       });
     }
   } else {
-    // Seller is Associate Leader
-    for (const tm of eligibleTeamMembers) {
+    for (const tm of eligibleTeamMembers.slice(0, maxUplineParticipants)) {
       remainingParticipants.push({
         user_id: Number(tm.user_id),
         name: tm.full_name,
@@ -649,21 +687,23 @@ async function computeDistributionForBooking(bookingId) {
     }
   }
 
-  const participantCount = remainingParticipants.length;
+  const uplineParticipants = remainingParticipants.slice(0, maxUplineParticipants);
+  const participantCount = uplineParticipants.length;
 
-  // Use pure canonical math from commissionService
+  // Use Per-Gaz Fixed Math from commissionService
   const math = commissionService.calculateCommissionDistribution({
+    plotSizeGaj,
     baseAmount: amountReceived,
-    totalPoolRate,
-    sellerPoolShare,
-    teamPoolShare,
+    sellerRatePerGaj,
+    uplineRatePerGaj,
     participantsCount: participantCount,
-    isTeamMemberSeller
+    isTeamMemberSeller,
+    maxUplineParticipants,
   });
 
   const recipients = [];
 
-  // 1. Direct Seller
+  // 1. Direct Seller (DIRECT_SALE, Level 1, ₹500/Gaz)
   if (math.sellerAmount > 0) {
     recipients.push({
       user_id: sellerUserId,
@@ -671,21 +711,23 @@ async function computeDistributionForBooking(bookingId) {
       member_id: isTeamMemberSeller ? (tmSellerRow?.team_member_uid || sellerUser?.member_id || booking.seller_member_id) : (sellerUser?.member_id || booking.seller_member_id),
       user_type: isTeamMemberSeller ? 'Team Member' : 'Associate',
       role: isTeamMemberSeller ? 'Seller (Team Member)' : 'Seller (Associate)',
-      role_label: isTeamMemberSeller ? 'Direct Seller (T Member)' : 'Direct Seller (Associate)',
+      role_label: isTeamMemberSeller ? 'Direct Seller (Team Member)' : 'Direct Seller (Associate)',
+      commission_type: 'DIRECT_SALE',
+      commission_level: 1,
+      plot_size_gaj: plotSizeGaj,
+      rate_per_gaz: sellerRatePerGaj,
       amount: math.sellerAmount,
-      percentage: Math.round(((totalPoolRate * sellerPoolShare) / 100) * 100) / 100
+      percentage: 0,
+      notes: `DIRECT_SALE: ${plotSizeGaj} Gaz × ₹${sellerRatePerGaj}/Gaz = ₹${math.sellerAmount.toFixed(2)}`
     });
   }
 
-  // 2. Team Participants
-  if (participantCount > 0 && math.remainingPoolAmount > 0) {
-    const eachPercentage = Math.round((((totalPoolRate * teamPoolShare) / 100) / participantCount) * 100) / 100;
-    for (const p of remainingParticipants) {
-      const payout = (p.role === 'AssociateLeader' && math.associateShareAmount > 0)
-        ? math.associateShareAmount
-        : math.eachShareAmount;
-
+  // 2. Associate & Team Members Upline (UPLINE_DISTRIBUTION, Level 2/3, ₹50/Gaz each)
+  if (participantCount > 0 && math.eachShareAmount > 0) {
+    for (const p of uplineParticipants) {
+      const payout = math.eachShareAmount;
       if (payout > 0) {
+        const level = p.role === 'AssociateLeader' ? 2 : 3;
         recipients.push({
           user_id: p.user_id,
           name: p.name,
@@ -693,8 +735,13 @@ async function computeDistributionForBooking(bookingId) {
           user_type: p.user_type,
           role: p.role,
           role_label: p.role_label,
+          commission_type: 'UPLINE_DISTRIBUTION',
+          commission_level: level,
+          plot_size_gaj: plotSizeGaj,
+          rate_per_gaz: uplineRatePerGaj,
           amount: payout,
-          percentage: eachPercentage
+          percentage: 0,
+          notes: `UPLINE_DISTRIBUTION (${p.role_label}): ${plotSizeGaj} Gaz × ₹${uplineRatePerGaj}/Gaz = ₹${payout.toFixed(2)}`
         });
       }
     }
@@ -703,16 +750,20 @@ async function computeDistributionForBooking(bookingId) {
   const companyShareFromReceived = Math.max(0, Number((amountReceived - math.totalDistributedAmount).toFixed(2)));
   const companyRetainedTotal = Number((totalPlotPrice - math.totalDistributedAmount).toFixed(2));
 
-  const wasReleasedWithZeroCommission = Boolean(booking.settlement_status === 'Released' && !isCompanyDirect);
-  const eligibleForRelease = !isBookingCancelled && amountReceived > 0 && (booking.settlement_status !== 'Released' || wasReleasedWithZeroCommission);
+  const wasReleasedWithZeroCommission = Boolean(booking.settlement_status === 'Released' && !isCompanyDirect && !isSelfPurchase);
+  const eligibleForRelease = !isBookingCancelled && plotSizeGaj > 0 && amountReceived > 0 && (booking.settlement_status !== 'Released' || wasReleasedWithZeroCommission);
   let ineligibleReason = null;
   if (booking.settlement_status === 'Released' && !wasReleasedWithZeroCommission) ineligibleReason = 'Settlement has already been released';
   else if (isBookingCancelled) ineligibleReason = 'Booking order is cancelled or rejected';
+  else if (!(plotSizeGaj > 0)) ineligibleReason = 'Plot size in Gaz must be greater than zero';
   else if (amountReceived <= 0) ineligibleReason = 'No advance or payment received yet for this order';
 
   return {
     booking,
     engine,
+    plotSizeGaj,
+    sellerRatePerGaj,
+    uplineRatePerGaj,
     amountReceived,
     totalPlotPrice,
     isSelfPurchase: false,
@@ -721,7 +772,7 @@ async function computeDistributionForBooking(bookingId) {
     eligibleForRelease,
     ineligibleReason,
     settlementStatus: booking.settlement_status || 'Pending',
-    poolRate: totalPoolRate,
+    poolRate: 0,
     poolAmount: math.poolAmount,
     totalDistributionAmount: math.totalDistributedAmount,
     undistributedAmount: math.undistributedAmount,
@@ -1013,15 +1064,20 @@ router.post(
           VALUES (${vSerial}, 'EMI', ${emiId}, ${emi.user_id}, ${paidAmount + lateFee}, ${adminId})
         `.catch(() => {});
 
-        // 4. Distribute commission via MLM Engine
+        // 4. Distribute Per-Gaz commission via MLM Engine (idempotent once per booking)
         let commissionResult = null;
         try {
           commissionResult = await commissionService.generateCommissionForPayment({
             bookingId: emi.booking_id,
-            sourceType: 'EmiPayment',
-            sourceId: `emi-${emiId}`,
-            receivedAmount: paidAmount,
-            paymentType: 'EMI'
+            event: {
+              type: 'EmiPayment',
+              sourceId: `emi-${emiId}`,
+              sourceRef: `emi-${emiId}`,
+              receivedAmount: paidAmount,
+              paymentType: 'EMI'
+            },
+            adminId,
+            db: tx
           });
         } catch (commErr) {
           console.warn('[PaymentSettlement] EMI Commission generation notice:', commErr.message);
@@ -1164,7 +1220,7 @@ router.post(
             bookingId,
             event: {
               type: 'BookingAdvance',
-              key: `settlement:${bookingId}:${Date.now()}`,
+              key: `per-gaz:${bookingId}`,
               principalAmount: amountReceived,
               sourceRef: settlementRef,
               paymentType: booking.payment_type || 'Standard'
@@ -1192,6 +1248,10 @@ router.post(
                 approved_at = NOW(),
                 paid_at = NOW(),
                 payment_reference = ${settlementRef},
+                notes = CASE
+                  WHEN COALESCE(notes, '') = '' THEN ${'Settled under ' + settlementRef + ' (' + calculation.plotSizeGaj + ' Gaz)'}
+                  ELSE notes || ${' | Settled Ref: ' + settlementRef}
+                END,
                 updated_at = NOW()
             WHERE related_booking_id = ${bookingId}
               AND commission_status IN ('Pending', 'Approved')
@@ -1234,7 +1294,8 @@ router.post(
                 `;
               }
 
-              // 2. Insert ledger into wallet_transactions adhering to all schema constraints
+              // 2. Insert ledger into wallet_transactions with descriptive Per-Gaz breakdown
+              const ledgerRemark = `Per-Gaz Commission (${calculation.plotSizeGaj} Gaz × ₹${recipient.rate_per_gaz}/Gaz = ₹${Number(recipient.amount).toFixed(2)}) — ${recipient.commission_type} [${recipient.role_label}] for Booking #${booking.booking_serial || bookingId}`;
               await tx`
                 INSERT INTO wallet_transactions (
                   wallet_id, user_id, user_role, transaction_type, source,
@@ -1244,7 +1305,7 @@ router.post(
                   ${wallet.id}, ${recipient.user_id}, ${recRole},
                   'credit', 'Commission Settlement', ${recipient.amount},
                   ${balanceBefore}, ${balanceAfter}, ${settlementRef},
-                  'success', ${'Commission settlement for Booking #' + (booking.booking_serial || bookingId)}, NOW()
+                  'success', ${ledgerRemark}, NOW()
                 )
               `.catch((txErr) => {
                 console.error(`[PaymentSettlement] Wallet transaction insert error for user ${recipient.user_id}:`, txErr.message);
@@ -1254,17 +1315,21 @@ router.post(
         }
 
         // 5. Update bookings table
+        const perGazSummaryNote = `Per-Gaz Distribution: ${calculation.plotSizeGaj} Gaz (Direct ₹${calculation.sellerRatePerGaj}/Gaz, Upline ₹${calculation.uplineRatePerGaj}/Gaz × ${calculation.participantsCount} upline members = ₹${Number(calculation.totalDistributionAmount).toFixed(2)})`;
         const auditEntry = {
           action: 'RELEASE_SETTLEMENT',
           admin_id: adminId,
           admin_name: adminName,
           timestamp: new Date().toISOString(),
           settlement_reference: settlementRef,
+          plot_size_gaj: calculation.plotSizeGaj,
+          seller_rate_per_gaz: calculation.sellerRatePerGaj,
+          upline_rate_per_gaz: calculation.uplineRatePerGaj,
           amount_received: amountReceived,
           total_distributed: calculation.totalDistributionAmount,
           company_share: calculation.companyShareFromReceived,
           recipient_count: calculation.recipients.length,
-          remarks: remarks || 'Authorized release by Admin'
+          remarks: remarks ? `${remarks} | ${perGazSummaryNote}` : perGazSummaryNote
         };
 
         const existingAuditLog = Array.isArray(booking.settlement_audit_log) ? booking.settlement_audit_log : [];
@@ -1283,6 +1348,7 @@ router.post(
         `;
 
         // 6. Record immutable settlement in plot_order_settlements table (upsert safe)
+        const settlementNotes = remarks ? `${remarks} | ${perGazSummaryNote}` : perGazSummaryNote;
         await tx`
           INSERT INTO plot_order_settlements (
             booking_id, settlement_reference, admin_id, admin_name,
@@ -1294,7 +1360,7 @@ router.post(
             ${calculation.totalDistributionAmount}, ${calculation.companyShareFromReceived},
             ${tx.json(calculation.recipients)},
             ${booking.settlement_status || 'Pending'}, 'Released',
-            ${remarks || 'Authorized settlement release'}
+            ${settlementNotes}
           )
           ON CONFLICT (settlement_reference) DO UPDATE SET
             admin_id = EXCLUDED.admin_id,

@@ -141,17 +141,19 @@ export async function resolveAssociate(db, userId) {
     // Fallback if SQL function not available
   }
 
+  // Check active/approved team_members enrollment FIRST (handles role-conflict TMs cleanly)
+  const [tm] = await db`
+    SELECT associate_id FROM team_members 
+    WHERE user_id = ${userId} AND LOWER(COALESCE(status, '')) IN ('approved', 'active', 'pending')
+    ORDER BY created_at DESC LIMIT 1
+  `.catch(() => []);
+  if (tm?.associate_id) return Number(tm.associate_id);
+
   const [user] = await db`SELECT user_id, user_type, sponsor_user_id FROM users WHERE user_id = ${userId}`;
   if (!user) return null;
   if (user.user_type === 'Associate') return user.user_id;
   if (user.user_type === 'Team Member') {
-    const [tm] = await db`
-      SELECT associate_id FROM team_members 
-      WHERE user_id = ${userId} AND status IN ('approved', 'active', 'pending')
-      ORDER BY created_at DESC LIMIT 1
-    `;
-    if (tm?.associate_id) return Number(tm.associate_id);
-    return user.sponsor_user_id || null;
+    return user.sponsor_user_id ? Number(user.sponsor_user_id) : null;
   }
   return null;
 }
@@ -269,7 +271,17 @@ export async function createBooking({
     throw createBookingError('Actor account must be active and approved to perform bookings.', 403);
   }
 
-  const normalizedActorType = String(dbActor.user_type || '').trim();
+  let normalizedActorType = String(dbActor.user_type || '').trim();
+  const [actorTmRow] = await runner`
+    SELECT id, team_member_uid, associate_id, status
+    FROM team_members
+    WHERE user_id = ${dbActor.user_id}
+      AND LOWER(COALESCE(status, '')) IN ('approved', 'active')
+    ORDER BY created_at DESC LIMIT 1
+  `.catch(() => []);
+  if (actorTmRow && ['Associate', 'Team Member'].includes(normalizedActorType)) {
+    normalizedActorType = 'Team Member';
+  }
   let normalizedBuyerType = String(buyerType || 'SELF').toUpperCase();
   if (normalizedBuyerType === 'ON_BEHALF') {
     normalizedBuyerType = 'CUSTOMER';
@@ -342,12 +354,42 @@ export async function createBooking({
       if (!targetCustomer) {
         throw createBookingError('Selected customer not found.', 404);
       }
-      if (targetCustomer.user_type !== 'Customer') {
+      if (!['customer', 'user'].includes(String(targetCustomer.user_type || '').toLowerCase())) {
         throw createBookingError('Target user must be a Customer.', 400);
       }
 
-      // Hard Rule: Team Member can ONLY book for customers directly referred by them
-      if (Number(targetCustomer.referred_by_user_id) !== dbActor.user_id && Number(targetCustomer.sponsor_user_id) !== dbActor.user_id) {
+      // Hard Rule: Team Member can ONLY book for customers attributed to them (referral, sponsor, enrollment, or prior booking)
+      let isAuthorizedCustomerForTm =
+        Number(targetCustomer.referred_by_user_id) === dbActor.user_id ||
+        Number(targetCustomer.sponsor_user_id) === dbActor.user_id;
+
+      if (!isAuthorizedCustomerForTm) {
+        const actorMemberId = String(dbActor.member_id || '').trim();
+        const actorTmUid = String(actorTmRow?.team_member_uid || '').trim();
+        const [enrolledMatch] = await runner`
+          SELECT 1 FROM customer_enrollment_submissions sub
+          WHERE sub.user_id = ${targetCusId}
+            AND (
+              (${actorMemberId} <> '' AND LOWER(TRIM(COALESCE(sub.associate_id, ''))) = LOWER(${actorMemberId}))
+              OR (${actorTmUid} <> '' AND LOWER(TRIM(COALESCE(sub.associate_id, ''))) = LOWER(${actorTmUid}))
+              OR TRIM(COALESCE(sub.associate_id, '')) = ${String(dbActor.user_id)}
+            )
+          LIMIT 1
+        `.catch(() => []);
+        if (enrolledMatch) {
+          isAuthorizedCustomerForTm = true;
+        } else {
+          const [priorBookingMatch] = await runner`
+            SELECT 1 FROM bookings b
+            WHERE b.user_id = ${targetCusId}
+              AND (b.sold_by_user_id = ${dbActor.user_id} OR b.associate_user_id = ${dbActor.user_id} OR b.sponsor_user_id = ${dbActor.user_id})
+            LIMIT 1
+          `.catch(() => []);
+          isAuthorizedCustomerForTm = Boolean(priorBookingMatch);
+        }
+      }
+
+      if (!isAuthorizedCustomerForTm) {
         throw createBookingError('Unauthorized: Team Members can only book on behalf of customers directly referred by them.', 403);
       }
 
@@ -380,7 +422,7 @@ export async function createBooking({
       if (!targetCustomer) {
         throw createBookingError('Selected buyer (customer or team member) not found.', 404);
       }
-      if (!['Customer', 'Team Member'].includes(targetCustomer.user_type)) {
+      if (!['customer', 'user', 'team member'].includes(String(targetCustomer.user_type || '').toLowerCase())) {
         throw createBookingError('Target user must be a Customer or Team Member.', 400);
       }
 
@@ -430,11 +472,12 @@ export async function createBooking({
         const isDirectReferral = Number(targetCustomer.referred_by_user_id) === dbActor.user_id ||
                                  Number(targetCustomer.sponsor_user_id) === dbActor.user_id;
         let isTeamMemberReferral = false;
+        let enrolledSellerUserId = null;
         const refId = targetCustomer.referred_by_user_id || targetCustomer.sponsor_user_id;
         if (!isDirectReferral && refId) {
           const [tmCheck] = await runner`
             SELECT 1 FROM team_members 
-            WHERE (user_id = ${refId} OR team_member_uid = ${refId}) 
+            WHERE (user_id = ${refId} OR CAST(team_member_uid AS TEXT) = ${String(refId)}) 
               AND associate_id = ${dbActor.user_id}
               AND (status IS NULL OR LOWER(status) IN ('approved', 'active', 'verified'))
             LIMIT 1
@@ -442,14 +485,48 @@ export async function createBooking({
           isTeamMemberReferral = Boolean(tmCheck);
         }
 
+        let isDirectEnrollment = false;
         if (!isDirectReferral && !isTeamMemberReferral) {
+          const actorMemberId = String(dbActor.member_id || '').trim();
+          const [directEnr] = await runner`
+            SELECT 1 FROM customer_enrollment_submissions sub
+            WHERE sub.user_id = ${targetCusId}
+              AND (
+                (${actorMemberId} <> '' AND LOWER(TRIM(COALESCE(sub.associate_id, ''))) = LOWER(${actorMemberId}))
+                OR TRIM(COALESCE(sub.associate_id, '')) = ${String(dbActor.user_id)}
+              )
+            LIMIT 1
+          `.catch(() => []);
+          isDirectEnrollment = Boolean(directEnr);
+
+          if (!isDirectEnrollment) {
+            const [tmEnr] = await runner`
+              SELECT tm.user_id AS tm_user_id
+              FROM customer_enrollment_submissions sub
+              JOIN team_members tm ON (
+                (tm.team_member_uid IS NOT NULL AND LOWER(TRIM(COALESCE(sub.associate_id, ''))) = LOWER(TRIM(tm.team_member_uid)))
+                OR TRIM(COALESCE(sub.associate_id, '')) = CAST(tm.user_id AS TEXT)
+              )
+              WHERE sub.user_id = ${targetCusId}
+                AND tm.associate_id = ${dbActor.user_id}
+                AND LOWER(COALESCE(tm.status, '')) IN ('approved', 'active')
+              LIMIT 1
+            `.catch(() => []);
+            if (tmEnr?.tm_user_id) {
+              isTeamMemberReferral = true;
+              enrolledSellerUserId = Number(tmEnr.tm_user_id);
+            }
+          }
+        }
+
+        if (!isDirectReferral && !isTeamMemberReferral && !isDirectEnrollment) {
           throw createBookingError('Unauthorized: Customer does not belong to your authorized team network.', 403);
         }
 
         derivedBookingType = 'ON_BEHALF_BY_ASSOCIATE';
         derivedBuyerUserId = targetCustomer.user_id;
-        // Seller is the customer's actual referrer (actor if direct, TM if referred by TM)
-        derivedSoldByUserId = refId || dbActor.user_id;
+        // Seller is the customer's actual referrer (actor if direct, TM if referred/enrolled by TM)
+        derivedSoldByUserId = refId || enrolledSellerUserId || dbActor.user_id;
         derivedAssociateUserId = dbActor.user_id;
         derivedApprovalStatus = 'AutoApproved_CreatedByAssociate';
       }
@@ -479,19 +556,10 @@ export async function createBooking({
     throw createBookingError('Buyer must verify their email or mobile before booking.', 403);
   }
   // 4. Validate Buyer Compliance (Active, Email/Mobile verified)
-  // NOTE: Document verification approval is strictly required for Team Member and Associate,
-  // but is NOT mandatory for Customers. Customers can book directly once enrolled.
-  if (buyer.user_type === 'Customer') {
-    if (buyer.kyc_status !== 'Approved') {
-      try {
-        await runner`
-          INSERT INTO user_kyc_profiles (user_id, status, submitted_at, approved_at, remarks)
-          VALUES (${buyer.user_id}, 'Approved', NOW(), NOW(), 'Auto-approved for customer plot booking')
-          ON CONFLICT (user_id) DO UPDATE SET status = 'Approved', approved_at = NOW()
-        `;
-      } catch (_) {}
-    }
-  } else {
+  // NOTE: Document verification & KYC approval are strictly required for Team Member and Associate,
+  // but are NOT mandatory for Customer plot bookings (direct or on-behalf).
+  const isCustomerBuyer = ['customer', 'user'].includes(String(buyer.user_type || '').toLowerCase());
+  if (!isCustomerBuyer) {
     // For non-Customer (Team Member, Associate): Document approval remains strictly mandatory
     if (buyer.kyc_status !== 'Approved') {
       if (['Associate', 'Team Member'].includes(normalizedActorType) && buyer.user_id !== dbActor.user_id) {

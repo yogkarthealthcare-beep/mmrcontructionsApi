@@ -69,14 +69,16 @@ router.get(['/team-member/commission-summary', '/api/team-member/commission-summ
         AND c.commission_status IN ('Approved', 'Paid')
     `;
 
-    // Pending Commission: Commission from attributed bookings where settlement_status is 'Pending'
-    // and booking is valid (not Cancelled/Rejected)
+    // Pending Commission: Commission from attributed customer bookings where settlement_status is 'Pending'
+    // Strict self-purchase exclusion (0% commission) and Per-Gaz fallback (₹500/Gaz Direct, ₹50/Gaz Upline)
     const [pendingBookingComms] = await sql`
       SELECT 
         COALESCE(SUM(
           CASE 
             WHEN c.net_amount IS NOT NULL THEN c.net_amount
-            ELSE ROUND(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) * 0.05, 2)
+            WHEN COALESCE(b.booking_type, '') = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id THEN 0
+            WHEN b.sold_by_user_id = ${userId} THEN ROUND(COALESCE(p.plot_area, 0) * 500, 2)
+            ELSE ROUND(COALESCE(p.plot_area, 0) * 50, 2)
           END
         ), 0)::numeric AS pending_commission
       FROM bookings b
@@ -86,6 +88,7 @@ router.get(['/team-member/commission-summary', '/api/team-member/commission-summ
         FROM commission_transactions cx 
         WHERE cx.related_booking_id = b.booking_id 
           AND cx.associate_user_id = ${userId} 
+          AND cx.commission_status NOT IN ('Cancelled', 'Reversed')
         LIMIT 1
       ) c ON TRUE
       WHERE (b.sold_by_user_id = ${userId} OR c.net_amount IS NOT NULL)
@@ -197,12 +200,16 @@ router.get(['/team-member/commissions', '/api/team-member/commissions'], verifyU
         b.settlement_released_at AS settlement_date,
         b.settlement_reference,
 
-        -- Commission Details
+        -- Commission Details (Per-Gaz Fixed Structure: ₹500/Gaz Direct, ₹50/Gaz Upline; Self-Purchase = ₹0)
         COALESCE(c.commission_id, 0) AS commission_id,
-        COALESCE(c.commission_percentage, 5.00) AS commission_percentage,
+        COALESCE(c.commission_percentage, 0) AS commission_percentage,
         COALESCE(
           c.net_amount,
-          ROUND(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) * 0.05, 2)
+          CASE
+            WHEN COALESCE(b.booking_type, '') = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id THEN 0
+            WHEN b.sold_by_user_id = ${userId} THEN ROUND(COALESCE(p.plot_area, 0) * 500, 2)
+            ELSE ROUND(COALESCE(p.plot_area, 0) * 50, 2)
+          END
         ) AS commission_amount,
         COALESCE(c.commission_status::text, CASE WHEN b.settlement_status = 'Released' THEN 'Approved' ELSE 'Pending' END) AS commission_status,
         CASE
@@ -265,7 +272,9 @@ router.get(['/team-member/commissions', '/api/team-member/commissions'], verifyU
       SELECT COALESCE(SUM(
         CASE 
           WHEN c.net_amount IS NOT NULL THEN c.net_amount
-          ELSE ROUND(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) * 0.05, 2)
+          WHEN COALESCE(b.booking_type, '') = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id THEN 0
+          WHEN b.sold_by_user_id = ${userId} THEN ROUND(COALESCE(p.plot_area, 0) * 500, 2)
+          ELSE ROUND(COALESCE(p.plot_area, 0) * 50, 2)
         END
       ), 0)::numeric AS pending_commission
       FROM bookings b
@@ -275,6 +284,7 @@ router.get(['/team-member/commissions', '/api/team-member/commissions'], verifyU
         FROM commission_transactions cx 
         WHERE cx.related_booking_id = b.booking_id 
           AND cx.associate_user_id = ${userId} 
+          AND cx.commission_status NOT IN ('Cancelled', 'Reversed')
         LIMIT 1
       ) c ON TRUE
       WHERE (b.sold_by_user_id = ${userId} OR c.net_amount IS NOT NULL)
@@ -345,12 +355,16 @@ router.get(['/team-member/sales', '/api/team-member/sales'], verifyUserToken, re
         buyer.mobile_no AS customer_mobile,
         buyer.member_id AS customer_member_id,
         
-        -- Settlement & Commission details
+        -- Settlement & Commission details (Per-Gaz Fixed: ₹500/Gaz for Seller, ₹0 for Self-Purchase)
         COALESCE(b.settlement_status, 'Pending') AS settlement_status,
         b.settlement_released_at,
         COALESCE(
           c.net_amount,
-          ROUND(COALESCE(b.base_price, p.sold_price, p.base_price, (COALESCE(b.advance_amount, 0) + COALESCE(b.remaining_balance, 0)), 0) * 0.05, 2)
+          CASE
+            WHEN COALESCE(b.booking_type, '') = 'SELF_PURCHASE' OR b.user_id = b.sold_by_user_id THEN 0
+            WHEN b.sold_by_user_id = ${userId} THEN ROUND(COALESCE(p.plot_area, 0) * 500, 2)
+            ELSE ROUND(COALESCE(p.plot_area, 0) * 50, 2)
+          END
         ) AS commission_amount
       FROM bookings b
       LEFT JOIN plots p ON p.plot_id = b.plot_id

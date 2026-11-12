@@ -76,7 +76,7 @@ async function compliance(userId) {
     LEFT JOIN user_kyc_profiles k ON k.user_id = u.user_id
     WHERE u.user_id = ${userId}`;
   if (!row) return null;
-  const isCustomer = String(row.user_type || '').toLowerCase() === 'customer';
+  const isCustomer = ['customer', 'user'].includes(String(row.user_type || '').toLowerCase());
   return {
     ...row,
     account_active: ["Active", "Approved"].includes(String(row.account_status)) && row.is_active !== false,
@@ -92,7 +92,7 @@ async function compliance(userId) {
 function complianceFailure(result) {
   if (!result?.account_active) return ["Your account must be active before booking a plot.", "ACCOUNT_INACTIVE"];
   if (!result.email_verified) return ["Please verify your email address before booking a plot.", "EMAIL_NOT_VERIFIED"];
-  const isCustomer = String(result.user_type || '').toLowerCase() === 'customer';
+  const isCustomer = ['customer', 'user'].includes(String(result.user_type || '').toLowerCase());
   // Document verification is NOT mandatory for Customers:
   if (!isCustomer && result.kyc_status !== "Approved") {
     return [
@@ -299,7 +299,7 @@ async function completeBooking(bookingId, payment, adminId = null) {
         confirmed_at = NOW(),
         updated_at = NOW()
       WHERE booking_id = ${bookingId}`;
-    
+
     await setPlotStatus(booking.plot_id, 'Booked', {
       adminId,
       reason: 'Booking Confirmed via Workflow',
@@ -309,7 +309,7 @@ async function completeBooking(bookingId, payment, adminId = null) {
     await db`
       UPDATE plot_booking_locks SET status = 'Converted', updated_at = NOW()
       WHERE booking_id = ${bookingId} AND status = 'Active'`;
-    
+
     // In same transaction: all OTHER active bookings on that plot become Waitlisted
     const otherBookings = await db`
       SELECT b.booking_id, b.user_id, u.full_name, u.email, p.plot_number, s.site_name
@@ -330,12 +330,12 @@ async function completeBooking(bookingId, payment, adminId = null) {
             queue_position = ${pos},
             updated_at = NOW()
         WHERE booking_id = ${other.booking_id}`;
-      
+
       try {
         await db`
           INSERT INTO plot_booking_history (plot_id, booking_id, user_id, event_type, event_note, triggered_by_admin, plot_status_at_time, created_at)
           VALUES (${booking.plot_id}, ${other.booking_id}, ${other.user_id}, 'BookingWaitlisted', 'Plot allotted to another booking. Placed on waitlist.', ${adminId}, 'Booked', NOW())`;
-      } catch (_) {}
+      } catch (_) { }
 
       dispatchBookingNotification('booking_waitlisted', {
         userId: other.user_id,
@@ -809,7 +809,7 @@ const handleAdminKycUpdate = async (req, res) => {
     const rejectReasonText = status === "Rejected" ? (req.body.remarks || "Rejected by Admin") : null;
 
     if (status === "Approved") {
-      await sql`UPDATE users SET is_verified = TRUE, updated_at = NOW() WHERE user_id = ${userId}`.catch(() => {});
+      await sql`UPDATE users SET is_verified = TRUE, updated_at = NOW() WHERE user_id = ${userId}`.catch(() => { });
     }
 
     const hasAuditCols = await hasCustomerApprovalAuditColumns(sql);
@@ -964,16 +964,16 @@ router.patch("/admin/bookings/:id/appointment", adminAuth, async (req, res) => {
 
 async function ensureAllocationSchema() {
   try {
-    await sql`ALTER TABLE bookings ALTER COLUMN booking_status TYPE VARCHAR(60) USING booking_status::text`.catch(() => {});
-    await sql`ALTER TABLE bookings ALTER COLUMN payment_type TYPE VARCHAR(60) USING payment_type::text`.catch(() => {});
-    await sql`ALTER TABLE bookings ALTER COLUMN payment_method TYPE VARCHAR(60) USING payment_method::text`.catch(() => {});
-    await sql`ALTER TABLE bookings ALTER COLUMN workflow_status TYPE VARCHAR(80) USING workflow_status::text`.catch(() => {});
-    await sql`ALTER TABLE notification_log ALTER COLUMN channel TYPE VARCHAR(60) USING channel::text`.catch(() => {});
-    await sql`ALTER TYPE booking_status_enum ADD VALUE IF NOT EXISTS 'Allocated'`.catch(() => {});
-    await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'Full'`.catch(() => {});
-    await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'FullPayment'`.catch(() => {});
-    await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'InApp'`.catch(() => {});
-    await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'inapp'`.catch(() => {});
+    await sql`ALTER TABLE bookings ALTER COLUMN booking_status TYPE VARCHAR(60) USING booking_status::text`.catch(() => { });
+    await sql`ALTER TABLE bookings ALTER COLUMN payment_type TYPE VARCHAR(60) USING payment_type::text`.catch(() => { });
+    await sql`ALTER TABLE bookings ALTER COLUMN payment_method TYPE VARCHAR(60) USING payment_method::text`.catch(() => { });
+    await sql`ALTER TABLE bookings ALTER COLUMN workflow_status TYPE VARCHAR(80) USING workflow_status::text`.catch(() => { });
+    await sql`ALTER TABLE notification_log ALTER COLUMN channel TYPE VARCHAR(60) USING channel::text`.catch(() => { });
+    await sql`ALTER TYPE booking_status_enum ADD VALUE IF NOT EXISTS 'Allocated'`.catch(() => { });
+    await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'Full'`.catch(() => { });
+    await sql`ALTER TYPE payment_type_enum ADD VALUE IF NOT EXISTS 'FullPayment'`.catch(() => { });
+    await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'InApp'`.catch(() => { });
+    await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'inapp'`.catch(() => { });
 
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS plot_number VARCHAR(180)`;
     await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS site_id INTEGER`;
@@ -1139,7 +1139,7 @@ router.post("/admin/bookings/allocate-plot", adminAuth, async (req, res) => {
               FALSE,
               NOW()
             )`;
-        } catch (_) {}
+        } catch (_) { }
       }
 
       return { booking, payment: paymentRecord, plot_number: plotNumber, site_name: site.site_name };
@@ -1549,7 +1549,7 @@ router.post("/admin/bookings/:id/mark-sold", adminAuth, async (req, res) => {
       if (Number(pendingPay?.count || 0) > 0) {
         return fail(res, "Cannot mark as Sold while milestone payments are pending verification.", 400);
       }
-    } catch (_) {}
+    } catch (_) { }
 
     const soldPriceValue = Number(final_sold_price || booking.base_price || 0);
     if (soldPriceValue <= 0) {
@@ -1615,7 +1615,7 @@ router.post("/admin/bookings/:id/mark-sold", adminAuth, async (req, res) => {
             ${`Registry deed: ${registry_no || 'Recorded'}. Sold Price: ₹${soldPriceValue.toLocaleString('en-IN')}`},
             ${req.admin?.admin_id || null}, 'Sold', NOW()
           )`;
-      } catch (_) {}
+      } catch (_) { }
 
       return registryRecord;
     });
@@ -1742,7 +1742,7 @@ router.post("/admin/bookings/:id/move-plot", adminAuth, async (req, res) => {
             ${`Transferred to Plot ${newPlot.plot_number}. ${remarks}`},
             ${req.admin?.admin_id || null}, 'InProcess', NOW()
           )`;
-      } catch (_) {}
+      } catch (_) { }
 
       // Dispatch notification
       dispatchBookingNotification('booking_submitted', {
@@ -1825,7 +1825,7 @@ router.post("/admin/bookings/:id/cancel-refund-due", adminAuth, async (req, res)
             ${`Booking cancelled with Refund Due flag. Reason: ${reason}`},
             ${req.admin?.admin_id || null}, 'Cancelled', NOW()
           )`;
-      } catch (_) {}
+      } catch (_) { }
 
       dispatchBookingNotification('booking_cancelled', {
         userId: booking.user_id,
@@ -1909,7 +1909,7 @@ router.post("/admin/bookings/:id/promote", adminAuth, async (req, res) => {
             'Promoted from Waitlist to Active Booking by Admin',
             ${req.admin?.admin_id || null}, 'InProcess', NOW()
           )`;
-      } catch (_) {}
+      } catch (_) { }
 
       dispatchBookingNotification('booking_promoted', {
         userId: booking.user_id,

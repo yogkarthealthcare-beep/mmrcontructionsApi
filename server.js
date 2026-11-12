@@ -118,6 +118,7 @@ const isAllowedOrigin = (origin) => {
   if (allowedOrigins.includes(origin)) return true;
   if (/https?:\/\/(www\.|api\.)?mmrconstructions\.in$/i.test(origin)) return true;
   if (/https?:\/\/mmrconstructions-[a-z0-9]+\.(web\.app|firebaseapp\.com)$/i.test(origin)) return true;
+  if (/^http:\/\/localhost:\d+$/.test(origin)) return true; // Allow Flutter Web dynamic localhost ports
   return false;
 };
 
@@ -2798,6 +2799,24 @@ app.get("/api/admin/company-settings",
   }
 );
 
+app.get(["/api/public/auth-settings", "/api/auth/settings"], async (req, res) => {
+  try {
+    const settings = await getAppAuthSettingsRow();
+    return ok(res, {
+      email_otp_enabled: settings.email_otp_enabled !== false,
+      sms_otp_enabled: Boolean(settings.sms_otp_enabled),
+      otp_login_enabled: Boolean(settings.sms_otp_enabled),
+    }, "Auth settings fetched.");
+  } catch (e) {
+    console.error("[Public Auth Settings Fetch Error]", e);
+    return ok(res, {
+      email_otp_enabled: true,
+      sms_otp_enabled: false,
+      otp_login_enabled: false,
+    }, "Auth settings fallback.");
+  }
+});
+
 app.get("/api/admin/auth-settings",
   verifyAdminToken,
   role("SuperAdmin", "Admin", "SiteManager"),
@@ -4272,21 +4291,29 @@ app.post("/api/auth/send-otp", async (req, res) => {
 
     const otp = genOTP();
     const exp = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+    const rawMobile = String(mobile_no).trim();
+    const digits = rawMobile.replace(/\D/g, "");
+    const normalizedMobile = digits.length >= 10 ? digits.slice(-10) : rawMobile;
 
     // Invalidate old OTPs
     await sql`
       UPDATE otp_log SET is_used = TRUE
-      WHERE mobile = ${mobile_no} AND purpose = ${purpose} AND is_used = FALSE`;
+      WHERE (mobile = ${rawMobile} OR mobile = ${normalizedMobile} OR RIGHT(regexp_replace(mobile, '\\D', '', 'g'), 10) = ${normalizedMobile})
+        AND purpose = ${purpose} AND is_used = FALSE`;
+
+    // Persist OTP for verification on login/reset
+    await safeInsertOtpLog('User', null, normalizedMobile, otp, purpose, exp);
 
     // Dispatch SMS OTP via 2Factor if configured (STRICTLY SMS - NO VOICE CALL / NO OBD)
     try {
       await twoFactorService.sendCustomOtp({
-        mobile: mobile_no,
+        mobile: rawMobile,
         otp,
         purpose,
       });
     } catch (smsErr) {
       console.warn("[Auth Send-OTP SMS Note]:", smsErr.message);
+      return err(res, smsErr.message || "Failed to send SMS OTP", 502);
     }
 
     return ok(res, { mobile_no }, "OTP sent successfully via SMS text message.");
@@ -5152,18 +5179,21 @@ app.post("/api/auth/login", async (req, res) => {
     }
 
     // OTP login
-    if (otp_code || (authSettings.email_otp_enabled === false && !password)) {
+    if (otp_code) {
+      if (authSettings.sms_otp_enabled === false) {
+        return err(res, "OTP login is currently disabled by admin. Please sign in with your password.", 403);
+      }
       if (!loginMobile) return err(res, "OTP login requires mobile number", 400);
 
-      if (authSettings.email_otp_enabled !== false) {
-        const [otpRow] = await sql`
-          SELECT * FROM otp_log
-          WHERE mobile = ${loginMobile} AND otp_code = ${otp_code}
-            AND purpose = 'Login' AND is_used = FALSE AND expires_at > NOW()
-          ORDER BY otp_id DESC LIMIT 1`;
-        if (!otpRow) return err(res, "Invalid or expired OTP", 401);
-        await sql`UPDATE otp_log SET is_used = TRUE WHERE otp_id = ${otpRow.otp_id}`;
-      }
+      const otpLookupMobile = cleanMobile || loginMobile;
+      const [otpRow] = await sql`
+        SELECT * FROM otp_log
+        WHERE (mobile = ${loginMobile} OR mobile = ${otpLookupMobile} OR RIGHT(regexp_replace(mobile, '\\D', '', 'g'), 10) = ${otpLookupMobile})
+          AND otp_code = ${otp_code}
+          AND purpose = 'Login' AND is_used = FALSE AND expires_at > NOW()
+        ORDER BY otp_id DESC LIMIT 1`;
+      if (!otpRow) return err(res, "Invalid or expired OTP", 401);
+      await sql`UPDATE otp_log SET is_used = TRUE WHERE otp_id = ${otpRow.otp_id}`;
     }
     // Password login
     else if (password) {
@@ -5514,23 +5544,21 @@ app.post("/api/admin/auth/login", async (req, res) => {
 
     if (!admin) return err(res, "Invalid credentials", 401);
     if (!admin.is_active) return err(res, "Account deactivated", 403);
-    if (admin.is_locked) return err(res, "Account locked after 5 failed attempts. Contact Super Admin.", 403);
+    // REMOVED LOCK LOGIC per user request
+    // if (admin.is_locked) return err(res, "Account locked after 5 failed attempts. Contact Super Admin.", 403);
 
-    const valid = await bcrypt.compare(password, admin.password_hash);
+    const valid = admin.password_hash && admin.password_hash.startsWith('$2')
+        ? await bcrypt.compare(password, admin.password_hash)
+        : password === admin.password_hash;
 
     if (!valid) {
-      const attempts = admin.failed_login_attempts + 1;
-      await sql`
-        UPDATE admin_users SET
-          failed_login_attempts = ${attempts},
-          is_locked = ${attempts >= 5}
-        WHERE admin_id = ${admin.admin_id}`;
-      return err(res, `Invalid credentials. ${5 - attempts} attempts remaining.`, 401);
+      // REMOVED FAILED ATTEMPT INCREMENT LOGIC
+      return err(res, `Invalid credentials.`, 401);
     }
 
     // Reset failed attempts, set last login
     await sql`
-      UPDATE admin_users SET failed_login_attempts = 0, last_login_at = NOW()
+      UPDATE admin_users SET failed_login_attempts = 0, is_locked = false, last_login_at = NOW()
       WHERE admin_id = ${admin.admin_id}`;
 
     const payload = {
@@ -7630,7 +7658,10 @@ app.post("/api/bookings", verifyUserToken, async (req, res) => {
       notes: notes || "Booking submitted by user",
       customPlotPrice: req.body.custom_plot_price || req.body.plot_price || req.body.base_price || req.body.customPlotPrice,
       plotArea: req.body.plot_area || req.body.plotArea,
-      areaUnit: req.body.area_unit || req.body.areaUnit
+      areaUnit: req.body.area_unit || req.body.areaUnit,
+      installmentPlanId: req.body.installment_plan_id || req.body.installmentPlanId,
+      interestAmount: req.body.interest_amount,
+      plotSize: req.body.plot_size || req.body.plotSize,
     });
 
     const booking = {
@@ -8936,13 +8967,17 @@ app.get(["/api/team-member/my-customers", "/api/team-member/customers"], verifyU
     const callerId = Number(req.user.user_id || req.user.userId || req.user.id);
     if (!callerId) return err(res, "Authentication required", 401);
 
-    // Get team member UID if exists
+    const [callerUser] = await sql`
+      SELECT user_id, member_id FROM users WHERE user_id = ${callerId} LIMIT 1
+    `.catch(() => []);
     const [tmRow] = await sql`
       SELECT team_member_uid, associate_id, status FROM team_members 
-      WHERE user_id = ${callerId} 
+      WHERE user_id = ${callerId} AND LOWER(COALESCE(status, '')) IN ('approved', 'active')
       ORDER BY created_at DESC LIMIT 1
     `.catch(() => []);
-    const tmUid = tmRow?.team_member_uid || '';
+    const tmUid = String(tmRow?.team_member_uid || '').trim();
+    const callerMemberId = String(callerUser?.member_id || '').trim();
+    const callerIdStr = String(callerId);
 
     // Optional Search query
     const { search = '' } = req.query;
@@ -8974,8 +9009,12 @@ app.get(["/api/team-member/my-customers", "/api/team-member/customers"], verifyU
           )
           OR c.user_id IN (
             SELECT sub.user_id FROM customer_enrollment_submissions sub 
-            WHERE (${tmUid} <> '' AND sub.associate_id = ${tmUid}) 
-               OR sub.associate_id = ${String(callerId)}
+            WHERE sub.user_id IS NOT NULL
+              AND (
+                (${callerMemberId} <> '' AND LOWER(TRIM(COALESCE(sub.associate_id, ''))) = LOWER(${callerMemberId}))
+                OR (${tmUid} <> '' AND LOWER(TRIM(COALESCE(sub.associate_id, ''))) = LOWER(${tmUid}))
+                OR TRIM(COALESCE(sub.associate_id, '')) = ${callerIdStr}
+              )
           )
         )
         ${searchPattern ? sql`AND (c.full_name ILIKE ${searchPattern} OR c.member_id ILIKE ${searchPattern} OR c.mobile_no ILIKE ${searchPattern})` : sql``}
@@ -9776,6 +9815,8 @@ app.get("/api/associate/team-members", verifyUserToken, requireAssociate, async 
         COALESCE(u.mobile_no, m.tm_mobile_no, '—') AS mobile_no,
         COALESCE(u.email, m.tm_email_id, '—') AS email,
         'Team Member' AS user_type,
+        COALESCE(u.user_type::text, 'Team Member') AS actual_user_type,
+        (m.tm_record_id IS NOT NULL OR LOWER(COALESCE(u.user_type::text, '')) = 'team member') AS is_team_member_entity,
         COALESCE(u.account_status::text, m.tm_status, 'Active') AS account_status,
         ${associateId}::int AS sponsor_user_id,
         COALESCE(u.registered_at, m.tm_created_at, NOW()) AS registered_at,
@@ -10008,7 +10049,9 @@ app.post("/api/associate/bookings", verifyUserToken, requireSalesEntity, async (
       advanceAmount: amountToUse,
       paymentMethod: payment_method || "Cash / Bank",
       notes: notes || `Assisted booking by Associate/Team Member`,
-      customPlotPrice: req.body.custom_plot_price || req.body.plot_price || req.body.base_price || req.body.customPlotPrice
+      customPlotPrice: req.body.custom_plot_price || req.body.plot_price || req.body.base_price || req.body.customPlotPrice,
+      plotArea: req.body.plot_area ?? req.body.plotArea,
+      areaUnit: req.body.area_unit ?? req.body.areaUnit
     });
 
     const booking = result.booking;
@@ -10022,9 +10065,13 @@ app.post("/api/associate/bookings", verifyUserToken, requireSalesEntity, async (
 
     // Create Invoice Record (Single Source of Truth)
     const formattedInvNum = `MMR-INV-${booking.booking_id}`;
+    const resolvedArea = booking.plot_area || plot.plot_area || '';
+    const resolvedUnit = booking.area_unit || plot.area_unit || 'Gaj';
     const invData = {
       invoice_number: formattedInvNum,
-      invoice_type: payment_option === "OneTime" ? "Full Plot Payment" : "Plot Booking Advance (Part-Wise)",
+      invoice_type: payment_option === "OneTime"
+        ? "Full Plot Payment"
+        : (isEmi ? "Plot Booking Down Payment (EMI)" : "Plot Booking Advance (Part-Wise)"),
       booking_id: booking.booking_id,
       booking_serial: booking.booking_serial,
       customer_name: teamMember.full_name,
@@ -10034,7 +10081,7 @@ app.post("/api/associate/bookings", verifyUserToken, requireSalesEntity, async (
       associate_id: associate?.member_id || `ASSOC${associateId}`,
       site_name: plot.site_name,
       plot_number: plot.plot_number,
-      plot_size: `${plot.plot_area || ''} Sq.Yd.`.trim(),
+      plot_size: `${resolvedArea} ${resolvedUnit}`.trim(),
       total_plot_price: totalPlotPrice,
       down_payment: initialPaid,
       grand_total: totalPlotPrice,
@@ -10043,7 +10090,7 @@ app.post("/api/associate/bookings", verifyUserToken, requireSalesEntity, async (
       payment_method: payment_method || "Cash / Bank",
       payment_date: new Date().toISOString().split('T')[0],
       payment_option: payment_option,
-      interest_amount: 0,
+      interest_amount: Number(booking.interest_amount || 0),
       notes: notes || "Associate assisted booking"
     };
 
@@ -16544,9 +16591,12 @@ app.get("/api/admin/commission-plan",
       const sellerShare = Number(snapshot.seller_percentage ?? 50);
       const teamPoolShare = Number(snapshot.team_pool_percentage ?? 50);
       return ok(res, {
-        plan_name: "MMR 10-Member Team Dynamic Commission Plan",
+        plan_name: "MMR Per-Gaz Fixed Commission Plan",
         is_active: Boolean(snapshot.is_active),
-        commission_model: snapshot.commission_model || "FlatTeam",
+        commission_model: "PerGazFixed",
+        seller_rate_per_gaz: commissionService.SELLER_RATE_PER_GAZ || 500,
+        upline_rate_per_gaz: commissionService.UPLINE_RATE_PER_GAZ || 50,
+        max_upline_participants: commissionService.MAX_UPLINE_PARTICIPANTS || 10,
         total_commission_percentage: totalRate,
         seller_percentage: sellerShare,
         team_pool_percentage: teamPoolShare,
@@ -16555,7 +16605,7 @@ app.get("/api/admin/commission-plan",
         version: snapshot.version,
         updated_at: snapshot.updated_at,
         updated_by: snapshot.updated_by || "Admin",
-        description: "When a plot is sold by any team member or associate, 10% total commission pool is generated. 50% of the pool goes directly to the seller. The remaining 50% is divided equally among all remaining team members plus the associate leader."
+        description: "Per-Gaz Fixed Commission Structure: Seller Team Member gets ₹500 per Gaz (DIRECT_SALE, Level 1). 1 Parent Associate + up to 9 Active Team Members (10 upline participants) each get ₹50 per Gaz (UPLINE_DISTRIBUTION, Level 2/3). Self-purchases and Company Direct sales yield 0% commission."
       });
     } catch (e) {
       return err(res, e.message);
@@ -16642,22 +16692,19 @@ app.post("/api/admin/commission-plan/preview",
     try {
       const {
         plot_amount = 1000000,
-        total_commission_percentage = 10,
-        seller_percentage = 50,
-        team_pool_percentage = 50,
-        participants_count = 0,
-        is_team_member_seller = false,
+        plot_size_gaj = 100,
+        plot_area = 100,
+        seller_rate_per_gaz = commissionService.SELLER_RATE_PER_GAZ || 500,
+        upline_rate_per_gaz = commissionService.UPLINE_RATE_PER_GAZ || 50,
+        participants_count = 10,
+        is_team_member_seller = true,
       } = req.body || {};
 
-      if (Math.round((Number(seller_percentage) + Number(teamPoolPercentage)) * 100) !== 10000) {
-        return err(res, "seller_percentage + team_pool_percentage must equal 100%", 400);
-      }
-
       const preview = commissionService.calculateCommissionDistribution({
+        plotSizeGaj: Number(plot_size_gaj || plot_area),
         baseAmount: Number(plot_amount),
-        totalPoolRate: Number(total_commission_percentage),
-        sellerPoolShare: Number(seller_percentage),
-        teamPoolShare: Number(team_pool_percentage),
+        sellerRatePerGaj: Number(seller_rate_per_gaz),
+        uplineRatePerGaj: Number(upline_rate_per_gaz),
         participantsCount: Number(participants_count),
         isTeamMemberSeller: Boolean(is_team_member_seller),
       });
