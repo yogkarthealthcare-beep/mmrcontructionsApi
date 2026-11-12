@@ -8997,19 +8997,35 @@ app.get(["/api/team-member/my-customers", "/api/team-member/customers"], verifyU
         COALESCE(c.registered_at, c.created_at) AS registered_at,
         c.created_at
       FROM users c
-      WHERE LOWER(c.user_type::text) IN ('customer', 'user')
+      WHERE COALESCE(NULLIF(LOWER(TRIM(c.user_type::text)), ''), 'customer') IN ('customer', 'user')
         AND (
           c.referred_by_user_id = ${callerId}
           OR c.sponsor_user_id = ${callerId}
           OR c.user_id IN (
-            SELECT b.user_id FROM bookings b 
-            WHERE b.sold_by_user_id = ${callerId} 
-               OR b.associate_user_id = ${callerId} 
-               OR b.sponsor_user_id = ${callerId}
+            SELECT rr.referred_user_id FROM referral_registrations rr
+            WHERE rr.sponsor_user_id = ${callerId} AND rr.referred_user_id IS NOT NULL
           )
           OR c.user_id IN (
-            SELECT sub.user_id FROM customer_enrollment_submissions sub 
-            WHERE sub.user_id IS NOT NULL
+            SELECT mc.descendant_user_id FROM mlm_tree_closure mc
+            WHERE mc.ancestor_user_id = ${callerId} AND mc.depth > 0 AND mc.descendant_user_id IS NOT NULL
+          )
+          OR c.user_id IN (
+            SELECT b.user_id FROM bookings b 
+            WHERE b.user_id IS NOT NULL
+              AND (b.sold_by_user_id = ${callerId} 
+               OR b.associate_user_id = ${callerId} 
+               OR b.sponsor_user_id = ${callerId})
+          )
+          OR EXISTS (
+            SELECT 1 FROM customer_enrollment_submissions sub
+            WHERE (
+              sub.user_id = c.user_id
+              OR (
+                sub.user_id IS NULL
+                AND NULLIF(RIGHT(regexp_replace(COALESCE(c.mobile_no, ''), '[^0-9]', '', 'g'), 10), '') IS NOT NULL
+                AND RIGHT(regexp_replace(COALESCE(c.mobile_no, ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(sub.mobile_1, ''), '[^0-9]', '', 'g'), 10)
+              )
+            )
               AND (
                 (${callerMemberId} <> '' AND LOWER(TRIM(COALESCE(sub.associate_id, ''))) = LOWER(${callerMemberId}))
                 OR (${tmUid} <> '' AND LOWER(TRIM(COALESCE(sub.associate_id, ''))) = LOWER(${tmUid}))

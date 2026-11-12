@@ -549,16 +549,18 @@ export async function createBooking({
     WHERE u.user_id = ${derivedBuyerUserId}
   `;
 
-  if (!buyer || !['active', 'approved'].includes(String(buyer.account_status || '').toLowerCase())) {
+  // NOTE: Document verification, KYC approval, and active/verified gates are enforced for Team Member & Associate,
+  // while Customer bookings (direct or on-behalf) remain bookable regardless of KYC or pending/inactive status.
+  const isCustomerBuyer = ['customer', 'user'].includes(String(buyer?.user_type || '').toLowerCase());
+  if (!buyer || String(buyer.account_status || '').toLowerCase() === 'deleted') {
+    throw createBookingError('Buyer account not found.', 404);
+  }
+  if (!isCustomerBuyer && !['active', 'approved'].includes(String(buyer.account_status || '').toLowerCase())) {
     throw createBookingError('Buyer account must be approved and active before booking.', 403);
   }
-  if (!buyer.is_verified && buyer.user_type !== 'Team Member') {
+  if (!isCustomerBuyer && !buyer.is_verified && buyer.user_type !== 'Team Member') {
     throw createBookingError('Buyer must verify their email or mobile before booking.', 403);
   }
-  // 4. Validate Buyer Compliance (Active, Email/Mobile verified)
-  // NOTE: Document verification & KYC approval are strictly required for Team Member and Associate,
-  // but are NOT mandatory for Customer plot bookings (direct or on-behalf).
-  const isCustomerBuyer = ['customer', 'user'].includes(String(buyer.user_type || '').toLowerCase());
   if (!isCustomerBuyer) {
     // For non-Customer (Team Member, Associate): Document approval remains strictly mandatory
     if (buyer.kyc_status !== 'Approved') {
