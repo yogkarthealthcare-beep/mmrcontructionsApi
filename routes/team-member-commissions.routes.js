@@ -66,7 +66,7 @@ router.get(['/team-member/commission-summary', '/api/team-member/commission-summ
       SELECT COALESCE(SUM(c.net_amount), 0)::numeric AS settled_commission
       FROM commission_transactions c
       WHERE c.associate_user_id = ${userId}
-        AND c.commission_status IN ('Approved', 'Paid')
+        AND c.commission_status::text IN ('Approved', 'Paid')
     `;
 
     // Pending Commission: Commission from attributed customer bookings where settlement_status is 'Pending'
@@ -88,7 +88,7 @@ router.get(['/team-member/commission-summary', '/api/team-member/commission-summ
         FROM commission_transactions cx 
         WHERE cx.related_booking_id = b.booking_id 
           AND cx.associate_user_id = ${userId} 
-          AND cx.commission_status NOT IN ('Cancelled', 'Reversed')
+          AND cx.commission_status::text NOT IN ('Cancelled', 'Reversed')
         LIMIT 1
       ) c ON TRUE
       WHERE (b.sold_by_user_id = ${userId} OR c.net_amount IS NOT NULL)
@@ -284,7 +284,7 @@ router.get(['/team-member/commissions', '/api/team-member/commissions'], verifyU
         FROM commission_transactions cx 
         WHERE cx.related_booking_id = b.booking_id 
           AND cx.associate_user_id = ${userId} 
-          AND cx.commission_status NOT IN ('Cancelled', 'Reversed')
+          AND cx.commission_status::text NOT IN ('Cancelled', 'Reversed')
         LIMIT 1
       ) c ON TRUE
       WHERE (b.sold_by_user_id = ${userId} OR c.net_amount IS NOT NULL)

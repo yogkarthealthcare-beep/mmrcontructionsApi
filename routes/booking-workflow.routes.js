@@ -77,23 +77,25 @@ async function compliance(userId) {
     WHERE u.user_id = ${userId}`;
   if (!row) return null;
   const isCustomer = ['customer', 'user'].includes(String(row.user_type || '').toLowerCase());
+  const isBlockedStatus = ['suspended', 'blocked', 'deleted', 'inactive', 'rejected'].includes(String(row.account_status || '').toLowerCase());
   return {
     ...row,
-    account_active: ["Active", "Approved"].includes(String(row.account_status)) && row.is_active !== false,
+    account_active: isCustomer ? (row.is_active !== false && !isBlockedStatus) : (["Active", "Approved"].includes(String(row.account_status)) && row.is_active !== false),
     kyc_approved: isCustomer ? true : row.kyc_status === "Approved",
-    can_book:
-      ["Active", "Approved"].includes(String(row.account_status)) &&
-      row.is_active !== false &&
-      row.email_verified === true &&
-      (isCustomer ? true : row.kyc_status === "Approved"),
+    can_book: isCustomer
+      ? (row.is_active !== false && !isBlockedStatus)
+      : (["Active", "Approved"].includes(String(row.account_status)) &&
+         row.is_active !== false &&
+         row.email_verified === true &&
+         row.kyc_status === "Approved"),
   };
 }
 
 function complianceFailure(result) {
+  const isCustomer = ['customer', 'user'].includes(String(result?.user_type || '').toLowerCase());
   if (!result?.account_active) return ["Your account must be active before booking a plot.", "ACCOUNT_INACTIVE"];
-  if (!result.email_verified) return ["Please verify your email address before booking a plot.", "EMAIL_NOT_VERIFIED"];
-  const isCustomer = ['customer', 'user'].includes(String(result.user_type || '').toLowerCase());
-  // Document verification is NOT mandatory for Customers:
+  if (!isCustomer && !result.email_verified) return ["Please verify your email address before booking a plot.", "EMAIL_NOT_VERIFIED"];
+  // Document verification / KYC / admin approval is NOT mandatory for Customers:
   if (!isCustomer && result.kyc_status !== "Approved") {
     return [
       "Your KYC documents are not approved yet. Please upload the required documents and wait for admin approval before booking any plot.",

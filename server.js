@@ -5171,7 +5171,8 @@ app.post("/api/auth/login", async (req, res) => {
       }
     }
 
-    if (!["Active", "Approved"].includes(String(user.account_status))) {
+    const isCustomerLogin = String(user.user_type || '').toLowerCase() === 'customer';
+    if (!["Active", "Approved"].includes(String(user.account_status)) && !(isCustomerLogin && user.account_status === "Pending")) {
       const message = user.account_status === "Pending"
         ? "Account pending admin approval"
         : "Account is not active. Contact support.";
@@ -5253,6 +5254,7 @@ app.post("/api/auth/login", async (req, res) => {
         invitation_code: user.invitation_code,
         email: user.email,
         account_status: user.account_status,
+        enrollment_status: isCustomerLogin ? 'completed' : undefined,
         email_verified: Boolean(user.email_verified || user.is_otp_verified)
       },
     }, "Login successful");
@@ -8592,7 +8594,7 @@ app.get("/api/associate/dashboard", verifyUserToken, requireAssociate, async (re
       SELECT COALESCE(SUM(net_amount), 0)::numeric AS total
       FROM commission_transactions
       WHERE (associate_user_id = ${userId} OR user_id = ${userId})
-        AND commission_status IN ('Paid', 'Approved', 'Processed', 'Pending')`;
+        AND commission_status::text IN ('Paid', 'Approved', 'Processed', 'Pending')`;
 
     const pendingComm = await sql`
       SELECT COALESCE(SUM(net_amount), 0)::numeric AS pending
@@ -8910,14 +8912,14 @@ app.get("/api/associate/commissions", verifyUserToken, requireSalesEntity, async
       LEFT JOIN plots    p ON b.plot_id = p.plot_id
       LEFT JOIN sites    s ON p.site_id = s.site_id
       WHERE c.associate_user_id = ${req.user.user_id}
-        AND (${statusFilter}::text IS NULL OR c.commission_status = ${statusFilter})
+        AND (${statusFilter}::text IS NULL OR c.commission_status::text = ${statusFilter})
       ORDER BY c.created_at DESC
       LIMIT ${limit} OFFSET ${offset}`;
 
     const [total] = await sql`
       SELECT COUNT(*) AS count FROM commission_transactions
       WHERE associate_user_id = ${req.user.user_id}
-        AND (${statusFilter}::text IS NULL OR commission_status = ${statusFilter})`;
+        AND (${statusFilter}::text IS NULL OR commission_status::text = ${statusFilter})`;
 
     return ok(res, { commissions, total: total.count, page: +page, limit: +limit });
   } catch (e) {
@@ -12036,7 +12038,11 @@ async function ensurePlotAllocationSchema() {
     await sql`ALTER TYPE notif_channel_enum ADD VALUE IF NOT EXISTS 'inapp'`.catch(() => { });
     await sql`ALTER TYPE emi_status_enum ADD VALUE IF NOT EXISTS 'PartiallyPaid'`.catch(() => { });
     await sql`ALTER TYPE emi_status_enum ADD VALUE IF NOT EXISTS 'ProofSubmitted'`.catch(() => { });
+    await sql`ALTER TYPE commission_status_enum ADD VALUE IF NOT EXISTS 'Reversed'`.catch(() => { });
+    await sql`ALTER TYPE commission_status_enum ADD VALUE IF NOT EXISTS 'Rejected'`.catch(() => { });
+    await sql`ALTER TYPE commission_status_enum ADD VALUE IF NOT EXISTS 'Processed'`.catch(() => { });
     await sql`ALTER TABLE emi_schedules ALTER COLUMN emi_status TYPE VARCHAR(50) USING emi_status::text`.catch(() => { });
+    await commissionService.ensureCommissionSchemaExtensions(sql).catch(() => { });
     await sql`ALTER TABLE payment_vouchers ADD COLUMN IF NOT EXISTS emi_id BIGINT`.catch(() => { });
     await sql`ALTER TABLE payment_vouchers ADD COLUMN IF NOT EXISTS booking_id BIGINT`.catch(() => { });
     await sql`ALTER TABLE payment_vouchers ADD COLUMN IF NOT EXISTS payment_ledger_id BIGINT`.catch(() => { });
@@ -15125,7 +15131,7 @@ app.get("/api/admin/commissions",
         LEFT JOIN bookings b ON b.booking_id = c.related_booking_id
         LEFT JOIN plots p ON p.plot_id = b.plot_id
         LEFT JOIN sites s ON s.site_id = p.site_id
-        WHERE (${String(status)} = '' OR c.commission_status = ${String(status)})
+        WHERE (${String(status)} = '' OR c.commission_status::text = ${String(status)})
           AND (${String(associate_id)} = '' OR c.associate_user_id = ${Number(associate_id) || 0})
           AND (${String(booking_id)} = '' OR c.related_booking_id = ${Number(booking_id) || 0})
           AND (${String(from)} = '' OR c.created_at::date >= ${String(from) || null}::date)
@@ -16369,6 +16375,7 @@ app.post("/api/admin/commissions/:id/reject",
     try {
       const reason = req.body?.reason || "Rejected by admin";
       await requireMlmSchema();
+      await commissionService.ensureCommissionSchemaExtensions(sql);
       const [commission] = await sql`
         UPDATE commission_transactions SET commission_status = 'Rejected', updated_at = NOW()
         WHERE commission_id = ${req.params.id}

@@ -217,6 +217,9 @@ router.post('/auth/register', async (req, res) => {
 
     const password_hash = await bcrypt.hash(password, 12);
 
+    const finalUserType = user_type || 'Customer';
+    const initialStatus = finalUserType === 'Customer' ? 'Active' : 'Pending';
+
     const [newUser] = await sql`
       INSERT INTO users (
         full_name, email, mobile_no, password_hash,
@@ -224,14 +227,17 @@ router.post('/auth/register', async (req, res) => {
         enrollment_status, is_verified
       ) VALUES (
         ${full_name.trim()}, ${email.toLowerCase()}, ${mobile_no || null},
-        ${password_hash}, ${user_type || 'Customer'}, TRUE, 'Pending',
-        '0', FALSE
+        ${password_hash}, ${finalUserType}, TRUE, ${initialStatus},
+        ${finalUserType === 'Customer' ? 'completed' : '0'}, ${finalUserType === 'Customer'}
       ) RETURNING id, full_name, email, user_type`;
 
     // Clean up OTP record
     await sql`DELETE FROM email_otps WHERE email = ${email.toLowerCase()}`;
 
-    res.status(201).json({ success: true, message: 'Registration successful! Admin approval ke baad login kar paenge।', user: newUser });
+    const regMsg = finalUserType === 'Customer'
+      ? 'Registration successful! You can log in and book plots directly.'
+      : 'Registration successful! Admin approval ke baad login kar paenge।';
+    res.status(201).json({ success: true, message: regMsg, user: newUser });
   } catch (e) {
     console.error('[register]', e);
     res.status(500).json({ success: false, message: 'Registration failed. Try again.' });
@@ -242,6 +248,7 @@ async function resolveEnrollmentStatus(u, userType) {
   try {
     const rawType = String(userType || u?.user_type || '').toLowerCase();
     if (rawType.includes('team member') || rawType === 'teammember') return 'completed';
+    if (rawType === 'customer' || rawType === 'user') return 'completed';
 
     const raw = String(u.enrollment_status || '').toLowerCase();
     if (raw === '0' || raw === 'not_enrolled') return '0';
@@ -405,10 +412,11 @@ router.post('/auth/login', async (req, res) => {
       return res.status(401).json({ success: false, message: 'Email ya password galat hai' });
     }
 
-    if (user.account_status === 'Pending')
+    const isCustomerUser = String(user.user_type || '').toLowerCase() === 'customer';
+    if (!isCustomerUser && user.account_status === 'Pending')
       return res.status(403).json({ success: false, message: 'Account abhi pending approval mein hai।', code: 'PENDING_APPROVAL' });
 
-    if (!['Active', 'Approved'].includes(String(user.account_status)))
+    if (!['Active', 'Approved'].includes(String(user.account_status)) && !(isCustomerUser && user.account_status === 'Pending'))
       return res.status(403).json({ success: false, message: 'Account inactive hai। Admin se contact karein।' });
 
     const cleanHash = extractValidHash(user.password_hash);

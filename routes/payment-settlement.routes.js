@@ -56,19 +56,6 @@ async function ensureSettlementSchema() {
           ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS payment_reference TEXT;
           ALTER TABLE commission_transactions ADD COLUMN IF NOT EXISTS notes TEXT;
 
-          DO $$
-          BEGIN
-            IF EXISTS (
-              SELECT 1 FROM information_schema.columns
-              WHERE table_name = 'commission_transactions'
-                AND column_name = 'commission_type'
-                AND data_type = 'USER-DEFINED'
-            ) THEN
-              ALTER TABLE commission_transactions
-                ALTER COLUMN commission_type TYPE VARCHAR(50) USING commission_type::text;
-            END IF;
-          END $$;
-
           CREATE TABLE IF NOT EXISTS plot_order_settlements (
             settlement_id SERIAL PRIMARY KEY,
             booking_id INT NOT NULL,
@@ -105,6 +92,7 @@ async function ensureSettlementSchema() {
               CHECK (source_type IN ('FullPayment','InitialPayment','EmiPayment','PartialPayment','Manual','BookingAdvance','MilestonePayment','OnlinePayment','OfflinePayment','PaymentSettlement'));
           END $$;
         `);
+        await commissionService.ensureCommissionSchemaExtensions(sql);
       } catch (e) {
         console.warn('[PaymentSettlement] Schema setup notice:', e.message);
       }
@@ -1254,7 +1242,7 @@ router.post(
                 END,
                 updated_at = NOW()
             WHERE related_booking_id = ${bookingId}
-              AND commission_status IN ('Pending', 'Approved')
+              AND commission_status::text IN ('Pending', 'Approved')
           `;
 
           // Credit recipients' user_wallets and create wallet_transactions ledger entries

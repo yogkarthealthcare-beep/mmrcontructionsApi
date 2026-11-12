@@ -161,21 +161,37 @@ export async function ensureCommissionSchemaExtensions(db = sql) {
     ADD COLUMN IF NOT EXISTS notes TEXT
   `.catch(() => {});
 
-  // Ensure commission_type supports 'DIRECT_SALE' and 'UPLINE_DISTRIBUTION' even on enum-backed legacy DBs
+  // Convert legacy enum-backed columns to VARCHAR(50) so all commission types/statuses (e.g. 'Reversed', 'Rejected', 'Processed', 'DIRECT_SALE', 'UPLINE_DISTRIBUTION') work without enum errors
   await db`
     DO $$
+    DECLARE
+      rec RECORD;
     BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'commission_transactions'
-          AND column_name = 'commission_type'
-          AND data_type = 'USER-DEFINED'
-      ) THEN
-        ALTER TABLE commission_transactions
-          ALTER COLUMN commission_type TYPE VARCHAR(50) USING commission_type::text;
-      END IF;
+      FOR rec IN
+        SELECT * FROM (VALUES
+          ('commission_type', NULL::text),
+          ('commission_status', 'Pending'::text)
+        ) AS t(col_name, def_val)
+      LOOP
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'commission_transactions'
+            AND column_name = rec.col_name
+            AND data_type = 'USER-DEFINED'
+        ) THEN
+          EXECUTE format('ALTER TABLE commission_transactions ALTER COLUMN %I DROP DEFAULT', rec.col_name);
+          EXECUTE format('ALTER TABLE commission_transactions ALTER COLUMN %I TYPE VARCHAR(50) USING %I::text', rec.col_name, rec.col_name);
+          IF rec.def_val IS NOT NULL THEN
+            EXECUTE format('ALTER TABLE commission_transactions ALTER COLUMN %I SET DEFAULT %L', rec.col_name, rec.def_val);
+          END IF;
+        END IF;
+      END LOOP;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE NOTICE '[Commission] Enum-to-VARCHAR migration notice: %', SQLERRM;
     END $$;
-  `.catch(() => {});
+  `.catch((e) => {
+    console.warn('[Commission] Schema column migration notice:', e.message);
+  });
 
   await db`
     CREATE UNIQUE INDEX IF NOT EXISTS uq_commission_events_booking_event_key
@@ -358,7 +374,7 @@ export async function generateCommissionForPayment({
       SELECT commission_id
       FROM commission_transactions
       WHERE related_booking_id = ${bId}
-        AND commission_status NOT IN ('Cancelled', 'Reversed')
+        AND commission_status::text NOT IN ('Cancelled', 'Reversed')
         AND (
           commission_type IN ('DIRECT_SALE', 'UPLINE_DISTRIBUTION')
           OR commission_model = 'PerGazFixed'
@@ -718,6 +734,8 @@ export async function reverseCommissionTransaction(db, { commissionId, adminId, 
   const cId = Number(commissionId);
   if (!cId) throw new Error("Invalid commission ID");
   if (!reason || !String(reason).trim()) throw new Error("Reversal reason is mandatory");
+
+  await ensureCommissionSchemaExtensions(client);
 
   const [orig] = await client`
     SELECT * FROM commission_transactions WHERE commission_id = ${cId}
