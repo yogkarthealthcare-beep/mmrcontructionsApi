@@ -9014,7 +9014,7 @@ app.get(["/api/team-member/my-customers", "/api/team-member/customers"], verifyU
             WHERE b.user_id IS NOT NULL
               AND (b.sold_by_user_id = ${callerId} 
                OR b.associate_user_id = ${callerId} 
-               OR b.sponsor_user_id = ${callerId})
+               OR b.booked_by_user_id = ${callerId})
           )
           OR EXISTS (
             SELECT 1 FROM customer_enrollment_submissions sub

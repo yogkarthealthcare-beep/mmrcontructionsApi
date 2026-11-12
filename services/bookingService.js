@@ -382,7 +382,7 @@ export async function createBooking({
           const [priorBookingMatch] = await runner`
             SELECT 1 FROM bookings b
             WHERE b.user_id = ${targetCusId}
-              AND (b.sold_by_user_id = ${dbActor.user_id} OR b.associate_user_id = ${dbActor.user_id} OR b.sponsor_user_id = ${dbActor.user_id})
+              AND (b.sold_by_user_id = ${dbActor.user_id} OR b.associate_user_id = ${dbActor.user_id} OR b.booked_by_user_id = ${dbActor.user_id})
             LIMIT 1
           `.catch(() => []);
           isAuthorizedCustomerForTm = Boolean(priorBookingMatch);

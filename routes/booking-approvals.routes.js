@@ -279,7 +279,7 @@ function buildDirectMemberCustomerScope(sql, memberUserId, associateIds = []) {
     OR c.user_id IN (
       SELECT b.user_id FROM bookings b
       WHERE b.user_id IS NOT NULL
-        AND (b.sold_by_user_id = ${memberUserId} OR b.associate_user_id = ${memberUserId} OR b.sponsor_user_id = ${memberUserId})
+        AND (b.sold_by_user_id = ${memberUserId} OR b.associate_user_id = ${memberUserId} OR b.booked_by_user_id = ${memberUserId})
     )
     ${uniqueIds.length
       ? sql`OR EXISTS (
@@ -304,10 +304,14 @@ function buildDirectMemberCustomerScope(sql, memberUserId, associateIds = []) {
  */
 router.get('/my-bookable-customers', verifyUserToken, async (req, res) => {
   try {
+    const actorUserId = Number(req.user?.user_id || req.user?.userId || req.user?.id || 0);
+    if (!actorUserId) {
+      return err(res, 'Access denied: Valid user token required.', 401);
+    }
     const [freshActor] = await sql`
       SELECT user_id, member_id, user_type, account_status
       FROM users
-      WHERE user_id = ${req.user.user_id}
+      WHERE user_id = ${actorUserId}
     `;
     if (!freshActor || !['active', 'approved'].includes(String(freshActor.account_status || '').toLowerCase())) {
       return err(res, 'Access denied: Active account required.', 403);
@@ -461,7 +465,7 @@ router.get('/my-bookable-customers', verifyUserToken, async (req, res) => {
                 JOIN team_members tm ON (
                   b.sold_by_user_id = tm.user_id
                   OR b.associate_user_id = tm.user_id
-                  OR b.sponsor_user_id = tm.user_id
+                  OR b.booked_by_user_id = tm.user_id
                 )
                 WHERE b.user_id IS NOT NULL
                   AND tm.associate_id = ${callerId}
