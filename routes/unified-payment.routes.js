@@ -356,13 +356,11 @@ async function findAccessibleBooking(db, identity, {
            COALESCE(b.plot_id, p.plot_id, 0) AS resolved_plot_id,
            COALESCE(b.plot_number, p.plot_number, 'Plot') AS plot_number,
            COALESCE(b.plot_area, p.plot_area, 0) AS plot_area,
-           COALESCE(p.area_unit, 'sq.ft') AS area_unit,
-           COALESCE(p.rate_per_sqft, 0) AS rate_per_sqft,
+           COALESCE(b.area_unit, p.area_unit, 'Gaj') AS area_unit,
            COALESCE(b.base_price, p.base_price, 0) AS base_price,
            COALESCE(p.plot_status, 'Booked') AS plot_status,
-           COALESCE(p.plc_charges, 0) AS plc_charges,
            COALESCE(s.site_name, s2.site_name, 'MMR Project') AS site_name,
-           COALESCE(s.location, s2.full_address, 'Uttar Pradesh, India') AS site_location
+           COALESCE(NULLIF(s.full_address, ''), NULLIF(s2.full_address, ''), NULLIF(CONCAT_WS(', ', NULLIF(s.city, ''), NULLIF(s.state, '')), ''), 'Uttar Pradesh, India') AS site_location
     FROM bookings b
     LEFT JOIN plots p ON p.plot_id = b.plot_id
     LEFT JOIN sites s ON s.site_id = p.site_id
@@ -638,7 +636,7 @@ router.get("/api/plots/:plotId/payment-dossier", userAuth, async (req, res) => {
     if (!booking) return fail(res, "No active plot booking found for your account", 404);
 
     const bookingId = booking.booking_id;
-    const totalPrice = Number(booking.base_price || (Number(booking.plot_area || 0) * Number(booking.rate_per_sqft || 0)) + Number(booking.plc_charges || 0));
+    const totalPrice = Number(booking.base_price || (Number(booking.advance_amount || 0) + Number(booking.remaining_balance || 0)) || 0);
 
     // 1. Payment Ledger Records
     const ledger = await sql`
