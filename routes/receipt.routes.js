@@ -1,6 +1,6 @@
 import express from "express";
 import sql from "../db.js";
-import { adminAuth, userAuth } from "../middleware/auth.middleware.js";
+import { adminAuth, userAuth, optionalAuth } from "../middleware/auth.middleware.js";
 import PDFDocument from "pdfkit";
 
 import commissionService from "../services/commissionService.js";
@@ -810,7 +810,7 @@ router.get("/admin/receipts/:id/print", adminAuth, async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 // 9. GET /api/admin/receipts/:id/pdf & /api/receipts/:id/pdf (Server-side PDFkit generation: A4 Landscape Dual-Copy)
 // ─────────────────────────────────────────────────────────────
-router.get(["/admin/receipts/:id/pdf", "/receipts/:id/pdf", "/customer/receipts/:id/pdf"], userAuth, async (req, res) => {
+router.get(["/admin/receipts/:id/pdf", "/receipts/:id/pdf", "/customer/receipts/:id/pdf"], optionalAuth, async (req, res) => {
   try {
     const idOrNo = req.params.id;
     const isNumeric = /^\d+$/.test(idOrNo);
@@ -839,7 +839,8 @@ router.get(["/admin/receipts/:id/pdf", "/receipts/:id/pdf", "/customer/receipts/
 
     const filename = `Receipt-${receipt.receipt_no.replace(/[\/\\]/g, "_")}.pdf`;
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    const disposition = req.query?.download === "true" ? "attachment" : "inline";
+    res.setHeader("Content-Disposition", `${disposition}; filename="${filename}"`);
 
     doc.pipe(res);
 

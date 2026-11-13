@@ -152,11 +152,9 @@ export const requireSalesEntity = (req, res, next) => {
 
 export const optionalAuth = (req, res, next) => {
   const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith("Bearer ")) {
-    req.user = null;
-    return next();
-  }
-  const token = auth.split(" ")[1];
+  const token = auth && auth.startsWith("Bearer ")
+    ? auth.split(" ")[1]
+    : (req.query?.token || null);
   if (!token) {
     req.user = null;
     return next();
