@@ -36,14 +36,12 @@ export function calculateInstallmentPlan({
   const priceInPaise = Math.round(principal * 100);
   const flatInterestInPaise = Math.round((priceInPaise * interestRate) / 100);
 
-  // 1. Minimum down payment based on plan percentage
-  const percentDpInPaise = Math.round((priceInPaise * dpRate) / 100);
-  // 2. Minimum fixed threshold (e.g. ₹30,000)
-  const minFixedDpInPaise = Math.round(Math.max(0, Number(minDownPaymentAmount || 0)) * 100);
-  // Stricter (higher) of the two is the minimum required down payment
-  const minRequiredDpInPaise = Math.max(percentDpInPaise, minFixedDpInPaise);
+  // Minimum fixed threshold for EMI down payment is ₹30,000 (3,000,000 paise)
+  const minFixedDpInPaise = Math.round(Math.max(30000, Number(minDownPaymentAmount || 30000)) * 100);
+  // System minimum required down payment is strictly ₹30,000 (or plot price if price < 30,000)
+  const minRequiredDpInPaise = Math.min(priceInPaise, minFixedDpInPaise);
 
-  // 3. If customer or staff paid more than minimum, take actual down payment so excess payment is not lost
+  // Take actual down payment provided by user as long as >= minRequiredDpInPaise
   const userActualDpInPaise = actualDownPayment !== undefined && actualDownPayment !== null && Number(actualDownPayment) > 0
     ? Math.round(Number(actualDownPayment) * 100)
     : minRequiredDpInPaise;

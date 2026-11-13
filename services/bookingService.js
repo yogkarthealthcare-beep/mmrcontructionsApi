@@ -741,7 +741,7 @@ export async function createBooking({
           minDownPaymentAmount: minEmiDownPayment,
         });
 
-        if (!isStaff && normalizedAdvance > 0 && normalizedAdvance < planSnapshot.minimum_required_down_payment) {
+        if (!isStaff && (normalizedAdvance <= 0 || normalizedAdvance < planSnapshot.minimum_required_down_payment)) {
           throw createBookingError(`Minimum down payment required for EMI is ₹${planSnapshot.minimum_required_down_payment.toLocaleString('en-IN')}. Received ₹${normalizedAdvance.toLocaleString('en-IN')}.`, 400);
         }
       }
