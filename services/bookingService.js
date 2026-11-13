@@ -641,7 +641,7 @@ export async function createBooking({
     const serialNumber = `MMR-${new Date().getFullYear()}-${String(seqRow?.n || 1).padStart(5, '0')}`;
 
     // 5f. Compute Pricing, Installment Plans & Balances
-    const minPlotPrice = Number(workflowSettings?.min_plot_price ?? 200000);
+    const minPlotPrice = Math.max(Number(workflowSettings?.min_plot_price ?? 200000), 300000);
     const minEmiDownPayment = Number(workflowSettings?.min_emi_down_payment ?? 30000);
     const partWiseCount = Number(workflowSettings?.part_wise_installments ?? 4);
     const partWiseFirstPct = Number(workflowSettings?.part_wise_first_percent ?? 25);
@@ -674,6 +674,28 @@ export async function createBooking({
       priceSetByUserId = null;
     } else {
       throw createBookingError(`Plot price is unconfigured. Please enter the agreed plot price to proceed.`, 400);
+    }
+
+    // Minimum 50 Gaj (450 Sq.Ft) and Minimum ₹6,000 / Gaj validation
+    const rawIncomingArea = Number(plotArea || plot_area || plot?.plot_area || 0);
+    const rawIncomingUnit = String(areaUnit || area_unit || plot?.area_unit || 'Gaj').toLowerCase();
+    const effectiveAreaInGaj = (rawIncomingUnit.includes('sqft') || rawIncomingUnit.includes('sq') || rawIncomingUnit.includes('square'))
+      ? (rawIncomingArea / 9)
+      : rawIncomingArea;
+
+    if (effectiveAreaInGaj > 0 && effectiveAreaInGaj < 49.99) {
+      throw createBookingError('Minimum booking area must be at least 50 Gaj (450 Sq.Ft). Bookings below 50 Gaj are not permitted.', 400);
+    }
+
+    if (effectiveAreaInGaj > 0) {
+      const effectiveRatePerGaj = agreedPrice / effectiveAreaInGaj;
+      if (effectiveRatePerGaj < 5999.5) {
+        throw createBookingError('Minimum plot rate must be at least ₹6,000 per Gaj (₹666.67 per Sq.Ft).', 400);
+      }
+    }
+
+    if (agreedPrice < 300000 && !isStaff) {
+      throw createBookingError('Total plot price must be at least ₹3,00,000 (Minimum 50 Gaj @ ₹6,000/Gaj).', 400);
     }
 
     if (agreedPrice < minPlotPrice && isStaff) {
