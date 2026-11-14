@@ -52,15 +52,16 @@ export default class PayUGateway extends BaseGateway {
     return this.sha512(sequence.join("|"));
   }
 
-  createResponseHash(fields) {
+  createResponseHash(fields, withAdditionalCharges = false) {
+    const addCharges = fields.additionalCharges || fields.additional_charges || "";
     const sequence = [
       this.salt,
       fields.status || "",
-      "",
-      "",
-      "",
-      "",
-      "",
+      fields.udf10 || "",
+      fields.udf9 || "",
+      fields.udf8 || "",
+      fields.udf7 || "",
+      fields.udf6 || "",
       fields.udf5 || "",
       fields.udf4 || "",
       fields.udf3 || "",
@@ -73,6 +74,9 @@ export default class PayUGateway extends BaseGateway {
       fields.txnid || "",
       this.key,
     ];
+    if (withAdditionalCharges && addCharges) {
+      return this.sha512(`${addCharges}|${sequence.join("|")}`);
+    }
     return this.sha512(sequence.join("|"));
   }
 
@@ -101,10 +105,10 @@ export default class PayUGateway extends BaseGateway {
       key: this.key,
       txnid,
       amount: this.formatAmount(amount),
-      productinfo: "MMR Constructions Payment",
-      firstname: customerDetails.name || "Customer",
-      email: customerDetails.email || "customer@example.com",
-      phone: customerDetails.phone || "9999999999",
+      productinfo: "InvestorDeposit",
+      firstname: (customerDetails.name || "Customer").replace(/[^a-zA-Z0-9 ]/g, "").trim().slice(0, 50) || "Customer",
+      email: (customerDetails.email || "customer@example.com").trim(),
+      phone: String(customerDetails.phone || "9999999999").replace(/\D/g, "").slice(-10) || "9999999999",
       surl: this.buildReturnUrl(callbackUrl, orderId, "success"),
       furl: this.buildReturnUrl(callbackUrl, orderId, "failure"),
       udf1: "",
@@ -134,8 +138,8 @@ export default class PayUGateway extends BaseGateway {
   async verifyPayment(orderId, queryParams, body) {
     this.assertConfigured();
 
-    const payload = { ...queryParams, ...body };
-    const txnid = payload.txnid || orderId;
+    const payload = { ...(queryParams || {}), ...(body || {}) };
+    const txnid = payload.txnid || payload.order_id || payload.orderId || orderId;
     const status = String(payload.status || "").toLowerCase();
     const receivedHash = String(payload.hash || "");
 
@@ -143,18 +147,24 @@ export default class PayUGateway extends BaseGateway {
       throw new Error("Missing PayU transaction ID or response hash.");
     }
 
-    const expectedHash = this.createResponseHash({
+    const formattedAmount = payload.amount ? this.formatAmount(payload.amount) : "";
+    const normalizedPayload = {
       ...payload,
       txnid,
-      amount: payload.amount ? this.formatAmount(payload.amount) : payload.amount,
-    });
+      amount: formattedAmount,
+    };
 
-    const receivedBuffer = Buffer.from(receivedHash, "hex");
-    const expectedBuffer = Buffer.from(expectedHash, "hex");
-    const isValid = receivedBuffer.length === expectedBuffer.length &&
-      crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
+    const expectedHashStandard = this.createResponseHash(normalizedPayload, false);
+    const expectedHashWithCharges = this.createResponseHash(normalizedPayload, true);
 
-    if (!isValid) {
+    const receivedBuffer = Buffer.from(receivedHash.toLowerCase(), "hex");
+    const stdBuffer = Buffer.from(expectedHashStandard.toLowerCase(), "hex");
+    const chargesBuffer = Buffer.from(expectedHashWithCharges.toLowerCase(), "hex");
+
+    const matchesStd = receivedBuffer.length === stdBuffer.length && crypto.timingSafeEqual(receivedBuffer, stdBuffer);
+    const matchesCharges = receivedBuffer.length === chargesBuffer.length && crypto.timingSafeEqual(receivedBuffer, chargesBuffer);
+
+    if (!matchesStd && !matchesCharges) {
       throw new Error("PayU payment verification failed: hash mismatch.");
     }
 

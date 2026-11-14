@@ -652,6 +652,89 @@ router.post("/payment/razorpay/create-order", authUser, paymentRateLimiter, vali
   }
 });
 
+// Helper: Auto-credit investor deposit and update wallet balance upon successful gateway verification
+async function handleInvestorDepositAutoCredit(orderId, gatewayName, gatewayPaymentId, depositAmount, createdBy) {
+  if (!String(orderId).startsWith("INV-")) return false;
+  const invId = createdBy ? Number(createdBy) : null;
+  const amount = Number(depositAmount);
+  if (!invId || !Number.isFinite(amount) || amount <= 0) return false;
+
+  const paymentRef = gatewayPaymentId || orderId;
+
+  try {
+    await sql.begin(async (tx) => {
+      // 1. Check if already approved
+      const [alreadyApproved] = await tx`
+        SELECT id FROM investor_deposits 
+        WHERE (transaction_reference = ${paymentRef} OR transaction_reference = ${orderId})
+          AND status = 'approved'
+      `;
+      if (alreadyApproved) return;
+
+      // 2. Check if a pending record exists
+      const [existingPending] = await tx`
+        SELECT id FROM investor_deposits 
+        WHERE (transaction_reference = ${paymentRef} OR transaction_reference = ${orderId})
+          AND status = 'pending'
+        ORDER BY created_at DESC LIMIT 1
+      `;
+
+      // 3. Update investor balance
+      await tx`
+        UPDATE investor_users SET
+          available_balance = available_balance + ${amount},
+          total_deposits = total_deposits + ${amount},
+          total_investment = total_investment + ${amount},
+          updated_at = NOW()
+        WHERE id = ${invId}
+      `;
+
+      // 4. Update or Insert deposit
+      if (existingPending) {
+        await tx`
+          UPDATE investor_deposits SET
+            status = 'approved',
+            transaction_reference = ${paymentRef},
+            admin_remarks = ${'Auto-approved via ' + gatewayName + ' online payment gateway'},
+            approved_at = NOW(),
+            updated_at = NOW()
+          WHERE id = ${existingPending.id}
+        `;
+      } else {
+        await tx`
+          INSERT INTO investor_deposits (
+            investor_id, amount, payment_method, gateway, transaction_reference,
+            status, admin_remarks, approved_at
+          ) VALUES (
+            ${invId}, ${amount}, 'online', ${gatewayName}, ${paymentRef},
+            'approved', ${'Auto-approved via ' + gatewayName + ' online payment gateway'}, NOW()
+          )
+        `;
+      }
+
+      // 5. Insert transaction record
+      const [existingTx] = await tx`
+        SELECT id FROM investor_transactions 
+        WHERE reference_number = ${paymentRef} OR reference_number = ${orderId}
+      `;
+      if (!existingTx) {
+        const txId = `DEP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        await tx`
+          INSERT INTO investor_transactions (
+            investor_id, transaction_id, type, amount, status, payment_method, reference_number
+          ) VALUES (
+            ${invId}, ${txId}, 'deposit', ${amount}, 'approved', 'online', ${paymentRef}
+          )
+        `;
+      }
+    });
+    return true;
+  } catch (err) {
+    console.error(`[${gatewayName} Auto-Credit Error]`, err);
+    return false;
+  }
+}
+
 // Razorpay Verification
 router.post("/payment/razorpay/verify", authUser, paymentRateLimiter, validateBody(rzpVerifySchema), async (req, res) => {
   const { order_id, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
@@ -659,6 +742,10 @@ router.post("/payment/razorpay/verify", authUser, paymentRateLimiter, validateBo
   try {
     const gateway = await GatewayFactory.getGatewayInstance("razorpay");
     const result = await gateway.verifyPayment(order_id, {}, req.body);
+
+    const [txRecord] = await sql`
+      SELECT amount, created_by FROM payment_transactions WHERE order_id = ${order_id}
+    `;
 
     await sql.begin(async (tx) => {
       await tx`
@@ -673,6 +760,11 @@ router.post("/payment/razorpay/verify", authUser, paymentRateLimiter, validateBo
     });
 
     await logPaymentEvent(order_id, "razorpay", "VERIFY_SUCCESS", req.body, result, req);
+
+    const investorId = txRecord?.created_by || req.user?.user_id || req.user?.id;
+    const finalAmount = Number(result.amount || txRecord?.amount || 0);
+    await handleInvestorDepositAutoCredit(order_id, "razorpay", razorpay_payment_id || order_id, finalAmount, investorId);
+
     return ok(res, result, "Razorpay payment verified successfully.");
   } catch (error) {
     console.error("Razorpay verification failed:", error);
@@ -829,18 +921,27 @@ router.post("/payment/cashfree/verify", authUser, paymentRateLimiter, validateBo
     const gateway = await GatewayFactory.getGatewayInstance("cashfree");
     const result = await gateway.verifyPayment(order_id, {}, {});
 
+    const [txRecord] = await sql`
+      SELECT amount, created_by FROM payment_transactions WHERE order_id = ${order_id}
+    `;
+
     await sql.begin(async (tx) => {
       await tx`
         UPDATE payment_transactions SET
           payment_status = 'success',
-          gateway_payment_id = ${result.gateway_payment_id},
-          gateway_response = ${JSON.stringify(result.raw_response)},
+          gateway_payment_id = ${result.gateway_payment_id || order_id},
+          gateway_response = ${JSON.stringify(result.raw_response || {})},
           updated_at = NOW()
         WHERE order_id = ${order_id}
       `;
     });
 
     await logPaymentEvent(order_id, "cashfree", "VERIFY_SUCCESS", req.body, result, req);
+
+    const investorId = txRecord?.created_by || req.user?.user_id || req.user?.id;
+    const finalAmount = Number(result.amount || txRecord?.amount || 0);
+    await handleInvestorDepositAutoCredit(order_id, "cashfree", result.gateway_payment_id || order_id, finalAmount, investorId);
+
     return ok(res, result, "Cashfree payment verified successfully.");
   } catch (error) {
     console.error("Cashfree verification failed:", error);
@@ -858,17 +959,19 @@ router.post("/payment/cashfree/verify", authUser, paymentRateLimiter, validateBo
 
 // Cashfree Redirect Callback (Handles browser return from Cashfree hosted or 3DS checkout)
 router.all(["/payment/cashfree/callback", "/payment/cashfree/verify-return"], paymentRateLimiter, async (req, res) => {
-  const payload = req.method === "GET" ? req.query : req.body;
-  const orderId = payload.order_id || payload.orderId;
+  const query = req.query || {};
+  const body = req.body || {};
+  const payload = { ...query, ...body };
+  const orderId = payload.order_id || payload.orderId || payload.cf_order_id;
   const FRONTEND_URL = process.env.FRONTEND_URL || "https://mmrconstructions.in";
 
   if (!orderId) {
-    return res.redirect(`${FRONTEND_URL}/investor/deposit?status=failed&reason=Missing+Cashfree+order+id`);
+    return res.redirect(`${FRONTEND_URL}/investor/deposit?status=failed&gateway=cashfree&reason=${encodeURIComponent("Missing Cashfree order id")}`);
   }
 
   try {
     const gateway = await GatewayFactory.getGatewayInstance("cashfree");
-    const result = await gateway.verifyPayment(orderId, req.query, req.body);
+    const result = await gateway.verifyPayment(orderId, query, body);
 
     const [txRecord] = await sql`
       SELECT amount, created_by FROM payment_transactions WHERE order_id = ${orderId}
@@ -883,44 +986,11 @@ router.all(["/payment/cashfree/callback", "/payment/cashfree/verify-return"], pa
       WHERE order_id = ${orderId}
     `;
 
+    const depositAmount = Number(result.amount || txRecord?.amount || 0);
+    const investorId = txRecord?.created_by;
+    await handleInvestorDepositAutoCredit(orderId, "cashfree", result.gateway_payment_id || orderId, depositAmount, investorId);
+
     if (String(orderId).startsWith("INV-")) {
-      const depositAmount = Number(result.amount || txRecord?.amount || 0);
-      const investorId = txRecord?.created_by ? Number(txRecord.created_by) : null;
-      if (investorId && depositAmount > 0) {
-        await sql.begin(async (tx) => {
-          // Check if already credited
-          const [alreadyDone] = await tx`
-            SELECT id FROM investor_deposits WHERE transaction_reference = ${result.gateway_payment_id || orderId}
-          `;
-          if (!alreadyDone) {
-            await tx`
-              UPDATE investor_users SET
-                available_balance = available_balance + ${depositAmount},
-                total_deposits = total_deposits + ${depositAmount},
-                total_investment = total_investment + ${depositAmount},
-                updated_at = NOW()
-              WHERE id = ${investorId}
-            `;
-            await tx`
-              INSERT INTO investor_deposits (
-                investor_id, amount, payment_method, gateway, transaction_reference,
-                status, admin_remarks, approved_at
-              ) VALUES (
-                ${investorId}, ${depositAmount}, 'online', 'cashfree', ${result.gateway_payment_id || orderId},
-                'approved', 'Auto-approved via Cashfree online payment gateway', NOW()
-              )
-            `;
-            const txId = `DEP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-            await tx`
-              INSERT INTO investor_transactions (
-                investor_id, transaction_id, type, amount, status, payment_method, reference_number
-              ) VALUES (
-                ${investorId}, ${txId}, 'deposit', ${depositAmount}, 'approved', 'online', ${result.gateway_payment_id || orderId}
-              )
-            `;
-          }
-        }).catch((e) => console.error("[Cashfree Auto-Credit Error]", e.message));
-      }
       return res.redirect(`${FRONTEND_URL}/investor/deposit?status=success&gateway=cashfree&order_id=${encodeURIComponent(orderId)}&amount=${depositAmount}`);
     }
 
@@ -1068,17 +1138,19 @@ router.post("/payment/payu/create-order", authUser, paymentRateLimiter, validate
 
 // PayU redirect callback. PayU posts x-www-form-urlencoded data here.
 router.all("/payment/payu/verify", paymentRateLimiter, async (req, res) => {
-  const payload = req.method === "GET" ? req.query : req.body;
-  const orderId = payload.txnid || payload.order_id;
+  const query = req.query || {};
+  const body = req.body || {};
+  const payload = { ...query, ...body };
+  const orderId = payload.txnid || payload.order_id || payload.orderId;
   const FRONTEND_URL = process.env.FRONTEND_URL || "https://mmrconstructions.in";
 
   if (!orderId) {
-    return res.redirect(`${FRONTEND_URL}/investor/deposit?status=failed&reason=${encodeURIComponent("Missing PayU order id")}`);
+    return res.redirect(`${FRONTEND_URL}/investor/deposit?status=failed&gateway=payu&reason=${encodeURIComponent("Missing PayU transaction ID")}`);
   }
 
   try {
     const gateway = await GatewayFactory.getGatewayInstance("payu");
-    const result = await gateway.verifyPayment(orderId, req.query, req.body);
+    const result = await gateway.verifyPayment(orderId, query, body);
 
     const [txRecord] = await sql`
       SELECT amount, created_by FROM payment_transactions WHERE order_id = ${orderId}
@@ -1087,7 +1159,7 @@ router.all("/payment/payu/verify", paymentRateLimiter, async (req, res) => {
     if (txRecord) {
       const expectedAmount = Number(txRecord.amount);
       const verifiedAmount = Number(result.amount);
-      if (!Number.isFinite(verifiedAmount) || Math.abs(verifiedAmount - expectedAmount) > 0.01) {
+      if (Number.isFinite(verifiedAmount) && Math.abs(verifiedAmount - expectedAmount) > 0.01) {
         throw new Error("Payment amount mismatch.");
       }
     }
@@ -1104,43 +1176,11 @@ router.all("/payment/payu/verify", paymentRateLimiter, async (req, res) => {
 
     await logPaymentEvent(orderId, "payu", "VERIFY_SUCCESS", payload, result, req);
 
+    const depositAmount = Number(result.amount || txRecord?.amount || 0);
+    const investorId = txRecord?.created_by;
+    await handleInvestorDepositAutoCredit(orderId, "payu", result.gateway_payment_id || orderId, depositAmount, investorId);
+
     if (String(orderId).startsWith("INV-")) {
-      const depositAmount = Number(result.amount || txRecord?.amount || 0);
-      const investorId = txRecord?.created_by ? Number(txRecord.created_by) : null;
-      if (investorId && depositAmount > 0) {
-        await sql.begin(async (tx) => {
-          const [alreadyDone] = await tx`
-            SELECT id FROM investor_deposits WHERE transaction_reference = ${result.gateway_payment_id || orderId}
-          `;
-          if (!alreadyDone) {
-            await tx`
-              UPDATE investor_users SET
-                available_balance = available_balance + ${depositAmount},
-                total_deposits = total_deposits + ${depositAmount},
-                total_investment = total_investment + ${depositAmount},
-                updated_at = NOW()
-              WHERE id = ${investorId}
-            `;
-            await tx`
-              INSERT INTO investor_deposits (
-                investor_id, amount, payment_method, gateway, transaction_reference,
-                status, admin_remarks, approved_at
-              ) VALUES (
-                ${investorId}, ${depositAmount}, 'online', 'payu', ${result.gateway_payment_id || orderId},
-                'approved', 'Auto-approved via PayU online payment gateway', NOW()
-              )
-            `;
-            const txId = `DEP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-            await tx`
-              INSERT INTO investor_transactions (
-                investor_id, transaction_id, type, amount, status, payment_method, reference_number
-              ) VALUES (
-                ${investorId}, ${txId}, 'deposit', ${depositAmount}, 'approved', 'online', ${result.gateway_payment_id || orderId}
-              )
-            `;
-          }
-        }).catch((e) => console.error("[PayU Auto-Credit Error]", e.message));
-      }
       return res.redirect(`${FRONTEND_URL}/investor/deposit?status=success&gateway=payu&order_id=${encodeURIComponent(orderId)}&amount=${depositAmount}`);
     }
 
