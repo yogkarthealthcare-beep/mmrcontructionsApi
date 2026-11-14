@@ -508,7 +508,7 @@ router.post("/payment/initiate", authUser, paymentRateLimiter, validateBody(init
       name: customer_name || "Customer",
       email: customer_email || "customer@example.com",
       phone: customer_mobile || "9999999999",
-      customer_id: req.user.user_id || order_id,
+      customer_id: String(req.user.user_id || req.user.id || order_id),
     };
 
     // Construct callback url
@@ -775,7 +775,7 @@ router.post("/payment/cashfree/create-order", authUser, paymentRateLimiter, vali
     }
 
     const gateway = await GatewayFactory.getGatewayInstance("cashfree");
-    const customer = { name: customer_name, email: customer_email, phone: customer_mobile, customer_id: req.user.user_id };
+    const customer = { name: customer_name, email: customer_email, phone: customer_mobile, customer_id: String(req.user.user_id || req.user.id || order_id) };
     const callback = gateway.config.callback_url || "";
     const result = await gateway.createOrder(order_id, amount, customer, callback);
 
@@ -942,7 +942,7 @@ router.post("/payment/payu/create-order", authUser, paymentRateLimiter, validate
     }
 
     const gateway = await GatewayFactory.getGatewayInstance("payu");
-    const customer = { name: customer_name, email: customer_email, phone: customer_mobile, customer_id: req.user.user_id };
+    const customer = { name: customer_name, email: customer_email, phone: customer_mobile, customer_id: String(req.user.user_id || req.user.id || order_id) };
     const callback = gateway.config.callback_url || `${req.protocol}://${req.get("host")}/api/payment/payu/verify`;
     const result = await gateway.createOrder(order_id, amount, customer, callback);
 

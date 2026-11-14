@@ -66,10 +66,10 @@ export default class CashfreeGateway extends BaseGateway {
       order_amount: Number(Number(amount).toFixed(2)),
       order_currency: "INR",
       customer_details: {
-        customer_id: customerDetails.customer_id || orderId,
-        customer_name: customerDetails.name || "Guest",
-        customer_email: customerDetails.email || "guest@example.com",
-        customer_phone: customerDetails.phone || "9999999999",
+        customer_id: String(customerDetails.customer_id || orderId),
+        customer_name: String(customerDetails.name || "Guest").trim(),
+        customer_email: String(customerDetails.email || "guest@example.com").trim(),
+        customer_phone: String(customerDetails.phone || "9999999999").replace(/\D/g, "").slice(-10) || "9999999999",
       },
       order_meta: {
         return_url: returnUrl,
