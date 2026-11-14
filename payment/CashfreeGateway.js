@@ -30,8 +30,10 @@ export default class CashfreeGateway extends BaseGateway {
   }
 
   resolveReturnUrl(callbackUrl, orderId) {
-    const configuredUrl = String(callbackUrl || "").trim();
-    if (!configuredUrl) return configuredUrl;
+    let configuredUrl = String(callbackUrl || "").trim();
+    if (!configuredUrl || configuredUrl.includes("/payment/callback") || configuredUrl.includes("/payment/cashfree/verify")) {
+      configuredUrl = "https://api.mmrconstructions.in/api/payment/cashfree/callback";
+    }
 
     if (configuredUrl.includes("{order_id}")) {
       return configuredUrl.replaceAll("{order_id}", encodeURIComponent(orderId));
@@ -39,12 +41,8 @@ export default class CashfreeGateway extends BaseGateway {
 
     try {
       const returnUrl = new URL(configuredUrl);
-      if (!returnUrl.searchParams.has("order_id")) {
-        returnUrl.searchParams.set("order_id", orderId);
-      }
-      if (!returnUrl.searchParams.has("gateway")) {
-        returnUrl.searchParams.set("gateway", "cashfree");
-      }
+      returnUrl.searchParams.set("order_id", orderId);
+      returnUrl.searchParams.set("gateway", "cashfree");
       return returnUrl.toString();
     } catch {
       const separator = configuredUrl.includes("?") ? "&" : "?";

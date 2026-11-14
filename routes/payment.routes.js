@@ -856,6 +856,84 @@ router.post("/payment/cashfree/verify", authUser, paymentRateLimiter, validateBo
   }
 });
 
+// Cashfree Redirect Callback (Handles browser return from Cashfree hosted or 3DS checkout)
+router.all(["/payment/cashfree/callback", "/payment/cashfree/verify-return"], paymentRateLimiter, async (req, res) => {
+  const payload = req.method === "GET" ? req.query : req.body;
+  const orderId = payload.order_id || payload.orderId;
+  const FRONTEND_URL = process.env.FRONTEND_URL || "https://mmrconstructions.in";
+
+  if (!orderId) {
+    return res.redirect(`${FRONTEND_URL}/investor/deposit?status=failed&reason=Missing+Cashfree+order+id`);
+  }
+
+  try {
+    const gateway = await GatewayFactory.getGatewayInstance("cashfree");
+    const result = await gateway.verifyPayment(orderId, req.query, req.body);
+
+    const [txRecord] = await sql`
+      SELECT amount, created_by FROM payment_transactions WHERE order_id = ${orderId}
+    `;
+
+    await sql`
+      UPDATE payment_transactions SET
+        payment_status = 'success',
+        gateway_payment_id = ${result.gateway_payment_id || orderId},
+        gateway_response = ${JSON.stringify(result.raw_response || {})},
+        updated_at = NOW()
+      WHERE order_id = ${orderId}
+    `;
+
+    if (String(orderId).startsWith("INV-")) {
+      const depositAmount = Number(result.amount || txRecord?.amount || 0);
+      const investorId = txRecord?.created_by ? Number(txRecord.created_by) : null;
+      if (investorId && depositAmount > 0) {
+        await sql.begin(async (tx) => {
+          // Check if already credited
+          const [alreadyDone] = await tx`
+            SELECT id FROM investor_deposits WHERE transaction_reference = ${result.gateway_payment_id || orderId}
+          `;
+          if (!alreadyDone) {
+            await tx`
+              UPDATE investor_users SET
+                available_balance = available_balance + ${depositAmount},
+                total_deposits = total_deposits + ${depositAmount},
+                total_investment = total_investment + ${depositAmount},
+                updated_at = NOW()
+              WHERE id = ${investorId}
+            `;
+            await tx`
+              INSERT INTO investor_deposits (
+                investor_id, amount, payment_method, gateway, transaction_reference,
+                status, admin_remarks, approved_at
+              ) VALUES (
+                ${investorId}, ${depositAmount}, 'online', 'cashfree', ${result.gateway_payment_id || orderId},
+                'approved', 'Auto-approved via Cashfree online payment gateway', NOW()
+              )
+            `;
+            const txId = `DEP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+            await tx`
+              INSERT INTO investor_transactions (
+                investor_id, transaction_id, type, amount, status, payment_method, reference_number
+              ) VALUES (
+                ${investorId}, ${txId}, 'deposit', ${depositAmount}, 'approved', 'online', ${result.gateway_payment_id || orderId}
+              )
+            `;
+          }
+        }).catch((e) => console.error("[Cashfree Auto-Credit Error]", e.message));
+      }
+      return res.redirect(`${FRONTEND_URL}/investor/deposit?status=success&gateway=cashfree&order_id=${encodeURIComponent(orderId)}&amount=${depositAmount}`);
+    }
+
+    return res.redirect(`${FRONTEND_URL}/payment-success?order_id=${encodeURIComponent(orderId)}`);
+  } catch (error) {
+    console.error("Cashfree callback verify error:", error);
+    if (String(orderId).startsWith("INV-")) {
+      return res.redirect(`${FRONTEND_URL}/investor/deposit?status=failed&gateway=cashfree&order_id=${encodeURIComponent(orderId)}&reason=${encodeURIComponent(error.message)}`);
+    }
+    return res.redirect(`${FRONTEND_URL}/payment-failed?order_id=${encodeURIComponent(orderId)}&reason=${encodeURIComponent(error.message)}`);
+  }
+});
+
 // Cashfree Webhook
 router.post("/payment/cashfree/webhook", async (req, res) => {
   const rawBody = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
@@ -992,10 +1070,10 @@ router.post("/payment/payu/create-order", authUser, paymentRateLimiter, validate
 router.all("/payment/payu/verify", paymentRateLimiter, async (req, res) => {
   const payload = req.method === "GET" ? req.query : req.body;
   const orderId = payload.txnid || payload.order_id;
-  const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:4200";
+  const FRONTEND_URL = process.env.FRONTEND_URL || "https://mmrconstructions.in";
 
   if (!orderId) {
-    return res.redirect(`${FRONTEND_URL}/payment-failed?reason=${encodeURIComponent("Missing PayU order id")}`);
+    return res.redirect(`${FRONTEND_URL}/investor/deposit?status=failed&reason=${encodeURIComponent("Missing PayU order id")}`);
   }
 
   try {
@@ -1003,7 +1081,7 @@ router.all("/payment/payu/verify", paymentRateLimiter, async (req, res) => {
     const result = await gateway.verifyPayment(orderId, req.query, req.body);
 
     const [txRecord] = await sql`
-      SELECT amount FROM payment_transactions WHERE order_id = ${orderId}
+      SELECT amount, created_by FROM payment_transactions WHERE order_id = ${orderId}
     `;
 
     if (txRecord) {
@@ -1025,6 +1103,47 @@ router.all("/payment/payu/verify", paymentRateLimiter, async (req, res) => {
     `;
 
     await logPaymentEvent(orderId, "payu", "VERIFY_SUCCESS", payload, result, req);
+
+    if (String(orderId).startsWith("INV-")) {
+      const depositAmount = Number(result.amount || txRecord?.amount || 0);
+      const investorId = txRecord?.created_by ? Number(txRecord.created_by) : null;
+      if (investorId && depositAmount > 0) {
+        await sql.begin(async (tx) => {
+          const [alreadyDone] = await tx`
+            SELECT id FROM investor_deposits WHERE transaction_reference = ${result.gateway_payment_id || orderId}
+          `;
+          if (!alreadyDone) {
+            await tx`
+              UPDATE investor_users SET
+                available_balance = available_balance + ${depositAmount},
+                total_deposits = total_deposits + ${depositAmount},
+                total_investment = total_investment + ${depositAmount},
+                updated_at = NOW()
+              WHERE id = ${investorId}
+            `;
+            await tx`
+              INSERT INTO investor_deposits (
+                investor_id, amount, payment_method, gateway, transaction_reference,
+                status, admin_remarks, approved_at
+              ) VALUES (
+                ${investorId}, ${depositAmount}, 'online', 'payu', ${result.gateway_payment_id || orderId},
+                'approved', 'Auto-approved via PayU online payment gateway', NOW()
+              )
+            `;
+            const txId = `DEP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+            await tx`
+              INSERT INTO investor_transactions (
+                investor_id, transaction_id, type, amount, status, payment_method, reference_number
+              ) VALUES (
+                ${investorId}, ${txId}, 'deposit', ${depositAmount}, 'approved', 'online', ${result.gateway_payment_id || orderId}
+              )
+            `;
+          }
+        }).catch((e) => console.error("[PayU Auto-Credit Error]", e.message));
+      }
+      return res.redirect(`${FRONTEND_URL}/investor/deposit?status=success&gateway=payu&order_id=${encodeURIComponent(orderId)}&amount=${depositAmount}`);
+    }
+
     return res.redirect(`${FRONTEND_URL}/payment-success?order_id=${encodeURIComponent(orderId)}`);
   } catch (error) {
     console.error("PayU verification failed:", error);
@@ -1037,6 +1156,10 @@ router.all("/payment/payu/verify", paymentRateLimiter, async (req, res) => {
       WHERE order_id = ${orderId}
     `.catch(() => {});
     await logPaymentEvent(orderId, "payu", "VERIFY_FAILURE", payload, { error: error.message }, req);
+
+    if (String(orderId).startsWith("INV-")) {
+      return res.redirect(`${FRONTEND_URL}/investor/deposit?status=failed&gateway=payu&order_id=${encodeURIComponent(orderId)}&reason=${encodeURIComponent(error.message)}`);
+    }
     return res.redirect(`${FRONTEND_URL}/payment-failed?order_id=${encodeURIComponent(orderId)}&reason=${encodeURIComponent(error.message)}`);
   }
 });
