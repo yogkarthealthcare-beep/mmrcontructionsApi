@@ -405,6 +405,11 @@ function authAdmin(req, res, next) {
 // GET /api/payment/gateways - Return active gateways
 router.get("/payment/gateways", async (req, res) => {
   try {
+    const bankSettings = await upiQrService.getCompanyBankSettings();
+    if (bankSettings && bankSettings.enable_payment_gateway === false) {
+      return ok(res, [], "Online payment gateways are disabled by administrator.");
+    }
+
     const activeConfigs = await sql`
       SELECT gateway_name, display_name, status, environment_mode, is_default, allow_user_selection,
              min_customer_fund_amount, min_associate_fund_amount
@@ -476,6 +481,11 @@ router.post("/payment/initiate", authUser, paymentRateLimiter, validateBody(init
   const { order_id, amount, gateway_name, customer_name, customer_email, customer_mobile } = req.body;
 
   try {
+    const bankSettings = await upiQrService.getCompanyBankSettings();
+    if (bankSettings && bankSettings.enable_payment_gateway === false) {
+      return res.status(403).json({ success: false, message: "Online payment gateway is disabled by administrator." });
+    }
+
     // Idempotency: check if transaction already exists for this order
     const [existing] = await sql`
       SELECT * FROM payment_transactions WHERE order_id = ${order_id}
