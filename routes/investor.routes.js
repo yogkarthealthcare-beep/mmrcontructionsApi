@@ -13,6 +13,7 @@ import { triggerWithdrawalRequestEmailsAsync, triggerWithdrawalStatusEmailsAsync
 import { triggerInvestorStatusEmailAsync, triggerInvestorDepositRequestEmailAsync, triggerInvestorDepositStatusEmailAsync } from "../services/phase2NotificationEmail.service.js";
 import { normalizeHumanName, isValidHumanName, calculateAge, isValidState } from "../utils/validationHelper.js";
 import twoFactorService from "../services/twoFactor.service.js";
+import GatewayFactory from "../payment/GatewayFactory.js";
 
 const router = express.Router();
 const upload = multer({
@@ -1371,6 +1372,194 @@ router.post("/investor/deposit", authInvestor, upload.single("payment_screenshot
   } catch (e) {
     console.error("Deposit Error:", e);
     return err(res, "Failed to submit deposit request: " + e.message);
+  }
+});
+
+// POST /api/investor/deposit/initiate-online - Create online payment order (Razorpay / PayU)
+router.post("/investor/deposit/initiate-online", authInvestor, async (req, res) => {
+  try {
+    const { amount, gateway_name } = req.body;
+    const numAmount = Number(amount);
+    if (isNaN(numAmount) || numAmount <= 0) {
+      return err(res, "Please enter a valid deposit amount greater than zero.", 400);
+    }
+
+    const investorId = req.investor.id;
+    const [investor] = await sql`
+      SELECT id, full_name, email, mobile_number FROM investor_users WHERE id = ${investorId}
+    `;
+    if (!investor) {
+      return err(res, "Investor account not found.", 404);
+    }
+
+    const order_id = `INV-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+    const selectedGateway = gateway_name || "razorpay";
+    const gatewayInstance = await GatewayFactory.resolveGateway(selectedGateway);
+    const resolvedGatewayName = gatewayInstance.config.gateway_name;
+
+    const customerDetails = {
+      name: investor.full_name || "Investor",
+      email: investor.email || "investor@example.com",
+      phone: investor.mobile_number || "9999999999",
+      customer_id: investorId.toString(),
+    };
+
+    const callbackUrl = gatewayInstance.config.callback_url || `${req.protocol}://${req.get("host")}/api/investor/deposit/verify-callback`;
+    const r = await gatewayInstance.createOrder(order_id, numAmount, customerDetails, callbackUrl);
+
+    // Save pending transaction into payment_transactions for audit & verification
+    try {
+      await sql`
+        INSERT INTO payment_transactions (
+          order_id, gateway_name, amount, customer_name, customer_email, customer_mobile,
+          payment_status, gateway_order_id, gateway_response, created_by
+        ) VALUES (
+          ${order_id}, ${resolvedGatewayName}, ${numAmount}, ${customerDetails.name},
+          ${customerDetails.email}, ${customerDetails.phone}, 'pending',
+          ${r.gateway_order_id}, ${JSON.stringify(r)}, ${investorId ? String(investorId) : null}
+        )
+        ON CONFLICT (order_id) DO UPDATE SET
+          gateway_order_id = EXCLUDED.gateway_order_id,
+          gateway_response = EXCLUDED.gateway_response,
+          updated_at = NOW()
+      `;
+    } catch (err) {
+      if (err.message && err.message.includes('uuid')) {
+        await sql`
+          INSERT INTO payment_transactions (
+            order_id, gateway_name, amount, customer_name, customer_email, customer_mobile,
+            payment_status, gateway_order_id, gateway_response, created_by
+          ) VALUES (
+            ${order_id}, ${resolvedGatewayName}, ${numAmount}, ${customerDetails.name},
+            ${customerDetails.email}, ${customerDetails.phone}, 'pending',
+            ${r.gateway_order_id}, ${JSON.stringify(r)}, NULL
+          )
+          ON CONFLICT (order_id) DO UPDATE SET
+            gateway_order_id = EXCLUDED.gateway_order_id,
+            gateway_response = EXCLUDED.gateway_response,
+            updated_at = NOW()
+        `;
+      } else {
+        throw err;
+      }
+    }
+
+    return ok(res, {
+      order_id,
+      gateway_name: resolvedGatewayName,
+      gateway_order_id: r.gateway_order_id,
+      checkout_details: r.checkout_details || r,
+    }, "Online deposit order created successfully.");
+  } catch (e) {
+    console.error("[POST /api/investor/deposit/initiate-online Error]", e);
+    return err(res, e.message || "Failed to initiate online deposit.");
+  }
+});
+
+// POST /api/investor/deposit/verify-online - Verify payment signature and instantly credit investor wallet
+router.post("/investor/deposit/verify-online", authInvestor, async (req, res) => {
+  const { order_id, gateway_name, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+  const investorId = req.investor.id;
+
+  try {
+    const [txRecord] = await sql`
+      SELECT * FROM payment_transactions WHERE order_id = ${order_id}
+    `;
+    if (!txRecord) {
+      return err(res, "Payment transaction record not found.", 404);
+    }
+
+    if (txRecord.payment_status === "success") {
+      const [user] = await sql`SELECT available_balance FROM investor_users WHERE id = ${investorId}`;
+      return ok(res, { balance: user?.available_balance }, "Payment already verified and credited.");
+    }
+
+    const gateway = await GatewayFactory.getGatewayInstance(gateway_name || txRecord.gateway_name || "razorpay");
+    const verificationResult = await gateway.verifyPayment(order_id, {}, req.body);
+
+    if (verificationResult.status === "success") {
+      const depositAmount = Number(txRecord.amount);
+      const paymentRef = verificationResult.gateway_payment_id || razorpay_payment_id || order_id;
+
+      let updatedInvestor;
+      let newDeposit;
+      await sql.begin(async (tx) => {
+        // Lock and update investor balance
+        [updatedInvestor] = await tx`
+          UPDATE investor_users SET
+            available_balance = available_balance + ${depositAmount},
+            total_deposits = total_deposits + ${depositAmount},
+            total_investment = total_investment + ${depositAmount},
+            updated_at = NOW()
+          WHERE id = ${investorId}
+          RETURNING *
+        `;
+
+        // Insert into investor_deposits with status 'approved'
+        [newDeposit] = await tx`
+          INSERT INTO investor_deposits (
+            investor_id, amount, payment_method, gateway, transaction_reference,
+            status, admin_remarks, approved_at
+          ) VALUES (
+            ${investorId}, ${depositAmount}, 'online', ${gateway_name || 'razorpay'}, ${paymentRef},
+            'approved', 'Auto-approved via online payment gateway', NOW()
+          ) RETURNING *
+        `;
+
+        // Insert into investor_transactions with status 'approved'
+        const txId = `DEP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        await tx`
+          INSERT INTO investor_transactions (
+            investor_id, transaction_id, type, amount, status, payment_method, reference_number
+          ) VALUES (
+            ${investorId}, ${txId}, 'deposit', ${depositAmount}, 'approved', 'online', ${paymentRef}
+          )
+        `;
+
+        // Update payment_transactions
+        await tx`
+          UPDATE payment_transactions SET
+            payment_status = 'success',
+            gateway_payment_id = ${paymentRef},
+            gateway_signature = ${razorpay_signature || null},
+            gateway_response = ${JSON.stringify(verificationResult.raw_response || verificationResult)},
+            updated_at = NOW()
+          WHERE order_id = ${order_id}
+        `;
+
+        await notifyInvestor(investorId, "Deposit Successful", `Your deposit of ₹${depositAmount.toFixed(2)} via ${gateway_name || 'Razorpay'} was successful and credited instantly.`, "success", tx);
+      });
+
+      // Email dispatch
+      try {
+        triggerInvestorDepositStatusEmailAsync(newDeposit.id, "approved", {
+          investor_id: investorId,
+          investorName: req.investor?.full_name,
+          email: req.investor?.email,
+          amount: depositAmount,
+          remarks: "Online payment verified successfully."
+        });
+      } catch (_) {}
+
+      return ok(res, {
+        deposit_id: newDeposit.id,
+        amount: depositAmount,
+        available_balance: updatedInvestor?.available_balance,
+        transaction_reference: paymentRef
+      }, "Payment verified and wallet balance updated successfully!");
+    } else {
+      await sql`
+        UPDATE payment_transactions SET
+          payment_status = 'failed',
+          failure_reason = ${verificationResult.message || 'Signature verification failed'},
+          updated_at = NOW()
+        WHERE order_id = ${order_id}
+      `;
+      return err(res, verificationResult.message || "Payment signature verification failed.", 400);
+    }
+  } catch (e) {
+    console.error("[POST /api/investor/deposit/verify-online Error]", e);
+    return err(res, e.message || "Failed to verify online deposit payment.", 500);
   }
 });
 

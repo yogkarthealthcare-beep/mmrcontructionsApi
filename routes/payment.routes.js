@@ -13,6 +13,16 @@ const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } });
 
 const router = express.Router();
 
+// Auto-adjust payment_transactions and audit log columns so integer user/investor IDs never fail UUID checks
+(async () => {
+  try {
+    await sql`ALTER TABLE payment_transactions ALTER COLUMN created_by TYPE VARCHAR(64) USING created_by::text;`;
+  } catch (_) {}
+  try {
+    await sql`ALTER TABLE payment_gateway_audit_logs ALTER COLUMN admin_id TYPE VARCHAR(64) USING admin_id::text;`;
+  } catch (_) {}
+})();
+
 // ─── HELPERS ──────────────────────────────────────────────────
 const ok = (res, data, msg = "Success", status = 200) =>
   res.status(status).json({ success: true, message: msg, data });
@@ -514,16 +524,34 @@ router.post("/payment/initiate", authUser, paymentRateLimiter, validateBody(init
         await tx`DELETE FROM payment_transactions WHERE id = ${existing.id}`;
       }
 
-      [newTx] = await tx`
-        INSERT INTO payment_transactions (
-          order_id, gateway_name, amount, customer_name, customer_email, customer_mobile, 
-          payment_status, gateway_order_id, gateway_response, created_by
-        ) VALUES (
-          ${order_id}, ${selectedGatewayName}, ${amount}, ${customerDetails.name}, 
-          ${customerDetails.email}, ${customerDetails.phone}, 'pending', 
-          ${r.gateway_order_id}, ${JSON.stringify(r)}, ${req.user.user_id || null}
-        ) RETURNING *
-      `;
+      const createdByVal = (req.user?.user_id || req.user?.id) ? String(req.user.user_id || req.user.id) : null;
+      try {
+        [newTx] = await tx`
+          INSERT INTO payment_transactions (
+            order_id, gateway_name, amount, customer_name, customer_email, customer_mobile, 
+            payment_status, gateway_order_id, gateway_response, created_by
+          ) VALUES (
+            ${order_id}, ${selectedGatewayName}, ${amount}, ${customerDetails.name}, 
+            ${customerDetails.email}, ${customerDetails.phone}, 'pending', 
+            ${r.gateway_order_id}, ${JSON.stringify(r)}, ${createdByVal}
+          ) RETURNING *
+        `;
+      } catch (insertErr) {
+        if (insertErr.message && insertErr.message.includes('uuid')) {
+          [newTx] = await tx`
+            INSERT INTO payment_transactions (
+              order_id, gateway_name, amount, customer_name, customer_email, customer_mobile, 
+              payment_status, gateway_order_id, gateway_response, created_by
+            ) VALUES (
+              ${order_id}, ${selectedGatewayName}, ${amount}, ${customerDetails.name}, 
+              ${customerDetails.email}, ${customerDetails.phone}, 'pending', 
+              ${r.gateway_order_id}, ${JSON.stringify(r)}, NULL
+            ) RETURNING *
+          `;
+        } else {
+          throw insertErr;
+        }
+      }
     });
 
     await logPaymentEvent(order_id, selectedGatewayName, "INITIATE_SUCCESS", req.body, r, req);
@@ -582,19 +610,40 @@ router.post("/payment/razorpay/create-order", authUser, paymentRateLimiter, vali
     const callback = gateway.config.callback_url || "";
     const result = await gateway.createOrder(order_id, amount, customer, callback);
 
-    await sql`
-      INSERT INTO payment_transactions (
-        order_id, gateway_name, amount, customer_name, customer_email, customer_mobile, 
-        payment_status, gateway_order_id, gateway_response, created_by
-      ) VALUES (
-        ${order_id}, 'razorpay', ${amount}, ${customer_name || null}, 
-        ${customer_email || null}, ${customer_mobile || null}, 'pending', 
-        ${result.gateway_order_id}, ${JSON.stringify(result)}, ${req.user.user_id || null}
-      ) ON CONFLICT (order_id) DO UPDATE SET 
-        gateway_order_id = EXCLUDED.gateway_order_id,
-        gateway_response = EXCLUDED.gateway_response,
-        updated_at = NOW()
-    `;
+    const rzpCreatedBy = (req.user?.user_id || req.user?.id) ? String(req.user.user_id || req.user.id) : null;
+    try {
+      await sql`
+        INSERT INTO payment_transactions (
+          order_id, gateway_name, amount, customer_name, customer_email, customer_mobile, 
+          payment_status, gateway_order_id, gateway_response, created_by
+        ) VALUES (
+          ${order_id}, 'razorpay', ${amount}, ${customer_name || null}, 
+          ${customer_email || null}, ${customer_mobile || null}, 'pending', 
+          ${result.gateway_order_id}, ${JSON.stringify(result)}, ${rzpCreatedBy}
+        ) ON CONFLICT (order_id) DO UPDATE SET 
+          gateway_order_id = EXCLUDED.gateway_order_id,
+          gateway_response = EXCLUDED.gateway_response,
+          updated_at = NOW()
+      `;
+    } catch (insertErr) {
+      if (insertErr.message && insertErr.message.includes('uuid')) {
+        await sql`
+          INSERT INTO payment_transactions (
+            order_id, gateway_name, amount, customer_name, customer_email, customer_mobile, 
+            payment_status, gateway_order_id, gateway_response, created_by
+          ) VALUES (
+            ${order_id}, 'razorpay', ${amount}, ${customer_name || null}, 
+            ${customer_email || null}, ${customer_mobile || null}, 'pending', 
+            ${result.gateway_order_id}, ${JSON.stringify(result)}, NULL
+          ) ON CONFLICT (order_id) DO UPDATE SET 
+            gateway_order_id = EXCLUDED.gateway_order_id,
+            gateway_response = EXCLUDED.gateway_response,
+            updated_at = NOW()
+        `;
+      } else {
+        throw insertErr;
+      }
+    }
 
     return ok(res, result, "Razorpay order created.");
   } catch (e) {
@@ -730,19 +779,40 @@ router.post("/payment/cashfree/create-order", authUser, paymentRateLimiter, vali
     const callback = gateway.config.callback_url || "";
     const result = await gateway.createOrder(order_id, amount, customer, callback);
 
-    await sql`
-      INSERT INTO payment_transactions (
-        order_id, gateway_name, amount, customer_name, customer_email, customer_mobile, 
-        payment_status, gateway_order_id, gateway_response, created_by
-      ) VALUES (
-        ${order_id}, 'cashfree', ${amount}, ${customer_name || null}, 
-        ${customer_email || null}, ${customer_mobile || null}, 'pending', 
-        ${result.gateway_order_id}, ${JSON.stringify(result)}, ${req.user.user_id || null}
-      ) ON CONFLICT (order_id) DO UPDATE SET 
-        gateway_order_id = EXCLUDED.gateway_order_id,
-        gateway_response = EXCLUDED.gateway_response,
-        updated_at = NOW()
-    `;
+    const cfCreatedBy = (req.user?.user_id || req.user?.id) ? String(req.user.user_id || req.user.id) : null;
+    try {
+      await sql`
+        INSERT INTO payment_transactions (
+          order_id, gateway_name, amount, customer_name, customer_email, customer_mobile, 
+          payment_status, gateway_order_id, gateway_response, created_by
+        ) VALUES (
+          ${order_id}, 'cashfree', ${amount}, ${customer_name || null}, 
+          ${customer_email || null}, ${customer_mobile || null}, 'pending', 
+          ${result.gateway_order_id}, ${JSON.stringify(result)}, ${cfCreatedBy}
+        ) ON CONFLICT (order_id) DO UPDATE SET 
+          gateway_order_id = EXCLUDED.gateway_order_id,
+          gateway_response = EXCLUDED.gateway_response,
+          updated_at = NOW()
+      `;
+    } catch (insertErr) {
+      if (insertErr.message && insertErr.message.includes('uuid')) {
+        await sql`
+          INSERT INTO payment_transactions (
+            order_id, gateway_name, amount, customer_name, customer_email, customer_mobile, 
+            payment_status, gateway_order_id, gateway_response, created_by
+          ) VALUES (
+            ${order_id}, 'cashfree', ${amount}, ${customer_name || null}, 
+            ${customer_email || null}, ${customer_mobile || null}, 'pending', 
+            ${result.gateway_order_id}, ${JSON.stringify(result)}, NULL
+          ) ON CONFLICT (order_id) DO UPDATE SET 
+            gateway_order_id = EXCLUDED.gateway_order_id,
+            gateway_response = EXCLUDED.gateway_response,
+            updated_at = NOW()
+        `;
+      } else {
+        throw insertErr;
+      }
+    }
 
     return ok(res, result, "Cashfree order session generated.");
   } catch (e) {
@@ -876,19 +946,40 @@ router.post("/payment/payu/create-order", authUser, paymentRateLimiter, validate
     const callback = gateway.config.callback_url || `${req.protocol}://${req.get("host")}/api/payment/payu/verify`;
     const result = await gateway.createOrder(order_id, amount, customer, callback);
 
-    await sql`
-      INSERT INTO payment_transactions (
-        order_id, gateway_name, amount, customer_name, customer_email, customer_mobile,
-        payment_status, gateway_order_id, gateway_response, created_by
-      ) VALUES (
-        ${order_id}, 'payu', ${amount}, ${customer_name || null},
-        ${customer_email || null}, ${customer_mobile || null}, 'pending',
-        ${result.gateway_order_id}, ${JSON.stringify(result)}, ${req.user.user_id || null}
-      ) ON CONFLICT (order_id) DO UPDATE SET
-        gateway_order_id = EXCLUDED.gateway_order_id,
-        gateway_response = EXCLUDED.gateway_response,
-        updated_at = NOW()
-    `;
+    const payuCreatedBy = (req.user?.user_id || req.user?.id) ? String(req.user.user_id || req.user.id) : null;
+    try {
+      await sql`
+        INSERT INTO payment_transactions (
+          order_id, gateway_name, amount, customer_name, customer_email, customer_mobile,
+          payment_status, gateway_order_id, gateway_response, created_by
+        ) VALUES (
+          ${order_id}, 'payu', ${amount}, ${customer_name || null},
+          ${customer_email || null}, ${customer_mobile || null}, 'pending',
+          ${result.gateway_order_id}, ${JSON.stringify(result)}, ${payuCreatedBy}
+        ) ON CONFLICT (order_id) DO UPDATE SET
+          gateway_order_id = EXCLUDED.gateway_order_id,
+          gateway_response = EXCLUDED.gateway_response,
+          updated_at = NOW()
+      `;
+    } catch (insertErr) {
+      if (insertErr.message && insertErr.message.includes('uuid')) {
+        await sql`
+          INSERT INTO payment_transactions (
+            order_id, gateway_name, amount, customer_name, customer_email, customer_mobile,
+            payment_status, gateway_order_id, gateway_response, created_by
+          ) VALUES (
+            ${order_id}, 'payu', ${amount}, ${customer_name || null},
+            ${customer_email || null}, ${customer_mobile || null}, 'pending',
+            ${result.gateway_order_id}, ${JSON.stringify(result)}, NULL
+          ) ON CONFLICT (order_id) DO UPDATE SET
+            gateway_order_id = EXCLUDED.gateway_order_id,
+            gateway_response = EXCLUDED.gateway_response,
+            updated_at = NOW()
+        `;
+      } else {
+        throw insertErr;
+      }
+    }
 
     return ok(res, result, "PayU payment form generated.");
   } catch (e) {

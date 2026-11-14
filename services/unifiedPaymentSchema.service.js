@@ -235,6 +235,20 @@ export async function ensureUnifiedPaymentSchema() {
       console.log("[UnifiedPaymentSchema] payment_vouchers column check:", e.message);
     }
 
+    // Ensure payment_transactions created_by is VARCHAR(64) instead of UUID so integer user/investor IDs can be stored
+    try {
+      await sql`ALTER TABLE payment_transactions ALTER COLUMN created_by TYPE VARCHAR(64) USING created_by::text;`;
+    } catch (e) {
+      console.log("[UnifiedPaymentSchema] payment_transactions created_by type check:", e.message);
+    }
+
+    // Ensure payment_gateway_audit_logs admin_id is VARCHAR(64) instead of UUID
+    try {
+      await sql`ALTER TABLE payment_gateway_audit_logs ALTER COLUMN admin_id TYPE VARCHAR(64) USING admin_id::text;`;
+    } catch (e) {
+      console.log("[UnifiedPaymentSchema] payment_gateway_audit_logs admin_id type check:", e.message);
+    }
+
     console.log("[UnifiedPaymentSchema] Schema verification completed successfully.");
     return true;
   } catch (err) {
