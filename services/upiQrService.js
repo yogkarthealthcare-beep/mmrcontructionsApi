@@ -44,10 +44,20 @@ export async function initUpiQrSchema() {
         enable_secondary_upi BOOLEAN DEFAULT TRUE,
         enable_bank_transfer BOOLEAN DEFAULT TRUE,
         enable_payment_gateway BOOLEAN DEFAULT TRUE,
+        enable_associate_add_fund BOOLEAN DEFAULT TRUE,
+        enable_customer_add_fund BOOLEAN DEFAULT TRUE,
+        enable_team_member_add_fund BOOLEAN DEFAULT TRUE,
+        enable_investor_add_fund BOOLEAN DEFAULT TRUE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `;
+
+    // Ensure columns exist on existing database
+    await sql`ALTER TABLE company_bank_settings ADD COLUMN IF NOT EXISTS enable_associate_add_fund BOOLEAN DEFAULT TRUE`;
+    await sql`ALTER TABLE company_bank_settings ADD COLUMN IF NOT EXISTS enable_customer_add_fund BOOLEAN DEFAULT TRUE`;
+    await sql`ALTER TABLE company_bank_settings ADD COLUMN IF NOT EXISTS enable_team_member_add_fund BOOLEAN DEFAULT TRUE`;
+    await sql`ALTER TABLE company_bank_settings ADD COLUMN IF NOT EXISTS enable_investor_add_fund BOOLEAN DEFAULT TRUE`;
 
     // Seed default bank settings if empty
     const existingBank = await sql`SELECT COUNT(*)::int as count FROM company_bank_settings`;
@@ -160,12 +170,22 @@ export async function getCompanyBankSettings() {
     SELECT 
       setting_key, account_name, bank_name, account_number, ifsc_code, branch_name,
       enable_primary_upi, enable_secondary_upi, enable_bank_transfer, enable_payment_gateway,
+      enable_associate_add_fund, enable_customer_add_fund, enable_team_member_add_fund, enable_investor_add_fund,
       updated_at
     FROM company_bank_settings
     WHERE setting_key = 'default_bank'
     LIMIT 1
   `;
-  if (rows.length > 0) return rows[0];
+  if (rows.length > 0) {
+    const r = rows[0];
+    return {
+      ...r,
+      enable_associate_add_fund: r.enable_associate_add_fund !== false,
+      enable_customer_add_fund: r.enable_customer_add_fund !== false,
+      enable_team_member_add_fund: r.enable_team_member_add_fund !== false,
+      enable_investor_add_fund: r.enable_investor_add_fund !== false
+    };
+  }
   return {
     setting_key: 'default_bank',
     account_name: 'MMR CONSTRUCTIONS PRIVATE LIMITED',
@@ -176,7 +196,11 @@ export async function getCompanyBankSettings() {
     enable_primary_upi: true,
     enable_secondary_upi: true,
     enable_bank_transfer: true,
-    enable_payment_gateway: true
+    enable_payment_gateway: true,
+    enable_associate_add_fund: true,
+    enable_customer_add_fund: true,
+    enable_team_member_add_fund: true,
+    enable_investor_add_fund: true
   };
 }
 
@@ -185,13 +209,16 @@ export async function getCompanyBankSettings() {
  */
 export async function saveCompanyBankSettings({
   account_name, bank_name, account_number, ifsc_code, branch_name,
-  enable_primary_upi, enable_secondary_upi, enable_bank_transfer, enable_payment_gateway
+  enable_primary_upi, enable_secondary_upi, enable_bank_transfer, enable_payment_gateway,
+  enable_associate_add_fund, enable_customer_add_fund, enable_team_member_add_fund, enable_investor_add_fund
 }) {
   await initUpiQrSchema();
   const [updated] = await sql`
     INSERT INTO company_bank_settings (
       setting_key, account_name, bank_name, account_number, ifsc_code, branch_name,
-      enable_primary_upi, enable_secondary_upi, enable_bank_transfer, enable_payment_gateway, updated_at
+      enable_primary_upi, enable_secondary_upi, enable_bank_transfer, enable_payment_gateway,
+      enable_associate_add_fund, enable_customer_add_fund, enable_team_member_add_fund, enable_investor_add_fund,
+      updated_at
     ) VALUES (
       'default_bank',
       ${account_name || 'MMR CONSTRUCTIONS PRIVATE LIMITED'},
@@ -203,6 +230,10 @@ export async function saveCompanyBankSettings({
       ${enable_secondary_upi !== undefined ? Boolean(enable_secondary_upi) : true},
       ${enable_bank_transfer !== undefined ? Boolean(enable_bank_transfer) : true},
       ${enable_payment_gateway !== undefined ? Boolean(enable_payment_gateway) : true},
+      ${enable_associate_add_fund !== undefined ? Boolean(enable_associate_add_fund) : true},
+      ${enable_customer_add_fund !== undefined ? Boolean(enable_customer_add_fund) : true},
+      ${enable_team_member_add_fund !== undefined ? Boolean(enable_team_member_add_fund) : true},
+      ${enable_investor_add_fund !== undefined ? Boolean(enable_investor_add_fund) : true},
       NOW()
     )
     ON CONFLICT (setting_key) DO UPDATE SET
@@ -215,6 +246,10 @@ export async function saveCompanyBankSettings({
       enable_secondary_upi = COALESCE(EXCLUDED.enable_secondary_upi, company_bank_settings.enable_secondary_upi),
       enable_bank_transfer = COALESCE(EXCLUDED.enable_bank_transfer, company_bank_settings.enable_bank_transfer),
       enable_payment_gateway = COALESCE(EXCLUDED.enable_payment_gateway, company_bank_settings.enable_payment_gateway),
+      enable_associate_add_fund = COALESCE(EXCLUDED.enable_associate_add_fund, company_bank_settings.enable_associate_add_fund),
+      enable_customer_add_fund = COALESCE(EXCLUDED.enable_customer_add_fund, company_bank_settings.enable_customer_add_fund),
+      enable_team_member_add_fund = COALESCE(EXCLUDED.enable_team_member_add_fund, company_bank_settings.enable_team_member_add_fund),
+      enable_investor_add_fund = COALESCE(EXCLUDED.enable_investor_add_fund, company_bank_settings.enable_investor_add_fund),
       updated_at = NOW()
     RETURNING *
   `;
